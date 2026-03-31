@@ -1,0 +1,53 @@
+version: 2
+
+project_name: magmux
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: magmux
+    main: .
+    binary: magmux
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.Version={{.Version}} -X main.Commit={{.ShortCommit}}
+
+archives:
+  - id: magmux
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+brews:
+  - name: magmux
+    repository:
+      owner: MadAppGang
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/MadAppGang/magmux
+    description: Minimal terminal multiplexer written in Go. Zero third-party dependencies.
+    license: MIT
+    install: |
+      bin.install "magmux"
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/magmux --version 2>&1", 1)

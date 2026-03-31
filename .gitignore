@@ -1,0 +1,4 @@
+magmux
+dist/
+*.log
+/tmp/
