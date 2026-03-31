@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unicode/utf8"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
@@ -1093,54 +1093,7 @@ func (p *Pane) reshapeChildren() {
 	}
 }
 
-// ── PTY helpers (golang.org/x/sys/unix) ───────────────────────────────────────
-
-func openPTY() (master *os.File, slave *os.File, err error) {
-	// Open /dev/ptmx to get a master PTY fd
-	master, err = os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open /dev/ptmx: %w", err)
-	}
-	fd := int(master.Fd())
-
-	// grantpt (macOS: TIOCPTYGRANT ioctl)
-	if err := unix.IoctlSetInt(fd, unix.TIOCPTYGRANT, 0); err != nil {
-		master.Close()
-		return nil, nil, fmt.Errorf("grantpt: %w", err)
-	}
-
-	// unlockpt (macOS: TIOCPTYUNLK ioctl)
-	if err := unix.IoctlSetInt(fd, unix.TIOCPTYUNLK, 0); err != nil {
-		master.Close()
-		return nil, nil, fmt.Errorf("unlockpt: %w", err)
-	}
-
-	// ptsname (macOS: TIOCPTYGNAME ioctl) — returns slave device path
-	var nameBuf [128]byte
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd),
-		uintptr(unix.TIOCPTYGNAME), uintptr(unsafe.Pointer(&nameBuf[0]))); errno != 0 {
-		master.Close()
-		return nil, nil, fmt.Errorf("ptsname: %w", errno)
-	}
-	slaveName := string(nameBuf[:clen(nameBuf[:])])
-
-	slave, err = os.OpenFile(slaveName, os.O_RDWR|syscall.O_NOCTTY, 0)
-	if err != nil {
-		master.Close()
-		return nil, nil, fmt.Errorf("open slave %s: %w", slaveName, err)
-	}
-
-	return master, slave, nil
-}
-
-func clen(b []byte) int {
-	for i, c := range b {
-		if c == 0 {
-			return i
-		}
-	}
-	return len(b)
-}
+// ── PTY helpers — see pty_darwin.go / pty_linux.go ────────────────────────────
 
 func setWinSize(f *os.File, rows, cols int) {
 	unix.IoctlSetWinsize(int(f.Fd()), unix.TIOCSWINSZ, &unix.Winsize{
@@ -2050,10 +2003,7 @@ func clamp(v, lo, hi int) int {
 }
 
 func sleepMs(ms int) {
-	var tv unix.Timeval
-	tv.Sec = int64(ms / 1000)
-	tv.Usec = int32((ms % 1000) * 1000)
-	unix.Select(0, nil, nil, nil, &tv)
+	time.Sleep(time.Duration(ms) * time.Millisecond)
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
