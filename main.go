@@ -370,7 +370,7 @@ func (vt *VTParser) handleChar(w rune) {
 
 	case stOSCString:
 		if w == 0x07 || w == '\\' { // BEL or ST
-			// OSC complete — ignore for POC
+			vt.handleOSC()
 			vt.state = stGround
 		} else if w >= 0x20 && vt.nosc < maxOSC {
 			vt.oscbuf[vt.nosc] = w
@@ -394,6 +394,37 @@ func (vt *VTParser) p0(i int) int {
 		return 0
 	}
 	return vt.args[i]
+}
+
+// handleOSC processes completed OSC sequences.
+// Detects notification sequences that signal "waiting for input":
+//   - OSC 9;...  — iTerm2-style notification
+//   - OSC 777;notify;... — rxvt-style notification
+//   - OSC 633;B  — VS Code shell integration "prompt started"
+func (vt *VTParser) handleOSC() {
+	if vt.nosc == 0 {
+		if dbgFile != nil {
+			fmt.Fprintf(dbgFile, "[OSC:end] empty OSC\n")
+		}
+		return
+	}
+	osc := string(vt.oscbuf[:vt.nosc])
+	p := vt.node
+
+	if dbgFile != nil {
+		fmt.Fprintf(dbgFile, "[OSC:end] %q\n", osc)
+	}
+
+	switch {
+	case strings.HasPrefix(osc, "9;"),
+		strings.HasPrefix(osc, "777;"),
+		osc == "633;B":
+		p.inputReady = true
+		p.inputSignal = "osc"
+		if dbgFile != nil {
+			fmt.Fprintf(dbgFile, "[OSC] notification: %q → inputReady=true\n", osc)
+		}
+	}
 }
 
 func (vt *VTParser) doControl(w rune) {
@@ -556,7 +587,25 @@ func (vt *VTParser) doCSI(w rune) {
 						vt.node.screen = vt.node.primaryScreen
 					}
 				case 2004: // Bracketed paste mode
+					wasPaste := vt.node.bracketPaste
 					vt.node.bracketPaste = set
+					if dbgFile != nil {
+						fmt.Fprintf(dbgFile, "[2004] set=%v wasPaste=%v pasteWasOff=%v inputReady=%v\n",
+							set, wasPaste, vt.node.pasteWasOff, vt.node.inputReady)
+					}
+					if !set {
+						// Paste turning OFF — agent is working
+						vt.node.pasteWasOff = true
+						vt.node.inputReady = false
+					} else if set && !wasPaste && vt.node.pasteWasOff {
+						// Paste turning back ON after being off — agent done, waiting for input
+						vt.node.inputReady = true
+						vt.node.inputSignal = "2004"
+					}
+					if dbgFile != nil {
+						fmt.Fprintf(dbgFile, "[2004] → inputReady=%v pasteWasOff=%v\n",
+							vt.node.inputReady, vt.node.pasteWasOff)
+					}
 				}
 			}
 		}
@@ -893,6 +942,8 @@ func (vt *VTParser) doPrint(w rune) {
 		}
 	}
 	p.lastChar = w
+	p.lastTextAt = time.Now()
+	p.hadTextOutput = true
 
 	cw := runeWidth(w)
 	if cw <= 0 {
@@ -986,6 +1037,17 @@ type Pane struct {
 	tint         string // "green", "red", "" — border/indicator color
 	overlayText  string // centered overlay text (e.g. "✓ DONE")
 	overlayStyle string // "success", "error", "info"
+	// Idle/completion detection
+	inputReady    bool      // TUI app is waiting for user input
+	inputSignal   string    // what triggered inputReady: "osc", "2004", "idle"
+	pasteWasOff   bool      // bracketed paste was disabled at least once (filters initial setup)
+	lastTextAt    time.Time // last time a printable character was output (for idle detection)
+	hadTextOutput bool      // true once any text has been printed (filters initial empty state)
+	// Agent status (set via IPC "agent" messages from coding tool hooks)
+	agentStatus  string // "", "working", "idle", "waiting_input", "waiting_permission", "compacting"
+	agentProject string // project name from hook
+	agentTool    string // last tool being used
+	agentPrompt  string // last user prompt
 }
 
 func newPane(y, x, h, w int, command string, args ...string) (*Pane, error) {
@@ -1050,6 +1112,17 @@ func (p *Pane) spawnPTY(command string, args ...string) error {
 
 func (p *Pane) writePTY(data []byte) {
 	if p.ptmx != nil {
+		// User input resets idle state — pane is no longer "done"
+		if p.inputReady {
+			p.inputReady = false
+			p.tint = ""
+			p.overlayText = ""
+			p.overlayStyle = ""
+			p.hadTextOutput = false // require new output before re-detecting idle
+			if dbgFile != nil {
+				fmt.Fprintf(dbgFile, "[input] user keystroke → inputReady reset\n")
+			}
+		}
 		p.ptmx.Write(data)
 	}
 }
@@ -1235,43 +1308,34 @@ func (r *Renderer) renderPane(p *Pane) {
 	p.mu.Lock()
 	s := p.screen
 	tint := p.tint
+	// Tint wash: blend a subtle color into the background of every cell
+	var tintBg Color
+	var hasTint bool
+	switch tint {
+	case "green":
+		tintBg = Color{R: 12, G: 24, B: 12, True: true} // subtle dark green wash
+		hasTint = true
+	case "red":
+		tintBg = Color{R: 24, G: 12, B: 12, True: true} // subtle dark red wash
+		hasTint = true
+	}
 	for row := 0; row < s.rows && row < p.h; row++ {
 		r.moveTo(p.y+row, p.x)
-		// Left-edge tint indicator
-		if tint == "green" || tint == "red" {
-			var tintColor Color
-			if tint == "green" {
-				tintColor = Color{Index: 2}
+		for col := 0; col < s.cols && col < p.w; col++ {
+			c := s.cells[row][col]
+			if c.Cont {
+				continue
+			}
+			bg := c.Bg
+			if hasTint && (bg.Index == -1 || (!bg.True && bg.Index == 0)) {
+				// Replace default/black background with tint wash
+				bg = tintBg
+			}
+			r.setAttr(c.Fg, bg, c.Attr)
+			if c.Ch == 0 || c.Ch == ' ' {
+				r.buf.WriteByte(' ')
 			} else {
-				tintColor = Color{Index: 1}
-			}
-			r.setAttr(tintColor, tintColor, 0)
-			r.buf.WriteByte(' ') // 1-char colored margin
-			// Render remaining cols starting at col 1
-			for col := 0; col < s.cols && col < p.w-1; col++ {
-				c := s.cells[row][col]
-				if c.Cont {
-					continue
-				}
-				r.setAttr(c.Fg, c.Bg, c.Attr)
-				if c.Ch == 0 || c.Ch == ' ' {
-					r.buf.WriteByte(' ')
-				} else {
-					r.buf.WriteRune(c.Ch)
-				}
-			}
-		} else {
-			for col := 0; col < s.cols && col < p.w; col++ {
-				c := s.cells[row][col]
-				if c.Cont {
-					continue
-				}
-				r.setAttr(c.Fg, c.Bg, c.Attr)
-				if c.Ch == 0 || c.Ch == ' ' {
-					r.buf.WriteByte(' ')
-				} else {
-					r.buf.WriteRune(c.Ch)
-				}
+				r.buf.WriteRune(c.Ch)
 			}
 		}
 	}
@@ -1497,11 +1561,14 @@ type Magmux struct {
 	renderer        Renderer
 	rawState        *term.State
 	quit            chan struct{}
+	quitOnce        sync.Once
 	wg              sync.WaitGroup
 	gridMode        bool   // -g flag was used
+	autoExit        bool   // -w flag: quit automatically when all panes done
 	statusFile      string // -S file path
 	statusFileMtime int64  // last observed mtime (unix nanos)
 	sockPath        string // /tmp/magmux-{pid}.sock
+	lastDoneCount   int    // track status bar updates to avoid redundant rewrites
 }
 
 func (m *Magmux) init() error {
@@ -1841,7 +1908,7 @@ func (m *Magmux) inputLoop() {
 				commandMode = false
 				switch b {
 				case 'q':
-					close(m.quit)
+					m.quitOnce.Do(func() { close(m.quit) })
 					return
 				case '\t', 'o':
 					m.focusNext()
@@ -1855,7 +1922,7 @@ func (m *Magmux) inputLoop() {
 			// Grid mode: when all panes are dead, Ctrl-C or 'q' exits
 			if m.gridMode && m.allPanesDead() {
 				if b == 0x03 || b == 'q' { // Ctrl-C or q
-					close(m.quit)
+					m.quitOnce.Do(func() { close(m.quit) })
 					return
 				}
 				inbuf = inbuf[1:]
@@ -2183,6 +2250,12 @@ type sockMsg struct {
 	Pane  any    `json:"pane,omitempty"` // int or "*"
 	Color string `json:"color,omitempty"`
 	Style string `json:"style,omitempty"`
+	// Agent hook event fields (type="agent")
+	Event            string `json:"event,omitempty"`             // hook event name
+	Tool             string `json:"tool,omitempty"`              // tool name from PreToolUse
+	Prompt           string `json:"prompt,omitempty"`            // from UserPromptSubmit
+	Project          string `json:"project,omitempty"`           // project name
+	NotificationType string `json:"notification_type,omitempty"` // idle_prompt, permission_prompt, etc.
 }
 
 func (m *Magmux) socketServer() {
@@ -2279,6 +2352,87 @@ func (m *Magmux) dispatchSocketMsg(msg sockMsg) {
 			p.dirty = true
 			p.mu.Unlock()
 		}
+
+	case "agent":
+		paneIdx := m.parsePaneIndex(msg.Pane)
+		if paneIdx < 0 || paneIdx >= len(m.allPanes) {
+			return
+		}
+		p := m.allPanes[paneIdx]
+		p.mu.Lock()
+
+		oldStatus := p.agentStatus
+		if msg.Project != "" {
+			p.agentProject = msg.Project
+		}
+
+		// State machine: derive status from hook event (matches cctop transitions)
+		switch msg.Event {
+		case "UserPromptSubmit":
+			p.agentStatus = "working"
+			p.agentTool = ""
+			if msg.Prompt != "" {
+				p.agentPrompt = msg.Prompt
+			}
+		case "PreToolUse":
+			p.agentStatus = "working"
+			if msg.Tool != "" {
+				p.agentTool = msg.Tool
+			}
+		case "PostToolUse", "PostToolUseFailure":
+			p.agentStatus = "working"
+		case "Stop":
+			p.agentStatus = "waiting_input"
+			p.agentTool = ""
+		case "Notification":
+			switch msg.NotificationType {
+			case "idle_prompt":
+				p.agentStatus = "waiting_input"
+			case "permission_prompt":
+				p.agentStatus = "waiting_permission"
+			}
+		case "PermissionRequest":
+			p.agentStatus = "waiting_permission"
+		case "PreCompact":
+			p.agentStatus = "compacting"
+		case "PostCompact":
+			p.agentStatus = "idle"
+		case "SessionStart":
+			p.agentStatus = "idle"
+			p.agentTool = ""
+			p.agentPrompt = ""
+		case "SessionEnd":
+			p.agentStatus = ""
+			p.agentProject = ""
+			p.agentTool = ""
+			p.agentPrompt = ""
+		}
+
+		newStatus := p.agentStatus
+		p.dirty = true
+
+		// Visual feedback for attention-needed states
+		if newStatus == "waiting_input" || newStatus == "waiting_permission" {
+			label := "INPUT"
+			if newStatus == "waiting_permission" {
+				label = "PERMISSION"
+			}
+			p.overlayText = fmt.Sprintf("⚡ AWAITING %s", label)
+			p.overlayStyle = "error"
+			p.tint = "red"
+		} else if oldStatus == "waiting_input" || oldStatus == "waiting_permission" {
+			// Clear attention indicators when agent resumes
+			p.overlayText = ""
+			p.overlayStyle = ""
+			p.tint = ""
+		}
+
+		p.mu.Unlock()
+
+		// Update aggregated status bar
+		if oldStatus != newStatus {
+			m.updateAgentStatusBar()
+		}
 	}
 }
 
@@ -2295,6 +2449,74 @@ func (m *Magmux) parsePaneIndex(v any) int {
 		return idx
 	}
 	return -2 // invalid
+}
+
+// TODO: Add native macOS kqueue-based file watcher (kqueue_darwin.go) for monitoring
+// ~/.cctop/sessions/ as a fallback when agents don't send IPC messages directly.
+// Also consider Linux inotify equivalent (inotify_linux.go).
+
+func (m *Magmux) updateAgentStatusBar() {
+	var parts []string
+	needsAttention := 0
+
+	for _, p := range m.allPanes {
+		p.mu.Lock()
+		status := p.agentStatus
+		name := p.agentProject
+		p.mu.Unlock()
+
+		if status == "" {
+			continue // not an agent pane
+		}
+
+		if name == "" {
+			name = "agent"
+		}
+		if len(name) > 15 {
+			name = name[:15]
+		}
+
+		var colorCode, icon string
+		switch status {
+		case "working":
+			colorCode = "G"
+			icon = "●"
+		case "idle":
+			colorCode = "D"
+			icon = "○"
+		case "waiting_input":
+			colorCode = "R"
+			icon = "⚡"
+			needsAttention++
+		case "waiting_permission":
+			colorCode = "Y"
+			icon = "⚠"
+			needsAttention++
+		case "compacting":
+			colorCode = "C"
+			icon = "◐"
+		default:
+			colorCode = "D"
+			icon = "?"
+		}
+		parts = append(parts, fmt.Sprintf("%s:%s %s", colorCode, icon, name))
+	}
+
+	if len(parts) == 0 {
+		return
+	}
+
+	statusText := strings.Join(parts, "\t")
+	if needsAttention > 0 {
+		statusText = fmt.Sprintf("R:⚡ %d NEED INPUT\t", needsAttention) + statusText
+	}
+
+	m.statusText = statusText
+	for _, p := range m.allPanes {
+		p.mu.Lock()
+		p.dirty = true
+		p.mu.Unlock()
+	}
 }
 
 // ── Status File Polling ─────────────────────────────────────────────────────
@@ -2383,6 +2605,16 @@ func (m *Magmux) allPanesDead() bool {
 	return true
 }
 
+// allPanesDone returns true if every pane is either dead or inputReady.
+func (m *Magmux) allPanesDone() bool {
+	for _, p := range m.allPanes {
+		if !p.dead && !p.inputReady {
+			return false
+		}
+	}
+	return len(m.allPanes) > 0
+}
+
 func (m *Magmux) renderLoop() {
 	for {
 		select {
@@ -2397,6 +2629,69 @@ func (m *Magmux) renderLoop() {
 }
 
 func (m *Magmux) render() {
+	// Grid mode: idle/completion detection
+	if m.gridMode {
+		now := time.Now()
+		for _, p := range m.allPanes {
+			p.mu.Lock()
+			// Text idle detection: if no printable text for 5s, mark as input-ready.
+			// This catches TUI apps (like Claude Code) that don't cycle bracketed paste.
+			if !p.inputReady && !p.dead && p.hadTextOutput &&
+				!p.lastTextAt.IsZero() && now.Sub(p.lastTextAt) > 5*time.Second {
+				p.inputReady = true
+				p.inputSignal = "idle"
+				if dbgFile != nil {
+					fmt.Fprintf(dbgFile, "[idle] pane text idle for %.1fs → inputReady=true\n",
+						now.Sub(p.lastTextAt).Seconds())
+				}
+			}
+			// TUI app waiting for input → tint green + overlay (task complete)
+			if p.inputReady && p.tint == "" {
+				p.tint = "green"
+				p.overlayText = "\u2713 DONE"
+				p.overlayStyle = "success"
+				p.dirty = true
+			}
+			p.mu.Unlock()
+		}
+	}
+
+	// Update status bar with done/running counts (grid mode)
+	if m.gridMode {
+		done, running := 0, 0
+		var signals []string
+		for _, p := range m.allPanes {
+			p.mu.Lock()
+			if p.dead || p.inputReady {
+				done++
+				if p.inputSignal != "" {
+					signals = append(signals, p.inputSignal)
+				}
+			} else {
+				running++
+			}
+			p.mu.Unlock()
+		}
+		if done != m.lastDoneCount {
+			m.lastDoneCount = done
+			if done > 0 {
+				total := len(m.allPanes)
+				sig := strings.Join(signals, ",")
+				if running == 0 {
+					m.statusText = fmt.Sprintf("C: magmux\tG: %d done\tG: complete [%s]\tD: ctrl-g q quit", total, sig)
+				} else {
+					m.statusText = fmt.Sprintf("C: magmux\tG: %d done [%s]\tC: %d running\tD: ctrl-g Tab switch\tD: ctrl-g q quit", done, sig, running)
+				}
+			}
+		}
+	}
+
+	// Auto-exit: quit when all panes done (-w flag)
+	if m.autoExit && m.gridMode && m.allPanesDone() {
+		m.quitOnce.Do(func() { close(m.quit) })
+		return
+	}
+
 	// Check if any pane has new content
 	anyDirty := false
 	for _, p := range m.allPanes {
@@ -2529,6 +2824,7 @@ func main() {
 			fmt.Println("  -g FILE   Grid file (one command per line, overrides -e)")
 			fmt.Println("  -S FILE   Status bar file (polled for last-line content)")
 			fmt.Println("  -e CMD    Run CMD in a pane (can be repeated)")
+			fmt.Println("  -w        Auto-exit when all panes are done (dead or idle)")
 			fmt.Println("  -v        Show version")
 			fmt.Println("  -h        Show this help")
 			fmt.Println()
@@ -2548,6 +2844,20 @@ func main() {
 			fmt.Println("  /tmp/magmux-{pid}.sock — JSON line protocol")
 			fmt.Println("  Env var MAGMUX_SOCK exported to child processes")
 			fmt.Println()
+			fmt.Println("Agent Status Monitoring:")
+			fmt.Println("  Send agent hook events via IPC socket:")
+			fmt.Println("  {\"type\":\"agent\",\"pane\":0,\"event\":\"Stop\",\"project\":\"myapp\"}")
+			fmt.Println()
+			fmt.Println("  Events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,")
+			fmt.Println("          Stop, Notification, PermissionRequest, PreCompact, PostCompact,")
+			fmt.Println("          SessionEnd")
+			fmt.Println()
+			fmt.Println("  Claude Code hook example (.claude/settings.json):")
+			fmt.Println("    {\"hooks\":{\"Stop\":[{\"matcher\":\".*\",\"hooks\":[{")
+			fmt.Println("      \"type\":\"command\",")
+			fmt.Println("      \"command\":\"echo '{\\\"type\\\":\\\"agent\\\",\\\"pane\\\":0,\\\"event\\\":\\\"Stop\\\"}' | socat - UNIX:$MAGMUX_SOCK\"")
+			fmt.Println("    }]}]}}")
+			fmt.Println()
 			fmt.Println("Environment:")
 			fmt.Println("  MAGMUX_SEL_FG   Selection foreground (256-color index, default: 0)")
 			fmt.Println("  MAGMUX_SEL_BG   Selection background (256-color index, default: 220)")
@@ -2563,6 +2873,7 @@ func main() {
 	var gridFile string
 	var statusFile string
 	var customCmds []PaneConfig
+	autoExit := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-g":
@@ -2583,6 +2894,8 @@ func main() {
 					Args: []string{"-l", "-c", args[i]},
 				})
 			}
+		case "-w":
+			autoExit = true
 		}
 	}
 
@@ -2621,6 +2934,7 @@ func main() {
 
 	mux := &Magmux{
 		gridMode:   useGrid,
+		autoExit:   autoExit,
 		statusFile: statusFile,
 	}
 
