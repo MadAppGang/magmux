@@ -1,0 +1,625 @@
+version: '3'
+
+# magmux — Taskfile
+# Visual smoke tests for the dev build of magmux.
+#
+# All `test:*` targets launch the dev build (./magmux) against real CLIs
+# (Claude Code, claudish, etc.). They are INTERACTIVE — you run them by hand
+# and watch the panes/overlays/popups render.
+#
+# Conventions:
+#   - Every test target rebuilds magmux first via the `build` dep.
+#   - Every test uses `./magmux` from the repo root, never the installed binary.
+#   - "good" targets run commands that succeed (exit 0, green ✓ DONE popup).
+#   - "bad" targets run commands that fail (non-zero exit, red ✗ FAIL popup).
+#   - Team targets drive multi-pane layouts so you can exercise the status bar.
+
+vars:
+  MAGMUX: '{{.ROOT_DIR}}/magmux'
+  CLAUDISH_DIR: '/Users/jack/mag/claudish/packages/cli'
+  CLAUDISH: 'cd {{.CLAUDISH_DIR}} && bun run src/index.ts'
+  GRID_DIR: '{{.ROOT_DIR}}/.task-grids'
+  # Models used by team tests — cheap/fast ones so tests are quick.
+  TEAM_MODELS: 'glm-5-turbo,kimi-k2-thinking'
+  # Prompt used by all agent tests — short, deterministic, cheap.
+  TEST_PROMPT: 'say hi in exactly three words'
+  # Hard timeout for team tests so a stuck claudish retry loop doesn't
+  # block the terminal forever. Override with TEAM_TIMEOUT=300 task ...
+  TEAM_TIMEOUT: '120'
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task -l
+
+  # ── Build ─────────────────────────────────────────────────────────────────
+
+  build:
+    desc: Build the dev magmux binary
+    sources:
+      - main.go
+      - pty_*.go
+      - go.mod
+      - go.sum
+    generates:
+      - magmux
+    cmds:
+      - go build -o magmux .
+
+  clean:
+    desc: Remove dev binary and test grid files
+    cmds:
+      - rm -f {{.MAGMUX}}
+      - rm -rf {{.GRID_DIR}}
+
+  grid-dir:
+    internal: true
+    cmds:
+      - mkdir -p {{.GRID_DIR}}
+    status:
+      - test -d {{.GRID_DIR}}
+
+  # ── Single-pane tests ─────────────────────────────────────────────────────
+  # Verify basic PTY + render + exit-overlay + DONE popup work with one pane.
+
+  test:single-good:
+    desc: "Single pane, command succeeds — expect green ✓ DONE popup with duration + last output"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        cat > {{.GRID_DIR}}/single-good.txt <<'EOF'
+        sh -c 'echo "hello from magmux"; echo "build complete"; echo "all green ✓"; sleep 1'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/single-good.txt'
+
+  test:single-bad:
+    desc: "Single pane, command fails — expect red ✗ FAIL popup with exit code + duration"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        cat > {{.GRID_DIR}}/single-bad.txt <<'EOF'
+        sh -c 'echo "starting work..."; sleep 1; echo "something went wrong"; exit 42'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/single-bad.txt'
+
+  test:single-mixed:
+    desc: "Two panes side by side — one success, one failure"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        cat > {{.GRID_DIR}}/single-mixed.txt <<'EOF'
+        sh -c 'sleep 1; echo "tests passed"; echo "12/12 ✓"'
+        sh -c 'sleep 2; echo "compile error: undefined variable"; exit 1'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/single-mixed.txt'
+
+  test:single-claude-good:
+    desc: "Single Claude Code session (non-interactive, -p flag) that succeeds"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        cat > {{.GRID_DIR}}/single-claude-good.txt <<EOF
+        claude -p "{{.TEST_PROMPT}}"
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/single-claude-good.txt'
+
+  test:single-claude-bad:
+    desc: "Single Claude Code session that errors (invalid model forces non-zero exit)"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        cat > {{.GRID_DIR}}/single-claude-bad.txt <<'EOF'
+        claude -p --model nonexistent-model-xyz "this must fail"
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/single-claude-bad.txt'
+
+  test:claude:
+    desc: "Single Claude Code session — full TUI, runs a task, detects completion"
+    deps: [build]
+    cmds:
+      - '{{.MAGMUX}} -e "claude \"{{.TEST_PROMPT}}\""'
+
+  test:claude2:
+    desc: "Two Claude Code sessions side by side — full TUI"
+    deps: [build]
+    cmds:
+      - '{{.MAGMUX}} -e "claude \"{{.TEST_PROMPT}}\"" -e "claude \"list files in current directory in one sentence\""'
+
+  test:claude3:
+    desc: "Three Claude Code sessions — full TUI, mixed tasks"
+    deps: [build]
+    cmds:
+      - '{{.MAGMUX}} -e "claude \"{{.TEST_PROMPT}}\"" -e "claude \"what is 2+2? reply in one word\"" -e "claude \"list files in current directory in one sentence\""'
+
+  # ── Team tests (multi-pane via claudish) ──────────────────────────────────
+  # Each team target launches claudish in a different mode. claudish itself
+  # spawns multiple panes via magmux's grid mode, so we do NOT wrap with -g.
+  # Instead we let claudish drive the layout.
+
+  test:team-default:
+    desc: "claudish --mode default (grid) — multi-pane non-interactive agent run"
+    deps: [build]
+    cmds:
+      - |
+        # Put dev magmux first in PATH so claudish uses our build.
+        export PATH="{{.ROOT_DIR}}:$PATH"
+        # Hard timeout so a stuck claudish retry loop can't hang the terminal.
+        timeout --foreground {{.TEAM_TIMEOUT}} bash -c '
+          cd {{.CLAUDISH_DIR}} && bun run src/index.ts \
+            --team {{.TEAM_MODELS}} \
+            --mode default \
+            "{{.TEST_PROMPT}}"
+        '
+
+  test:team-interactive:
+    desc: "claudish --mode interactive — multi-pane agents that await user input"
+    deps: [build]
+    cmds:
+      - |
+        export PATH="{{.ROOT_DIR}}:$PATH"
+        timeout --foreground {{.TEAM_TIMEOUT}} bash -c '
+          cd {{.CLAUDISH_DIR}} && bun run src/index.ts \
+            --team {{.TEAM_MODELS}} \
+            --mode interactive \
+            "{{.TEST_PROMPT}}"
+        '
+
+  test:team-json:
+    desc: "claudish --mode json — multi-pane agents emitting JSON output"
+    deps: [build]
+    cmds:
+      - |
+        export PATH="{{.ROOT_DIR}}:$PATH"
+        timeout --foreground {{.TEAM_TIMEOUT}} bash -c '
+          cd {{.CLAUDISH_DIR}} && bun run src/index.ts \
+            --team {{.TEAM_MODELS}} \
+            --mode json \
+            "{{.TEST_PROMPT}}"
+        '
+
+  test:team-good:
+    desc: "Team mode with a prompt all models can answer quickly (happy path)"
+    deps: [build]
+    cmds:
+      - |
+        export PATH="{{.ROOT_DIR}}:$PATH"
+        timeout --foreground {{.TEAM_TIMEOUT}} bash -c '
+          cd {{.CLAUDISH_DIR}} && bun run src/index.ts \
+            --team {{.TEAM_MODELS}} \
+            --mode default \
+            "respond with exactly the word: done"
+        '
+
+  test:team-bad:
+    desc: "Team mode with one invalid model — exercise mixed success/failure overlays"
+    deps: [build]
+    cmds:
+      - |
+        export PATH="{{.ROOT_DIR}}:$PATH"
+        timeout --foreground {{.TEAM_TIMEOUT}} bash -c '
+          cd {{.CLAUDISH_DIR}} && bun run src/index.ts \
+            --team "glm-5-turbo,nonexistent-xyz-model" \
+            --mode default \
+            "{{.TEST_PROMPT}}"
+        '
+
+  # ── Isolation diagnostics ─────────────────────────────────────────────────
+  # These targets isolate whether a "stuck pane" is caused by magmux, claudish,
+  # or the team-grid shell wrapper. Run them in this order when debugging.
+
+  test:isolate-a-direct:
+    desc: "Stage A: magmux runs a single claudish directly (no team-grid wrapper)"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        cat > {{.GRID_DIR}}/isolate-a.txt <<'EOF'
+        sh -c 'cd /Users/jack/mag/claudish/packages/cli && claudish --model glm-5-turbo -y --quiet "say hi in exactly three words"; echo "--- exit=$?"; sleep 3'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-a.txt'
+
+  test:isolate-b-with-redirect:
+    desc: "Stage B: same as A but with stderr redirected (mimics team-grid)"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        mkdir -p {{.GRID_DIR}}/err
+        cat > {{.GRID_DIR}}/isolate-b.txt <<'EOF'
+        sh -c 'cd /Users/jack/mag/claudish/packages/cli && claudish --model glm-5-turbo -y --quiet "say hi in exactly three words" 2>{{.GRID_DIR}}/err/b.log; echo "--- exit=$?"; sleep 3'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-b.txt'
+      - echo "--- stderr captured:"
+      - cat {{.GRID_DIR}}/err/b.log || true
+
+  test:isolate-c-with-banner:
+    desc: "Stage C: Stage B plus the printf banners (full team-grid line except sleep 86400)"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        mkdir -p {{.GRID_DIR}}/err
+        cat > {{.GRID_DIR}}/isolate-c.txt <<'EOF'
+        sh -c 'cd /Users/jack/mag/claudish/packages/cli; printf "\033[1;97;48;2;160;80;40m  %s  \033[0m\n" "glm-5-turbo"; printf "\033[2m  route: test  (auto)\033[0m\n"; printf "\033[2m  %s\033[0m\n" "────────────────────────────────"; printf "  say hi in exactly three words\n"; printf "\033[2m  %s\033[0m\n\n" "────────────────────────────────"; claudish --model glm-5-turbo -y --quiet "say hi in exactly three words" 2>{{.GRID_DIR}}/err/c.log; echo "--- exit=$?"; sleep 3'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-c.txt'
+      - echo "--- stderr captured:"
+      - cat {{.GRID_DIR}}/err/c.log || true
+
+  test:isolate-u-real-2-panes:
+    desc: "Stage U: generate a REAL 2-model gridfile and run magmux directly (no outer bun wrapper)"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        export PATH="{{.ROOT_DIR}}:$PATH"
+        # Generate a fresh 2-model team gridfile (will time out; just want the files)
+        timeout --foreground 5 bash -c '
+          cd {{.CLAUDISH_DIR}} && bun run src/index.ts \
+            --team {{.TEAM_MODELS}} \
+            --mode default \
+            "{{.TEST_PROMPT}}"
+        ' || true
+        LATEST=$(ls -td {{.CLAUDISH_DIR}}/.claudish-team-* 2>/dev/null | head -1)
+        if [ -z "$LATEST" ]; then
+          echo "ERROR: no team session dir found"; exit 1
+        fi
+        mkdir -p {{.GRID_DIR}}/real2
+        cp "$LATEST/gridfile.txt" {{.GRID_DIR}}/real2/gridfile-raw.txt
+        sed 's|exec sleep 86400|sleep 3|' {{.GRID_DIR}}/real2/gridfile-raw.txt > {{.GRID_DIR}}/real2/gridfile.txt
+        echo "--- generated 2-model gridfile ($(wc -l < {{.GRID_DIR}}/real2/gridfile.txt) lines, $(wc -c < {{.GRID_DIR}}/real2/gridfile.txt) bytes):"
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/real2/gridfile.txt'
+
+  test:isolate-t-two-panes:
+    desc: "Stage T: TWO-pane version — duplicate the real gridfile line as two panes"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        # Stage E's gridfile has ONE pane. team-default has TWO. Let's see if two concurrent
+        # panes with the full _update_bar + nc machinery reproduces the blank-body bug.
+        # Just duplicate the line (the session dir is shared — both panes will race on the
+        # same work/*/.exit-code files, same sockets, same status templates).
+        cat {{.GRID_DIR}}/real/gridfile.txt {{.GRID_DIR}}/real/gridfile.txt > {{.GRID_DIR}}/isolate-t.txt
+        echo "--- two-pane gridfile ($(wc -l < {{.GRID_DIR}}/isolate-t.txt) lines):"
+        wc -c {{.GRID_DIR}}/isolate-t.txt
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-t.txt'
+
+  test:isolate-r-e-keep-only-first-nc:
+    desc: "Stage R: real gridfile but keep ONLY the first _update_bar nc call, remove all post-claudish nc calls"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        python3 -c "
+        import re
+        line = open('{{.GRID_DIR}}/real/gridfile.txt').read()
+        # Find 'claudish --model' and everything after it
+        idx = line.find('claudish --model')
+        if idx < 0:
+            print('claudish not found'); exit(1)
+        before = line[:idx]
+        after = line[idx:]
+        # In 'after', replace all nc calls with ':'
+        after = re.sub(r'nc -U \"\\\$MAGMUX_SOCK\" -w 1 2>/dev/null', ':', after)
+        line = before + after
+        open('{{.GRID_DIR}}/isolate-r.txt', 'w').write(line)
+        print('--- stripped post-claudish nc calls. First 300 chars:')
+        print(line[:300])
+        print('...')
+        print('--- last 300 chars:')
+        print(line[-300:])
+        "
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-r.txt'
+
+  test:isolate-s-e-keep-only-post-nc:
+    desc: "Stage S: real gridfile but remove ONLY the first _update_bar nc call, keep post-claudish nc calls"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        python3 -c "
+        import re
+        line = open('{{.GRID_DIR}}/real/gridfile.txt').read()
+        # Find 'claudish --model' and everything BEFORE it
+        idx = line.find('claudish --model')
+        if idx < 0:
+            print('claudish not found'); exit(1)
+        before = line[:idx]
+        after = line[idx:]
+        # In 'before', replace all nc calls with ':'
+        before = re.sub(r'nc -U \"\\\$MAGMUX_SOCK\" -w 1 2>/dev/null', ':', before)
+        line = before + after
+        open('{{.GRID_DIR}}/isolate-s.txt', 'w').write(line)
+        print('--- stripped pre-claudish nc calls. First 300 chars:')
+        print(line[:300])
+        print('...')
+        "
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-s.txt'
+
+  test:isolate-q-e-minus-nc:
+    desc: "Stage Q: real Stage E gridfile but with all nc -U calls replaced by :"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        python3 -c "
+        import re
+        line = open('{{.GRID_DIR}}/real/gridfile.txt').read()
+        # Replace every 'nc -U \"\$MAGMUX_SOCK\" -w 1 2>/dev/null' with ':' (no-op)
+        line = re.sub(r'nc -U \"\\\$MAGMUX_SOCK\" -w 1 2>/dev/null', ':', line)
+        open('{{.GRID_DIR}}/isolate-q.txt', 'w').write(line)
+        print('--- first 300 chars:')
+        print(line[:300])
+        print('...')
+        "
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-q.txt'
+
+  test:isolate-p-e-minus-update-bar:
+    desc: "Stage P: real Stage E gridfile but with _update_bar definition and calls stripped"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        # Strip the _update_bar function def + all calls. Use python to track
+        # brace depth properly so we don't leave orphaned `fi`s.
+        python3 -c "
+        import re, sys
+        line = open('{{.GRID_DIR}}/real/gridfile.txt').read()
+        # Find '_update_bar() {' and walk until matching '}'
+        i = line.find('_update_bar() {')
+        if i >= 0:
+            depth = 0
+            j = i
+            while j < len(line):
+                c = line[j]
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        # Include trailing ';' if present
+                        while j + 1 < len(line) and line[j+1] in '; ':
+                            j += 1
+                        break
+                j += 1
+            line = line[:i] + line[j+1:]
+        # Strip bare _update_bar calls (with optional surrounding spaces/semicolons)
+        # Replace remaining _update_bar references with ':' (shell no-op)
+        line = re.sub(r'\b_update_bar\b', ':', line)
+        open('{{.GRID_DIR}}/isolate-p.txt', 'w').write(line)
+        print('--- stripped gridfile first 200 chars:')
+        print(line[:200])
+        print('...')
+        "
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-p.txt'
+
+  test:isolate-o-e-via-sh:
+    desc: "Stage O: wrap Stage E's full gridfile line in sh -c"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        # Wrap the REAL gridfile line in sh -c. If this works and Stage E doesn't,
+        # the bug is specifically when zsh -l -c processes this exact line.
+        # Use bash explicitly (sh's printf doesn't support %q on macOS).
+        bash -c '
+          REAL_LINE=$(cat {{.GRID_DIR}}/real/gridfile.txt)
+          printf "sh -c %q\n" "$REAL_LINE" > {{.GRID_DIR}}/isolate-o.txt
+          echo "--- gridfile (first 200 chars):"
+          head -c 200 {{.GRID_DIR}}/isolate-o.txt
+          echo "..."
+        '
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-o.txt'
+
+  test:isolate-n-minimal-e:
+    desc: "Stage N: Stage E's line but STRIPPED of everything except claudish itself (binary search inward)"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        # Same as Stage E's final command but with everything ELSE removed.
+        # Keep: _update_bar def (empty body), nc call before, claudish, _ec capture, nc after, sleep 2
+        # Remove: printf banners
+        cat > {{.GRID_DIR}}/isolate-n.txt <<'EOF'
+        _update_bar() { :; }; if [ -n "$MAGMUX_SOCK" ]; then _update_bar; fi; claudish --model glm-5-turbo -y --quiet 'say hi in exactly three words' 2>/tmp/n-err.log; _ec=$?; echo $_ec > /tmp/n-exit; if [ -n "$MAGMUX_SOCK" ]; then _update_bar; if [ $_ec -eq 0 ]; then echo '{"cmd":"tint","pane":0,"color":"green"}' | nc -U "$MAGMUX_SOCK" -w 1 2>/dev/null; fi; fi; sleep 3
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-n.txt'
+
+  test:isolate-m-zsh-direct:
+    desc: "Stage M: simple claudish with NO sh -c wrapper (exactly like Stage E does)"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        # No sh -c wrapper — magmux runs this line directly via `zsh -l -c <line>`
+        cat > {{.GRID_DIR}}/isolate-m.txt <<'EOF'
+        claudish --model glm-5-turbo -y --quiet 'say hi in exactly three words'; echo "--- exit=$?"; sleep 3
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-m.txt'
+
+  test:isolate-i-with-stderr-file:
+    desc: "Stage I: H + stderr redirect to file (like team-grid)"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        mkdir -p {{.GRID_DIR}}/err
+        cat > {{.GRID_DIR}}/isolate-i.txt <<'EOF'
+        sh -c 'claudish --model glm-5-turbo -y --quiet "say hi in exactly three words" 2>{{.GRID_DIR}}/err/i.log; echo "--- exit=$?"; sleep 3'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-i.txt'
+      - echo "--- stderr:"; cat {{.GRID_DIR}}/err/i.log || true
+
+  test:isolate-j-with-banner-printf:
+    desc: "Stage J: I + printf banner (team-grid style, no cd)"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        mkdir -p {{.GRID_DIR}}/err
+        cat > {{.GRID_DIR}}/isolate-j.txt <<'EOF'
+        sh -c 'printf "\033[1;97;48;2;160;80;40m  %s  \033[0m\n" "glm-5-turbo"; printf "\033[2m  route: test\033[0m\n"; printf "\033[2m  %s\033[0m\n" "────────────────"; printf "  say hi in exactly three words\n"; printf "\033[2m  %s\033[0m\n\n" "────────────────"; claudish --model glm-5-turbo -y --quiet "say hi in exactly three words" 2>{{.GRID_DIR}}/err/j.log; echo "--- exit=$?"; sleep 3'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-j.txt'
+
+  test:isolate-k-with-update-bar:
+    desc: "Stage K: J + _update_bar shell function (still no nc call — just the function def)"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        mkdir -p {{.GRID_DIR}}/err
+        cat > {{.GRID_DIR}}/isolate-k.txt <<'EOF'
+        sh -c '_update_bar() { _d=0; _f=0; _r=1; }; _update_bar; printf "\033[1;97;48;2;160;80;40m  %s  \033[0m\n" "glm-5-turbo"; printf "\033[2m  route: test\033[0m\n"; printf "\033[2m  %s\033[0m\n" "────────────────"; printf "  say hi in exactly three words\n"; printf "\033[2m  %s\033[0m\n\n" "────────────────"; claudish --model glm-5-turbo -y --quiet "say hi in exactly three words" 2>{{.GRID_DIR}}/err/k.log; echo "--- exit=$?"; sleep 3'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-k.txt'
+
+  test:isolate-l-with-nc:
+    desc: "Stage L: K + nc call to the magmux socket (but with a small dummy JSON, not the full status update)"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        mkdir -p {{.GRID_DIR}}/err
+        cat > {{.GRID_DIR}}/isolate-l.txt <<'EOF'
+        sh -c '_update_bar() { echo "{\"type\":\"status\",\"text\":\"C:test running\"}" | nc -U "$MAGMUX_SOCK" -w 1 2>/dev/null; }; if [ -n "$MAGMUX_SOCK" ]; then _update_bar; fi; printf "\033[1;97;48;2;160;80;40m  %s  \033[0m\n" "glm-5-turbo"; printf "\033[2m  route: test\033[0m\n"; printf "\033[2m  %s\033[0m\n" "────────────────"; printf "  say hi in exactly three words\n"; printf "\033[2m  %s\033[0m\n\n" "────────────────"; claudish --model glm-5-turbo -y --quiet "say hi in exactly three words" 2>{{.GRID_DIR}}/err/l.log; echo "--- exit=$?"; sleep 3'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-l.txt'
+
+  test:isolate-h-no-cd:
+    desc: "Stage H: same as Stage A but without the cd — claudish runs from magmux dir (same as Stage E)"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        cat > {{.GRID_DIR}}/isolate-h.txt <<'EOF'
+        sh -c 'claudish --model glm-5-turbo -y --quiet "say hi in exactly three words"; echo "--- exit=$?"; sleep 3'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-h.txt'
+
+  test:isolate-g-env-dump:
+    desc: "Stage G: dump terminal/env state inside magmux PTY, compare with outside"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        cat > {{.GRID_DIR}}/isolate-g.txt <<'EOF'
+        sh -c 'echo "=== PTY diag ==="; tty; echo "TERM=$TERM COLUMNS=$COLUMNS LINES=$LINES"; echo "stdout isatty? $(test -t 1 && echo YES || echo NO)"; echo "stdin isatty?  $(test -t 0 && echo YES || echo NO)"; stty -a 2>&1 | head -5; echo; echo "=== running claudish ==="; claudish --model glm-5-turbo -y --quiet "say hi in exactly three words"; echo "--- exit=$?"; sleep 3'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-g.txt'
+
+  test:isolate-f-tee-capture:
+    desc: "Stage F: Stage E + tee claudish stdout to file so we see what it ACTUALLY prints inside magmux PTY"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        mkdir -p {{.GRID_DIR}}/tee
+        rm -f {{.GRID_DIR}}/tee/claudish-stdout.log {{.GRID_DIR}}/tee/claudish-stderr.log
+        cat > {{.GRID_DIR}}/isolate-f.txt <<EOF
+        sh -c 'cd /Users/jack/mag/claudish/packages/cli; printf "BEFORE\\n"; claudish --model glm-5-turbo -y --quiet "say hi in exactly three words" 2>&1 | tee {{.GRID_DIR}}/tee/claudish-stdout.log; echo "--- exit=\$?"; sleep 3'
+        EOF
+      - echo "--- magmux launching..."
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-f.txt'
+      - echo
+      - echo "--- captured claudish output from inside magmux PTY:"
+      - wc -c {{.GRID_DIR}}/tee/claudish-stdout.log
+      - cat {{.GRID_DIR}}/tee/claudish-stdout.log | head -30
+
+  test:isolate-e-real-gridfile:
+    desc: "Stage E: use a REAL gridfile captured from team-default run (full team-grid line)"
+    deps: [build, grid-dir]
+    cmds:
+      - |
+        # Generate a real team-default gridfile without running magmux.
+        # We do this by running the outer bun with an environment variable that
+        # would tell claudish to "just write the gridfile and exit" — but since
+        # claudish doesn't have that flag, we instead let the outer claudish run
+        # ONCE (it'll time out on our TEAM_TIMEOUT, but that's fine — we capture
+        # the gridfile it created).
+        export PATH="{{.ROOT_DIR}}:$PATH"
+        mkdir -p {{.GRID_DIR}}/real
+        # Run team-default for 5 seconds just to generate the gridfile
+        timeout --foreground 5 bash -c '
+          cd {{.CLAUDISH_DIR}} && bun run src/index.ts \
+            --team glm-5-turbo \
+            --mode default \
+            "say hi in exactly three words"
+        ' || true
+        # Find the most recent generated gridfile
+        LATEST=$(ls -td {{.CLAUDISH_DIR}}/.claudish-team-* 2>/dev/null | head -1)
+        if [ -z "$LATEST" ]; then
+          echo "No team session dir found; aborting"
+          exit 1
+        fi
+        cp "$LATEST/gridfile.txt" {{.GRID_DIR}}/real/gridfile-raw.txt
+        # Strip the "exec sleep 86400" so pane exits after claudish; replace with short sleep
+        sed 's|exec sleep 86400|sleep 2|' {{.GRID_DIR}}/real/gridfile-raw.txt > {{.GRID_DIR}}/real/gridfile.txt
+        echo "--- generated gridfile ($(wc -l < {{.GRID_DIR}}/real/gridfile.txt) lines):"
+        cat {{.GRID_DIR}}/real/gridfile.txt | cut -c1-200
+        echo "..."
+        echo "--- launching magmux on it:"
+        {{.MAGMUX}} -g {{.GRID_DIR}}/real/gridfile.txt
+
+  test:isolate-d-debug:
+    desc: "Stage D: test:isolate-a with MAGMUX_DEBUG=1 (run tail -f /tmp/magmux-debug.log in another terminal BEFORE starting)"
+    deps: [build, grid-dir]
+    env:
+      MAGMUX_DEBUG: '1'
+    cmds:
+      - echo ">>> tail -f /tmp/magmux-debug.log  (run in another terminal NOW)"
+      - 'sleep 2'
+      - |
+        cat > {{.GRID_DIR}}/isolate-d.txt <<'EOF'
+        sh -c 'cd /Users/jack/mag/claudish/packages/cli && claudish --model glm-5-turbo -y --quiet "say hi in exactly three words"; echo "--- exit=$?"; sleep 5'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/isolate-d.txt'
+      - echo "--- debug log (last 40 lines):"
+      - tail -40 /tmp/magmux-debug.log || true
+
+  # ── Pre-flight checks ─────────────────────────────────────────────────────
+  # Run these BEFORE team tests if something seems wrong. They smoke-test each
+  # model individually (outside magmux) so you can tell whether a stuck pane
+  # is a magmux bug or an upstream API issue.
+
+  check:models:
+    desc: "Smoke-test each TEAM_MODELS model — verifies API keys work before running team tests"
+    cmds:
+      - |
+        set -e
+        echo "Testing models in TEAM_MODELS: {{.TEAM_MODELS}}"
+        for model in $(echo "{{.TEAM_MODELS}}" | tr ',' ' '); do
+          echo
+          echo "--- $model ---"
+          cd {{.CLAUDISH_DIR}} && timeout 60 bun run src/index.ts \
+            --model "$model" -p "reply with exactly: ok" \
+            && echo "✓ $model OK" \
+            || echo "✗ $model FAILED (check ~/.claudish/logs/)"
+        done
+
+  check:top-models:
+    desc: "Show currently recommended models (fresh from OpenRouter)"
+    cmds:
+      - cd {{.CLAUDISH_DIR}} && bun run src/index.ts --top-models
+
+  # ── Debug variants ────────────────────────────────────────────────────────
+  # Same as above but with MAGMUX_DEBUG=1 and instructions to tail the log.
+
+  test:debug-single-good:
+    desc: "test:single-good with MAGMUX_DEBUG=1 (tail /tmp/magmux-debug.log in another terminal)"
+    deps: [build, grid-dir]
+    env:
+      MAGMUX_DEBUG: '1'
+    cmds:
+      - echo ">>> tail -f /tmp/magmux-debug.log  (run in another terminal)"
+      - |
+        cat > {{.GRID_DIR}}/single-good.txt <<'EOF'
+        sh -c 'echo "hello from magmux"; sleep 1'
+        EOF
+      - '{{.MAGMUX}} -g {{.GRID_DIR}}/single-good.txt'
+
+  test:debug-team-interactive:
+    desc: "test:team-interactive with MAGMUX_DEBUG=1"
+    deps: [build]
+    env:
+      MAGMUX_DEBUG: '1'
+    cmds:
+      - echo ">>> tail -f /tmp/magmux-debug.log  (run in another terminal)"
+      - |
+        export PATH="{{.ROOT_DIR}}:$PATH"
+        timeout --foreground {{.TEAM_TIMEOUT}} bash -c '
+          cd {{.CLAUDISH_DIR}} && bun run src/index.ts \
+            --team {{.TEAM_MODELS}} \
+            --mode interactive \
+            "{{.TEST_PROMPT}}"
+        '
+
+  # ── Probe ──────────────────────────────────────────────────────────────────
+
+  probe:
+    desc: "Run claudish --probe TUI with predefined model list"
+    cmds:
+      - cd {{.CLAUDISH_DIR}} && bun run src/index.ts --probe minimax-m2.7 kimi-k2-thinking glm-5.1 gemini-3.1-pro-preview gpt-5.4 qwen3.6-plus grok-4.20 {{.CLI_ARGS}}

@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,11 +25,55 @@ import (
 	"golang.org/x/term"
 )
 
-// Set by GoReleaser ldflags
+// Set by GoReleaser ldflags. Default value used for local builds.
 var (
-	Version = "dev"
+	Version = "v3.4.2"
 	Commit  = "none"
 )
+
+// magmuxLabel returns the status-bar app label, e.g. "magmux v3.4.2".
+// Falls back to "magmux" when the version is the unreleased "dev" value.
+func magmuxLabel() string {
+	if Version == "" || Version == "dev" {
+		return "magmux"
+	}
+	if strings.HasPrefix(Version, "v") {
+		return "magmux " + Version
+	}
+	return "magmux v" + Version
+}
+
+// approxStatusWidth estimates the on-screen width of a tab-separated
+// "CODE:text" status-bar string. Used to decide whether the status bar
+// has enough room for the attribution tail. Not exact — overestimates
+// slightly to stay on the safe side.
+func approxStatusWidth(s string) int {
+	segments := strings.Split(s, "\t")
+	w := 1 // leading padding
+	for i, seg := range segments {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			continue
+		}
+		parts := strings.SplitN(seg, ":", 2)
+		txt := seg
+		if len(parts) == 2 {
+			txt = strings.TrimSpace(parts[1])
+		}
+		if i > 0 {
+			w += 3 // " │ " divider
+		}
+		w += utf8.RuneCountInString(txt)
+		// Pills get +2 for padding spaces around text
+		if len(parts) == 2 {
+			code := strings.TrimSpace(parts[0])
+			if code == "P" || code == "Pr" || code == "Py" {
+				w += 2
+			}
+		}
+	}
+	return w
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -210,13 +255,15 @@ const (
 )
 
 type VTParser struct {
-	state  vtState
-	inter  rune
-	narg   int
-	args   [maxParams]int
-	nosc   int
-	oscbuf [maxOSC]rune
-	node   *Pane // back-reference to pane
+	state    vtState
+	inter    rune
+	narg     int
+	args     [maxParams]int
+	nosc     int
+	oscbuf   [maxOSC]rune
+	node     *Pane   // back-reference to pane
+	partial  [4]byte // buffered incomplete UTF-8 bytes from previous read
+	npartial int     // number of valid bytes in partial
 }
 
 func (vt *VTParser) reset() {
@@ -245,7 +292,24 @@ func (vt *VTParser) param(w rune) {
 }
 
 func (vt *VTParser) write(data []byte) {
+	// Prepend any incomplete UTF-8 bytes buffered from the previous call.
+	if vt.npartial > 0 {
+		combined := make([]byte, vt.npartial+len(data))
+		copy(combined, vt.partial[:vt.npartial])
+		copy(combined[vt.npartial:], data)
+		data = combined
+		vt.npartial = 0
+	}
+
 	for len(data) > 0 {
+		// If the remaining bytes might contain an incomplete trailing UTF-8
+		// sequence, stash those bytes and stop. This prevents splitting a
+		// multi-byte rune across two reads from being misdecoded as '?'.
+		if len(data) < 4 && !utf8.FullRune(data) {
+			vt.npartial = copy(vt.partial[:], data)
+			return
+		}
+
 		r, size := utf8.DecodeRune(data)
 		if r == utf8.RuneError && size <= 1 {
 			r = '?'
@@ -265,7 +329,8 @@ func (vt *VTParser) handleChar(w rune) {
 	case w == 0x1b: // ESC
 		if vt.state == stOSCString {
 			// ESC in OSC string — next char should be '\' (ST)
-			// Terminate the OSC
+			// Terminate the OSC now (the '\' will be consumed by stEscape)
+			vt.handleOSC()
 			vt.state = stEscape
 			return
 		}
@@ -423,6 +488,34 @@ func (vt *VTParser) handleOSC() {
 		p.inputSignal = "osc"
 		if dbgFile != nil {
 			fmt.Fprintf(dbgFile, "[OSC] notification: %q → inputReady=true\n", osc)
+		}
+
+	case strings.HasPrefix(osc, "0;"):
+		// Window title set. Claude Code uses title to signal state:
+		//   "✳ ..." = idle/ready for input
+		//   "⠂ ..." / "⠐ ..." = working (spinner)
+		// Title can briefly flash ✳ during transitions (e.g. between model
+		// response and stop hooks), so we debounce: record the time the title
+		// became idle, and the render loop fires inputReady only after the
+		// title has been stably idle for >2s without any spinner reappearing.
+		title := osc[2:]
+		if strings.HasPrefix(title, "\u2733") { // ✳ = idle
+			if p.titleWasWorking && p.titleIdleAt.IsZero() {
+				p.titleIdleAt = time.Now()
+				if dbgFile != nil {
+					fmt.Fprintf(dbgFile, "[OSC] title idle started: %q\n", title)
+				}
+			}
+		} else {
+			// Non-idle title — mark as working. Reset idle timer.
+			p.titleWasWorking = true
+			p.titleIdleAt = time.Time{}
+			if p.inputReady && p.inputSignal == "title" {
+				p.inputReady = false
+				if dbgFile != nil {
+					fmt.Fprintf(dbgFile, "[OSC] title working: %q → inputReady=false\n", title)
+				}
+			}
 		}
 	}
 }
@@ -590,15 +683,19 @@ func (vt *VTParser) doCSI(w rune) {
 					wasPaste := vt.node.bracketPaste
 					vt.node.bracketPaste = set
 					if dbgFile != nil {
-						fmt.Fprintf(dbgFile, "[2004] set=%v wasPaste=%v pasteWasOff=%v inputReady=%v\n",
-							set, wasPaste, vt.node.pasteWasOff, vt.node.inputReady)
+						fmt.Fprintf(dbgFile, "[2004] set=%v wasPaste=%v pasteWasOff=%v textSincePasteOff=%v inputReady=%v\n",
+							set, wasPaste, vt.node.pasteWasOff, vt.node.textSincePasteOff, vt.node.inputReady)
 					}
 					if !set {
 						// Paste turning OFF — agent is working
 						vt.node.pasteWasOff = true
+						vt.node.textSincePasteOff = false
 						vt.node.inputReady = false
-					} else if set && !wasPaste && vt.node.pasteWasOff {
-						// Paste turning back ON after being off — agent done, waiting for input
+					} else if set && !wasPaste && vt.node.pasteWasOff && vt.node.textSincePasteOff {
+						// Paste turning back ON after being off AND we saw real text
+						// in between — agent done, waiting for input.
+						// (The text gate filters Claude Code's startup 2004h→2004l→2004h
+						// cycle, which happens before any work has been done.)
 						vt.node.inputReady = true
 						vt.node.inputSignal = "2004"
 					}
@@ -944,6 +1041,7 @@ func (vt *VTParser) doPrint(w rune) {
 	p.lastChar = w
 	p.lastTextAt = time.Now()
 	p.hadTextOutput = true
+	p.textSincePasteOff = true
 
 	cw := runeWidth(w)
 	if cw <= 0 {
@@ -1032,22 +1130,32 @@ type Pane struct {
 	useG1         bool // SO (shift out) active — use G1 instead of G0
 	lastChar      rune // last printed character (for REP command)
 	// Grid mode fields
-	gridMode     bool   // pane is in grid mode (don't delete on exit)
-	exitCode     int    // exit code of child process
-	tint         string // "green", "red", "" — border/indicator color
-	overlayText  string // centered overlay text (e.g. "✓ DONE")
-	overlayStyle string // "success", "error", "info"
+	gridMode     bool      // pane is in grid mode (don't delete on exit)
+	exitCode     int       // exit code of child process
+	startedAt    time.Time // when the child process was started (for exec duration)
+	tint         string    // "green", "red", "" — border/indicator color
+	overlayText  string    // centered overlay text, may contain \n for multi-line (e.g. "✓ DONE")
+	overlayStyle string    // "success", "error", "info"
 	// Idle/completion detection
 	inputReady    bool      // TUI app is waiting for user input
 	inputSignal   string    // what triggered inputReady: "osc", "2004", "idle"
-	pasteWasOff   bool      // bracketed paste was disabled at least once (filters initial setup)
-	lastTextAt    time.Time // last time a printable character was output (for idle detection)
-	hadTextOutput bool      // true once any text has been printed (filters initial empty state)
+	pasteWasOff       bool      // bracketed paste was disabled at least once (filters initial setup)
+	textSincePasteOff bool      // printable text was written after the last paste-off (filters startup 2004 cycle)
+	lastTextAt        time.Time // last time a printable character was output (for idle detection)
+	hadTextOutput     bool      // true once any text has been printed (filters initial empty state)
+	titleWasWorking   bool      // title showed a non-idle indicator at least once (filters startup ✳)
+	titleIdleAt       time.Time // time the window title became idle (✳); zero if currently working
 	// Agent status (set via IPC "agent" messages from coding tool hooks)
 	agentStatus  string // "", "working", "idle", "waiting_input", "waiting_permission", "compacting"
 	agentProject string // project name from hook
 	agentTool    string // last tool being used
 	agentPrompt  string // last user prompt
+	// Interactive tool controller (e.g. ClaudeCodeController). Optional.
+	controller     ToolController
+	controllerSnap Snapshot
+	// Back-reference to the owning Magmux. Set by attachControllers so
+	// controllers can coordinate (e.g. claim shared resources).
+	mux *Magmux
 }
 
 func newPane(y, x, h, w int, command string, args ...string) (*Pane, error) {
@@ -1107,24 +1215,127 @@ func (p *Pane) spawnPTY(command string, args ...string) error {
 
 	p.ptmx = ptmx
 	p.cmd = cmd
+	p.startedAt = time.Now()
 	return nil
 }
 
-func (p *Pane) writePTY(data []byte) {
-	if p.ptmx != nil {
-		// User input resets idle state — pane is no longer "done"
-		if p.inputReady {
-			p.inputReady = false
-			p.tint = ""
-			p.overlayText = ""
-			p.overlayStyle = ""
-			p.hadTextOutput = false // require new output before re-detecting idle
-			if dbgFile != nil {
-				fmt.Fprintf(dbgFile, "[input] user keystroke → inputReady reset\n")
+// lastNonEmptyLine returns the most recent meaningful visible line from the screen,
+// trimmed and truncated to maxLen runes. Skips Claude Code status lines (anything
+// containing "tokens" or starting with "* Opus"/"* Sonnet"/etc.) and the bare ❯
+// prompt, preferring lines that look like response content. Caller must hold p.mu.
+func (p *Pane) lastNonEmptyLine(maxLen int) string {
+	if p.screen == nil {
+		return ""
+	}
+	s := p.screen
+
+	// Read all rows into a slice of trimmed strings
+	lines := make([]string, s.rows)
+	for row := 0; row < s.rows; row++ {
+		var sb strings.Builder
+		for c := 0; c < s.cols; c++ {
+			ch := s.cells[row][c].Ch
+			if ch == 0 {
+				sb.WriteByte(' ')
+			} else {
+				sb.WriteRune(ch)
 			}
 		}
-		p.ptmx.Write(data)
+		lines[row] = strings.TrimSpace(sb.String())
 	}
+
+	// Heuristic: skip lines that look like status/UI chrome
+	isChrome := func(l string) bool {
+		if l == "" {
+			return true
+		}
+		// Bare or near-bare prompt lines
+		if l == "\u276f" || strings.HasPrefix(l, "\u276f ") {
+			return true
+		}
+		// Horizontal rules (mostly box drawing chars)
+		nonRule := 0
+		for _, r := range l {
+			if r != '\u2500' && r != '\u2501' && r != '\u2014' && r != '-' && r != ' ' {
+				nonRule++
+			}
+		}
+		if nonRule == 0 {
+			return true
+		}
+		// Claude Code status bar markers
+		if strings.Contains(l, "tokens") {
+			return true
+		}
+		if strings.Contains(l, "/effort") {
+			return true
+		}
+		// Common status bar pattern: starts with "*" then model name
+		if strings.HasPrefix(l, "* ") || strings.HasPrefix(l, "*  ") {
+			return true
+		}
+		return false
+	}
+
+	// Scan from bottom to top, return first non-chrome line
+	for row := s.rows - 1; row >= 0; row-- {
+		l := lines[row]
+		if isChrome(l) {
+			continue
+		}
+		// Strip leading response bullet (⏺) for cleaner display
+		l = strings.TrimPrefix(l, "\u23fa ")
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		if utf8.RuneCountInString(l) > maxLen {
+			runes := []rune(l)
+			l = string(runes[:maxLen-1]) + "\u2026"
+		}
+		return l
+	}
+	return ""
+}
+
+// formatDuration renders a time.Duration compactly (e.g. "1.2s", "4m 12s", "1h 3m").
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	if d < time.Hour {
+		m := int(d.Minutes())
+		s := int(d.Seconds()) % 60
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	return fmt.Sprintf("%dh %dm", h, m)
+}
+
+func (p *Pane) writePTY(data []byte) {
+	if p.ptmx == nil {
+		return
+	}
+	// In grid mode, don't forward input to dead or completed panes
+	if p.gridMode && (p.dead || p.inputReady) {
+		return
+	}
+	// User input resets idle state — pane is no longer "done"
+	if p.inputReady {
+		p.inputReady = false
+		p.tint = ""
+		p.overlayText = ""
+		p.overlayStyle = ""
+		p.hadTextOutput = false // require new output before re-detecting idle
+		if dbgFile != nil {
+			fmt.Fprintf(dbgFile, "[input] user keystroke → inputReady reset\n")
+		}
+	}
+	p.ptmx.Write(data)
 }
 
 func (p *Pane) readLoop(wg *sync.WaitGroup) {
@@ -1404,19 +1615,175 @@ func (r *Renderer) renderBorder(p *Pane) {
 	}
 }
 
-// renderOverlay draws a centered overlay pill on a pane.
+// renderOverlay draws a centered popup window on a pane with a rounded border
+// and a drop shadow. The overlayText may contain \n for multi-line content;
+// the first line is rendered as a bold header.
 func (r *Renderer) renderOverlay(p *Pane) {
 	if p.overlayText == "" {
 		return
 	}
 
-	text := " " + p.overlayText + " " // 1 char padding each side
-	textLen := utf8.RuneCountInString(text)
+	lines := strings.Split(p.overlayText, "\n")
 
-	// Center horizontally and vertically
+	// Compute box dimensions: inner width = widest line, plus 2 cols padding + 2 cols border.
+	innerW := 0
+	for _, ln := range lines {
+		if l := utf8.RuneCountInString(ln); l > innerW {
+			innerW = l
+		}
+	}
+	// Clamp inner width so popup fits with room for border + shadow
+	maxInner := p.w - 6
+	if maxInner < 6 {
+		maxInner = 6
+	}
+	if innerW > maxInner {
+		innerW = maxInner
+	}
+	boxW := innerW + 4 // 1 border + 1 pad on each side
+	boxH := len(lines) + 2 // 1 border top + 1 border bottom
+
+	// Need room for drop shadow (1 col right + 1 row bottom)
+	if boxW+1 > p.w || boxH+1 > p.h {
+		// Fall back to single-line pill for tiny panes
+		r.renderOverlayPill(p, lines[0])
+		return
+	}
+
+	// Center within pane (biased slightly upward)
+	bx := p.x + (p.w-boxW)/2
+	by := p.y + (p.h-boxH)/2
+	if by < p.y {
+		by = p.y
+	}
+
+	// Style selection
+	var bgCode, borderFg string
+	switch p.overlayStyle {
+	case "success":
+		bgCode = "\x1b[48;5;22m"  // dark green background
+		borderFg = "\x1b[38;5;46m" // bright green border
+	case "error":
+		bgCode = "\x1b[48;5;52m"  // dark red background
+		borderFg = "\x1b[38;5;203m" // bright red border
+	case "info":
+		bgCode = "\x1b[48;5;17m"  // dark blue background
+		borderFg = "\x1b[38;5;75m" // bright blue border
+	default:
+		bgCode = "\x1b[48;5;236m" // dark gray background
+		borderFg = "\x1b[38;5;250m" // light gray border
+	}
+	reset := "\x1b[0m"
+
+	// Drop shadow: dim cells 1 row below and 1 col right of the box.
+	// Uses 256-color index 236 on whatever text is underneath.
+	shadowCode := "\x1b[48;5;235m\x1b[38;5;238m"
+	// Right-side shadow column (skip the very top row so it looks like light from top-left)
+	for row := 0; row < boxH; row++ {
+		ry := by + row + 1
+		rx := bx + boxW
+		if ry >= p.y+p.h || rx >= p.x+p.w {
+			continue
+		}
+		r.moveTo(ry, rx)
+		r.buf.WriteString(shadowCode)
+		r.buf.WriteString(" ")
+		r.buf.WriteString(reset)
+	}
+	// Bottom shadow row
+	{
+		ry := by + boxH
+		if ry < p.y+p.h {
+			for col := 0; col < boxW; col++ {
+				rx := bx + col + 1
+				if rx >= p.x+p.w {
+					break
+				}
+				r.moveTo(ry, rx)
+				r.buf.WriteString(shadowCode)
+				r.buf.WriteString(" ")
+				r.buf.WriteString(reset)
+			}
+		}
+	}
+
+	// Top border: ╭───╮
+	r.moveTo(by, bx)
+	r.buf.WriteString(bgCode)
+	r.buf.WriteString(borderFg)
+	r.buf.WriteString("\u256d")
+	for i := 0; i < boxW-2; i++ {
+		r.buf.WriteString("\u2500")
+	}
+	r.buf.WriteString("\u256e")
+	r.buf.WriteString(reset)
+
+	// Content rows
+	for i, ln := range lines {
+		ry := by + 1 + i
+		if ry >= p.y+p.h {
+			break
+		}
+		// Truncate line to innerW runes
+		runes := []rune(ln)
+		if len(runes) > innerW {
+			if innerW > 1 {
+				runes = append(runes[:innerW-1], '\u2026')
+			} else {
+				runes = runes[:innerW]
+			}
+		}
+		padded := string(runes)
+		// Right-pad with spaces
+		for j := utf8.RuneCountInString(padded); j < innerW; j++ {
+			padded += " "
+		}
+
+		r.moveTo(ry, bx)
+		r.buf.WriteString(bgCode)
+		r.buf.WriteString(borderFg)
+		r.buf.WriteString("\u2502") // left │
+		// Content: first line bold bright white, subsequent dim
+		if i == 0 {
+			r.buf.WriteString("\x1b[1;97m")
+		} else {
+			r.buf.WriteString("\x1b[22;2;37m")
+		}
+		r.buf.WriteString(" ")
+		r.buf.WriteString(padded)
+		r.buf.WriteString(" ")
+		r.buf.WriteString("\x1b[22m") // reset bold/dim
+		r.buf.WriteString(borderFg)
+		r.buf.WriteString("\u2502") // right │
+		r.buf.WriteString(reset)
+	}
+
+	// Bottom border: ╰───╯
+	ry := by + boxH - 1
+	if ry < p.y+p.h {
+		r.moveTo(ry, bx)
+		r.buf.WriteString(bgCode)
+		r.buf.WriteString(borderFg)
+		r.buf.WriteString("\u2570")
+		for i := 0; i < boxW-2; i++ {
+			r.buf.WriteString("\u2500")
+		}
+		r.buf.WriteString("\u256f")
+		r.buf.WriteString(reset)
+	}
+
+	// Reset renderer tracking after raw escape codes
+	r.prevFg = Color{Index: -2}
+	r.prevBg = Color{Index: -2}
+	r.prevAttr = 0
+}
+
+// renderOverlayPill draws a single-line fallback overlay for very small panes.
+func (r *Renderer) renderOverlayPill(p *Pane, text string) {
+	text = " " + text + " "
+	textLen := utf8.RuneCountInString(text)
 	cx := p.x + (p.w-textLen)/2
 	cy := p.y + p.h/2
-
 	if cx < p.x {
 		cx = p.x
 	}
@@ -1424,24 +1791,22 @@ func (r *Renderer) renderOverlay(p *Pane) {
 		return
 	}
 
-	// Choose style colors
 	var bgCode string
 	switch p.overlayStyle {
 	case "success":
-		bgCode = "\x1b[1;37;48;5;22m" // bold white on dark green
+		bgCode = "\x1b[1;37;48;5;22m"
 	case "error":
-		bgCode = "\x1b[1;37;48;5;52m" // bold white on dark red
+		bgCode = "\x1b[1;37;48;5;52m"
 	case "info":
-		bgCode = "\x1b[37;48;5;17m" // white on dark blue
+		bgCode = "\x1b[37;48;5;17m"
 	default:
-		bgCode = "\x1b[1;37;48;5;236m" // white on dark gray
+		bgCode = "\x1b[1;37;48;5;236m"
 	}
 
 	r.moveTo(cy, cx)
 	r.buf.WriteString(bgCode)
 	r.buf.WriteString(text)
 	r.buf.WriteString("\x1b[0m")
-	// Reset renderer tracking after raw escape codes
 	r.prevFg = Color{Index: -2}
 	r.prevBg = Color{Index: -2}
 	r.prevAttr = 0
@@ -1491,50 +1856,86 @@ func (r *Renderer) renderSelection(p *Pane) {
 	r.prevBg = defaultColor
 }
 
+// renderStatusBar paints the bottom status line in a Claude-Code-inspired
+// style: dark background, bold-cyan labels, colored segments separated by
+// thin dim vertical bars. Segments use the "CODE:text" format; consult
+// the switch below for the full palette.
 func (r *Renderer) renderStatusBar(row, cols int, text string) {
-	r.moveTo(row, 0)
-	// Dark background for status bar
-	r.setAttr(defaultColor, defaultColor, AttrDim)
-	fmt.Fprintf(&r.buf, "\x1b[48;5;236m")
-	r.prevBg = Color{Index: -2} // force reset next
+	const (
+		bg      = "\x1b[48;5;236m" // dark gray background for the whole bar
+		reset   = "\x1b[39m\x1b[48;5;236m"
+		divider = "\x1b[38;5;240m│\x1b[0m" + "\x1b[48;5;236m"
+	)
 
-	// Parse and render status segments (tab-separated, COLOR:text)
-	segments := strings.Split(text, "\t")
+	r.moveTo(row, 0)
+	r.buf.WriteString(bg)
+	r.prevBg = Color{Index: -2}
+
+	// Initial padding
+	r.buf.WriteString(" ")
 	col := 1
-	for _, seg := range segments {
-		if col > 1 {
+
+	segments := strings.Split(text, "\t")
+	for i, seg := range segments {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			continue
+		}
+		if i > 0 {
 			r.buf.WriteString(" ")
-			col++
+			r.buf.WriteString(divider)
+			r.buf.WriteString(" ")
+			col += 3
 		}
 		parts := strings.SplitN(seg, ":", 2)
+		code := ""
+		txt := seg
 		if len(parts) == 2 {
-			color := strings.TrimSpace(parts[0])
-			txt := strings.TrimSpace(parts[1])
-			switch color {
-			case "M": // Magenta
-				fmt.Fprintf(&r.buf, "\x1b[1;35m")
-			case "C": // Cyan
-				fmt.Fprintf(&r.buf, "\x1b[1;36m")
-			case "G": // Green
-				fmt.Fprintf(&r.buf, "\x1b[1;32m")
-			case "R": // Red
-				fmt.Fprintf(&r.buf, "\x1b[1;31m")
-			case "Y": // Yellow
-				fmt.Fprintf(&r.buf, "\x1b[1;33m")
-			case "W": // White
-				fmt.Fprintf(&r.buf, "\x1b[37m")
-			case "D": // Dim
-				fmt.Fprintf(&r.buf, "\x1b[2;37m")
-			default:
-				fmt.Fprintf(&r.buf, "\x1b[37m")
-			}
-			r.buf.WriteString(txt)
-			col += len(txt)
-		} else {
-			r.buf.WriteString(seg)
-			col += len(seg)
+			code = strings.TrimSpace(parts[0])
+			txt = strings.TrimSpace(parts[1])
+		}
+
+		switch code {
+		case "*": // Cyan bold asterisk + label (used for "* Opus" style)
+			r.buf.WriteString("\x1b[1;38;5;51m*\x1b[0m" + bg + "\x1b[1;38;5;51m " + txt + reset)
+			col += 2 + utf8.RuneCountInString(txt)
+		case "C": // Cyan bold label
+			r.buf.WriteString("\x1b[1;38;5;51m" + txt + reset)
+			col += utf8.RuneCountInString(txt)
+		case "P": // Green pill (bold bright white on dark green)
+			r.buf.WriteString("\x1b[48;5;22m\x1b[1;97m " + txt + " \x1b[0m" + bg)
+			col += utf8.RuneCountInString(txt) + 2
+		case "Pr": // Red pill
+			r.buf.WriteString("\x1b[48;5;52m\x1b[1;97m " + txt + " \x1b[0m" + bg)
+			col += utf8.RuneCountInString(txt) + 2
+		case "Py": // Yellow pill
+			r.buf.WriteString("\x1b[48;5;94m\x1b[1;97m " + txt + " \x1b[0m" + bg)
+			col += utf8.RuneCountInString(txt) + 2
+		case "$", "Y": // Yellow bold (money / warnings)
+			r.buf.WriteString("\x1b[1;38;5;220m" + txt + reset)
+			col += utf8.RuneCountInString(txt)
+		case "M": // Magenta bold
+			r.buf.WriteString("\x1b[1;38;5;213m" + txt + reset)
+			col += utf8.RuneCountInString(txt)
+		case "G": // Green bold
+			r.buf.WriteString("\x1b[1;38;5;82m" + txt + reset)
+			col += utf8.RuneCountInString(txt)
+		case "R": // Red bold
+			r.buf.WriteString("\x1b[1;38;5;203m" + txt + reset)
+			col += utf8.RuneCountInString(txt)
+		case "W": // White
+			r.buf.WriteString("\x1b[1;97m" + txt + reset)
+			col += utf8.RuneCountInString(txt)
+		case "D": // Dim gray (help text)
+			r.buf.WriteString("\x1b[2;38;5;245m" + txt + "\x1b[22;39m" + bg)
+			col += utf8.RuneCountInString(txt)
+		default:
+			// Unknown code — render as plain text
+			r.buf.WriteString("\x1b[38;5;250m" + txt + reset)
+			col += utf8.RuneCountInString(txt)
 		}
 	}
+
 	// Fill rest of line
 	for col < cols {
 		r.buf.WriteByte(' ')
@@ -1565,13 +1966,52 @@ type Magmux struct {
 	wg              sync.WaitGroup
 	gridMode        bool   // -g flag was used
 	autoExit        bool   // -w flag: quit automatically when all panes done
-	statusFile      string // -S file path
-	statusFileMtime int64  // last observed mtime (unix nanos)
-	sockPath        string // /tmp/magmux-{pid}.sock
-	lastDoneCount   int    // track status bar updates to avoid redundant rewrites
+	sockPath        string    // /tmp/magmux-{pid}.sock
+	lastDoneCount   int       // track status bar updates to avoid redundant rewrites
+	startedAt       time.Time // when magmux started (for status bar timer)
+	completedAt    time.Time // when all panes reached "done" (freezes timer)
+	lastTimerTick   int       // elapsed seconds at last forced status redraw
+	// Interactive tool controllers
+	controllerFactories []ControllerFactory
+	lastControllerPoll  time.Time
+	ctx                 context.Context
+	// claimedSessions maps controller-managed session file paths to the
+	// pane that owns them. Used so sibling controllers don't both pick the
+	// same JSONL file when running in the same project directory.
+	claimedSessions map[string]*Pane
+	claimedMu       sync.Mutex
+}
+
+// claimSession atomically attempts to mark `path` as owned by `p`. Returns
+// true if the claim succeeded (path was free). Used by controllers that
+// resolve their target file by scanning a directory.
+func (m *Magmux) claimSession(path string, p *Pane) bool {
+	m.claimedMu.Lock()
+	defer m.claimedMu.Unlock()
+	if m.claimedSessions == nil {
+		m.claimedSessions = make(map[string]*Pane)
+	}
+	if owner, ok := m.claimedSessions[path]; ok && owner != p {
+		return false
+	}
+	m.claimedSessions[path] = p
+	return true
+}
+
+// isSessionClaimed returns true if `path` is already owned by a pane other
+// than `p`. Used by controllers to skip files claimed by siblings during
+// directory scanning.
+func (m *Magmux) isSessionClaimed(path string, p *Pane) bool {
+	m.claimedMu.Lock()
+	defer m.claimedMu.Unlock()
+	if owner, ok := m.claimedSessions[path]; ok && owner != p {
+		return true
+	}
+	return false
 }
 
 func (m *Magmux) init() error {
+	m.startedAt = time.Now()
 	// Debug log
 	if os.Getenv("MAGMUX_DEBUG") != "" {
 		dbgFile, _ = os.Create("/tmp/magmux-debug.log")
@@ -1834,6 +2274,127 @@ func (m *Magmux) startReadLoops() {
 	}
 }
 
+// attachControllers walks every leaf pane and attaches a ToolController if
+// any registered factory recognizes the pane's command. Called once after
+// the layout is built and panes are spawned.
+func (m *Magmux) attachControllers() {
+	if m.ctx == nil {
+		m.ctx = context.Background()
+	}
+	for _, p := range m.allPanes {
+		p.mux = m
+		if p.controller != nil {
+			continue
+		}
+		for _, factory := range m.controllerFactories {
+			if c := factory(p); c != nil {
+				p.controller = c
+				if err := c.Start(m.ctx); err != nil {
+					if dbgFile != nil {
+						fmt.Fprintf(dbgFile, "[ctrl] %s.Start error: %v\n", c.Name(), err)
+					}
+					p.controller = nil
+					continue
+				}
+				if dbgFile != nil {
+					fmt.Fprintf(dbgFile, "[ctrl] attached %s to pane\n", c.Name())
+				}
+				break
+			}
+		}
+	}
+}
+
+// pollControllers polls each attached controller and translates the
+// resulting Snapshot into pane state (inputReady, tint, overlayText).
+// Throttled to ~4Hz from the render loop.
+func (m *Magmux) pollControllers() {
+	now := time.Now()
+	if !m.lastControllerPoll.IsZero() && now.Sub(m.lastControllerPoll) < 250*time.Millisecond {
+		return
+	}
+	m.lastControllerPoll = now
+
+	for _, p := range m.allPanes {
+		if p.controller == nil {
+			continue
+		}
+		snap, err := p.controller.Poll()
+		if err != nil {
+			if dbgFile != nil {
+				fmt.Fprintf(dbgFile, "[ctrl] %s.Poll error: %v\n", p.controller.Name(), err)
+			}
+			continue
+		}
+		p.mu.Lock()
+		p.controllerSnap = snap
+		applyControllerSnapshot(p, snap)
+		p.mu.Unlock()
+	}
+}
+
+// applyControllerSnapshot translates a Snapshot into pane visual state.
+// Caller must hold p.mu.
+func applyControllerSnapshot(p *Pane, s Snapshot) {
+	switch s.State {
+	case CtrlAwaitingInput:
+		if !p.inputReady {
+			p.inputReady = true
+			p.inputSignal = "ctrl"
+			p.tint = "green"
+			p.overlayStyle = "success"
+			lines := []string{"\u2713 DONE"}
+			if !s.StartedAt.IsZero() && !s.CompletedAt.IsZero() {
+				lines = append(lines, "took "+formatDuration(s.CompletedAt.Sub(s.StartedAt)))
+			}
+			if s.LastResponse != "" {
+				msg := s.LastResponse
+				// Collapse newlines and truncate to 40 runes
+				msg = strings.ReplaceAll(msg, "\n", " ")
+				msg = strings.TrimSpace(msg)
+				if utf8.RuneCountInString(msg) > 40 {
+					runes := []rune(msg)
+					msg = string(runes[:39]) + "\u2026"
+				}
+				lines = append(lines, msg)
+			}
+			p.overlayText = strings.Join(lines, "\n")
+			p.dirty = true
+		}
+
+	case CtrlAwaitingPermission:
+		if !p.inputReady || p.inputSignal != "perm" {
+			p.inputReady = true
+			p.inputSignal = "perm"
+			p.tint = "yellow"
+			p.overlayText = "\u26a0 NEEDS PERMISSION"
+			p.overlayStyle = "info"
+			p.dirty = true
+		}
+
+	case CtrlError:
+		p.tint = "red"
+		if s.Error != nil {
+			p.overlayText = "\u2717 " + s.Error.Error()
+		} else {
+			p.overlayText = "\u2717 ERROR"
+		}
+		p.overlayStyle = "error"
+		p.dirty = true
+
+	case CtrlWorking, CtrlStarting:
+		// If we previously fired DONE via a controller signal, clear it
+		// (a new turn started). Don't touch state set by other code paths.
+		if p.inputReady && p.inputSignal == "ctrl" {
+			p.inputReady = false
+			p.tint = ""
+			p.overlayText = ""
+			p.overlayStyle = ""
+			p.dirty = true
+		}
+	}
+}
+
 func (m *Magmux) handleSIGWINCH() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGWINCH)
@@ -1919,9 +2480,9 @@ func (m *Magmux) inputLoop() {
 				continue
 			}
 
-			// Grid mode: when all panes are dead, Ctrl-C or 'q' exits
-			if m.gridMode && m.allPanesDead() {
-				if b == 0x03 || b == 'q' { // Ctrl-C or q
+			// Grid mode: when all panes are done (dead or idle), q/Esc/Ctrl-C exits
+			if m.gridMode && m.allPanesDone() {
+				if b == 0x03 || b == 'q' || b == 0x1b { // Ctrl-C, q, or Esc
 					m.quitOnce.Do(func() { close(m.quit) })
 					return
 				}
@@ -2521,43 +3082,6 @@ func (m *Magmux) updateAgentStatusBar() {
 
 // ── Status File Polling ─────────────────────────────────────────────────────
 
-func (m *Magmux) pollStatusFile() {
-	if m.statusFile == "" {
-		return
-	}
-	info, err := os.Stat(m.statusFile)
-	if err != nil {
-		return
-	}
-	mtime := info.ModTime().UnixNano()
-	if mtime == m.statusFileMtime {
-		return
-	}
-	m.statusFileMtime = mtime
-
-	// Read last line of the file
-	f, err := os.Open(m.statusFile)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	var lastLine string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		lastLine = scanner.Text()
-	}
-	if lastLine != "" {
-		m.statusText = lastLine
-		// Force redraw
-		for _, p := range m.allPanes {
-			p.mu.Lock()
-			p.dirty = true
-			p.mu.Unlock()
-		}
-	}
-}
-
 // ── Grid Mode Exit Handling ─────────────────────────────────────────────────
 
 // waitForChild waits for a pane's child process to exit and sets exit state.
@@ -2578,31 +3102,35 @@ func (m *Magmux) waitForChild(p *Pane) {
 		p.exitCode = 0
 	}
 
-	// Set overlay based on exit code
+	// Build completion overlay with duration + last output line
+	var duration string
+	if !p.startedAt.IsZero() {
+		duration = formatDuration(time.Since(p.startedAt))
+	}
+	lastMsg := p.lastNonEmptyLine(40)
+
+	var header string
 	if p.exitCode == 0 {
-		p.overlayText = "\u2713 DONE"
+		header = "\u2713 DONE"
 		p.overlayStyle = "success"
 		p.tint = "green"
 	} else {
-		p.overlayText = fmt.Sprintf("\u2717 FAIL (exit %d)", p.exitCode)
+		header = fmt.Sprintf("\u2717 FAIL (exit %d)", p.exitCode)
 		p.overlayStyle = "error"
 		p.tint = "red"
 	}
+
+	var lines []string
+	lines = append(lines, header)
+	if duration != "" {
+		lines = append(lines, "took "+duration)
+	}
+	if lastMsg != "" {
+		lines = append(lines, lastMsg)
+	}
+	p.overlayText = strings.Join(lines, "\n")
 	p.dirty = true
 	p.mu.Unlock()
-}
-
-// allPanesDead returns true if every pane in grid mode has exited.
-func (m *Magmux) allPanesDead() bool {
-	for _, p := range m.allPanes {
-		p.mu.Lock()
-		dead := p.dead
-		p.mu.Unlock()
-		if !dead {
-			return false
-		}
-	}
-	return true
 }
 
 // allPanesDone returns true if every pane is either dead or inputReady.
@@ -2621,7 +3149,6 @@ func (m *Magmux) renderLoop() {
 		case <-m.quit:
 			return
 		default:
-			m.pollStatusFile()
 			m.render()
 			sleepMs(16) // ~60fps max, but render() skips when nothing dirty
 		}
@@ -2629,11 +3156,29 @@ func (m *Magmux) renderLoop() {
 }
 
 func (m *Magmux) render() {
+	// Poll attached interactive tool controllers (throttled internally to ~4Hz).
+	// This must run BEFORE the heuristic detection below so that controller
+	// state takes precedence over screen-scraping when both are available.
+	m.pollControllers()
+
 	// Grid mode: idle/completion detection
 	if m.gridMode {
 		now := time.Now()
 		for _, p := range m.allPanes {
 			p.mu.Lock()
+			// Title idle debounce: fire inputReady after the window title has been
+			// showing ✳ (idle) for at least 2 seconds without any spinner title
+			// reappearing. This filters Claude Code's brief "✳ → spinner → ✳"
+			// transitions between model response and stop hooks.
+			if !p.inputReady && !p.dead && !p.titleIdleAt.IsZero() &&
+				now.Sub(p.titleIdleAt) > 2*time.Second {
+				p.inputReady = true
+				p.inputSignal = "title"
+				if dbgFile != nil {
+					fmt.Fprintf(dbgFile, "[title] idle for %.1fs → inputReady=true\n",
+						now.Sub(p.titleIdleAt).Seconds())
+				}
+			}
 			// Text idle detection: if no printable text for 5s, mark as input-ready.
 			// This catches TUI apps (like Claude Code) that don't cycle bracketed paste.
 			if !p.inputReady && !p.dead && p.hadTextOutput &&
@@ -2648,8 +3193,17 @@ func (m *Magmux) render() {
 			// TUI app waiting for input → tint green + overlay (task complete)
 			if p.inputReady && p.tint == "" {
 				p.tint = "green"
-				p.overlayText = "\u2713 DONE"
 				p.overlayStyle = "success"
+				// Build multi-line popup with duration + last output line
+				var lines []string
+				lines = append(lines, "\u2713 DONE")
+				if !p.startedAt.IsZero() {
+					lines = append(lines, "took "+formatDuration(time.Since(p.startedAt)))
+				}
+				if msg := p.lastNonEmptyLine(40); msg != "" {
+					lines = append(lines, msg)
+				}
+				p.overlayText = strings.Join(lines, "\n")
 				p.dirty = true
 			}
 			p.mu.Unlock()
@@ -2659,31 +3213,72 @@ func (m *Magmux) render() {
 	// Update status bar with done/running counts (grid mode)
 	if m.gridMode {
 		done, running := 0, 0
-		var signals []string
 		for _, p := range m.allPanes {
 			p.mu.Lock()
 			if p.dead || p.inputReady {
 				done++
-				if p.inputSignal != "" {
-					signals = append(signals, p.inputSignal)
-				}
 			} else {
 				running++
 			}
 			p.mu.Unlock()
 		}
-		if done != m.lastDoneCount {
-			m.lastDoneCount = done
-			if done > 0 {
-				total := len(m.allPanes)
-				sig := strings.Join(signals, ",")
-				if running == 0 {
-					m.statusText = fmt.Sprintf("C: magmux\tG: %d done\tG: complete [%s]\tD: ctrl-g q quit", total, sig)
-				} else {
-					m.statusText = fmt.Sprintf("C: magmux\tG: %d done [%s]\tC: %d running\tD: ctrl-g Tab switch\tD: ctrl-g q quit", done, sig, running)
+		// Rebuild status text every render so the timer stays current
+		// while work is in progress; freeze it the moment everything
+		// finishes so the user sees the final elapsed time.
+		total := len(m.allPanes)
+		allDone := total > 0 && running == 0 && done == total
+		if allDone && m.completedAt.IsZero() {
+			m.completedAt = time.Now()
+		}
+		if !allDone && !m.completedAt.IsZero() {
+			// A pane came back to life — reset the freeze
+			m.completedAt = time.Time{}
+		}
+
+		var elapsed string
+		if !m.completedAt.IsZero() {
+			elapsed = formatDuration(m.completedAt.Sub(m.startedAt))
+		} else {
+			elapsed = formatDuration(time.Since(m.startedAt))
+		}
+
+		// Build segments, then maybe append attribution if there's room
+		var segs string
+		if done == 0 && running == 0 {
+			// No panes tracked yet — leave default text alone
+			segs = ""
+		} else if allDone {
+			segs = fmt.Sprintf("*: %s\tP: %d/%d done\tG: ✓ complete\tM: %s\tD: q or Esc to quit",
+				magmuxLabel(), total, total, elapsed)
+		} else {
+			segs = fmt.Sprintf("*: %s\tP: %d/%d done\tY: %d running\tM: %s\tD: ctrl-g Tab · q quit",
+				magmuxLabel(), done, total, running, elapsed)
+		}
+		if segs != "" {
+			// Append "by MadAppGang" attribution if there's room.
+			// Rough visible width: sum of segment text lengths + dividers +
+			// padding. We don't need precision; a permissive threshold is fine.
+			const attribution = "by MadAppGang"
+			if m.cols > 100 && approxStatusWidth(segs)+len(attribution)+6 < m.cols {
+				segs += "\tD: " + attribution
+			}
+			m.statusText = segs
+		}
+
+		// Force a redraw once per second so the timer updates visibly even
+		// when no pane has new content — but only while the timer is live.
+		if m.completedAt.IsZero() {
+			curSec := int(time.Since(m.startedAt).Seconds())
+			if curSec != m.lastTimerTick {
+				m.lastTimerTick = curSec
+				if m.focused != nil {
+					m.focused.mu.Lock()
+					m.focused.dirty = true
+					m.focused.mu.Unlock()
 				}
 			}
 		}
+		m.lastDoneCount = done
 	}
 
 	// Auto-exit: quit when all panes done (-w flag)
@@ -2723,7 +3318,7 @@ func (m *Magmux) render() {
 
 	// Status bar
 	if m.statusText == "" {
-		m.statusText = "C: magmux\tD: press Ctrl-G then q to quit\tD: Ctrl-G Tab to switch panes"
+		m.statusText = "*: " + magmuxLabel() + "\tD: ctrl-g q quit\tD: ctrl-g Tab switch"
 	}
 	r.renderStatusBar(m.rows-1, m.cols, m.statusText)
 
@@ -2822,7 +3417,6 @@ func main() {
 			fmt.Println()
 			fmt.Println("Options:")
 			fmt.Println("  -g FILE   Grid file (one command per line, overrides -e)")
-			fmt.Println("  -S FILE   Status bar file (polled for last-line content)")
 			fmt.Println("  -e CMD    Run CMD in a pane (can be repeated)")
 			fmt.Println("  -w        Auto-exit when all panes are done (dead or idle)")
 			fmt.Println("  -v        Show version")
@@ -2835,7 +3429,8 @@ func main() {
 			fmt.Println("  sleep 5 && echo done")
 			fmt.Println()
 			fmt.Println("Controls:")
-			fmt.Println("  Ctrl-G q      Quit")
+			fmt.Println("  Ctrl-G q      Quit (always)")
+			fmt.Println("  q / Esc       Quit (when all panes done, grid mode)")
 			fmt.Println("  Ctrl-G Tab    Switch focus to next pane")
 			fmt.Println("  Mouse click   Switch focus to clicked pane")
 			fmt.Println("  Mouse drag    Select text (auto-copies to clipboard)")
@@ -2871,7 +3466,6 @@ func main() {
 	// Parse flags
 	args := os.Args[1:]
 	var gridFile string
-	var statusFile string
 	var customCmds []PaneConfig
 	autoExit := false
 	for i := 0; i < len(args); i++ {
@@ -2880,11 +3474,6 @@ func main() {
 			if i+1 < len(args) {
 				i++
 				gridFile = args[i]
-			}
-		case "-S":
-			if i+1 < len(args) {
-				i++
-				statusFile = args[i]
 			}
 		case "-e":
 			if i+1 < len(args) {
@@ -2923,6 +3512,7 @@ func main() {
 		useGrid = true
 	} else if len(customCmds) > 0 {
 		commands = customCmds
+		useGrid = true
 	} else {
 		// Default: 3 panes running user's login shell
 		commands = []PaneConfig{
@@ -2933,9 +3523,11 @@ func main() {
 	}
 
 	mux := &Magmux{
-		gridMode:   useGrid,
-		autoExit:   autoExit,
-		statusFile: statusFile,
+		gridMode: useGrid,
+		autoExit: autoExit,
+		controllerFactories: []ControllerFactory{
+			claudeCodeFactory,
+		},
 	}
 
 	if err := mux.init(); err != nil {
@@ -2964,6 +3556,7 @@ func main() {
 	}
 
 	mux.startReadLoops()
+	mux.attachControllers()
 
 	// In grid mode, start waiters for each child process
 	if useGrid {

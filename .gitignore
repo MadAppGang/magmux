@@ -2,3 +2,5 @@ magmux
 dist/
 *.log
 /tmp/
+.task/
+.task-grids/
