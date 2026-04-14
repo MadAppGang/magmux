@@ -1967,6 +1967,8 @@ type Magmux struct {
 	gridMode        bool   // -g flag was used
 	autoExit        bool   // -w flag: quit automatically when all panes done
 	sockPath        string    // /tmp/magmux-{pid}.sock
+	sockClients     []net.Conn // currently-connected socket subscribers (for push events)
+	sockClientsMu   sync.Mutex
 	lastDoneCount   int       // track status bar updates to avoid redundant rewrites
 	startedAt       time.Time // when magmux started (for status bar timer)
 	completedAt    time.Time // when all panes reached "done" (freezes timer)
@@ -2315,7 +2317,7 @@ func (m *Magmux) pollControllers() {
 	}
 	m.lastControllerPoll = now
 
-	for _, p := range m.allPanes {
+	for idx, p := range m.allPanes {
 		if p.controller == nil {
 			continue
 		}
@@ -2327,10 +2329,54 @@ func (m *Magmux) pollControllers() {
 			continue
 		}
 		p.mu.Lock()
+		prev := p.controllerSnap
 		p.controllerSnap = snap
 		applyControllerSnapshot(p, snap)
 		p.mu.Unlock()
+
+		// Broadcast on meaningful change (state transition, new response,
+		// tool change, or new prompt). Skip no-op polls.
+		if snapshotChanged(prev, snap) {
+			m.broadcastEvent(map[string]any{
+				"type":        "snapshot",
+				"pane":        idx,
+				"controller":  p.controller.Name(),
+				"state":       snap.State.String(),
+				"project":     snap.Project,
+				"model":       snap.Model,
+				"prompt":      snap.LastUserPrompt,
+				"response":    snap.LastResponse,
+				"tool":        snap.LastTool,
+				"startedAt":   timeStringOrEmpty(snap.StartedAt),
+				"completedAt": timeStringOrEmpty(snap.CompletedAt),
+			})
+		}
 	}
+}
+
+// snapshotChanged returns true if the meaningful fields of a controller
+// snapshot differ from the previous one.
+func snapshotChanged(a, b Snapshot) bool {
+	if a.State != b.State {
+		return true
+	}
+	if a.LastResponse != b.LastResponse {
+		return true
+	}
+	if a.LastUserPrompt != b.LastUserPrompt {
+		return true
+	}
+	if a.LastTool != b.LastTool {
+		return true
+	}
+	return false
+}
+
+func timeStringOrEmpty(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 // applyControllerSnapshot translates a Snapshot into pane visual state.
@@ -2840,6 +2886,20 @@ func (m *Magmux) socketServer() {
 	// Cleanup on exit
 	go func() {
 		<-m.quit
+		// Push a final aggregated results event with the last-known state of
+		// every pane. Subscribers (e.g. claudish) use this as the authoritative
+		// final state — no file-based fallback needed.
+		m.broadcastEvent(map[string]any{
+			"type":    "results",
+			"panes":   m.buildPaneResults(),
+			"endedAt": time.Now().UTC().Format(time.RFC3339),
+		})
+		// Push a shutdown event so clients know the socket is closing.
+		m.broadcastEvent(map[string]any{
+			"type": "shutdown",
+		})
+		// Give subscribers a moment to drain before we close the listener.
+		time.Sleep(50 * time.Millisecond)
 		ln.Close()
 		os.Remove(sockPath)
 	}()
@@ -2854,7 +2914,23 @@ func (m *Magmux) socketServer() {
 }
 
 func (m *Magmux) handleSocketConn(conn net.Conn) {
-	defer conn.Close()
+	// Track this connection so we can push snapshots/exit events to it.
+	m.sockClientsMu.Lock()
+	m.sockClients = append(m.sockClients, conn)
+	m.sockClientsMu.Unlock()
+
+	defer func() {
+		conn.Close()
+		m.sockClientsMu.Lock()
+		for i, c := range m.sockClients {
+			if c == conn {
+				m.sockClients = append(m.sockClients[:i], m.sockClients[i+1:]...)
+				break
+			}
+		}
+		m.sockClientsMu.Unlock()
+	}()
+
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -2863,6 +2939,28 @@ func (m *Magmux) handleSocketConn(conn net.Conn) {
 			continue
 		}
 		m.dispatchSocketMsg(msg)
+	}
+}
+
+// broadcastEvent serializes an event as JSON and pushes it to all connected
+// socket clients. Best-effort: failed writes drop the client silently.
+func (m *Magmux) broadcastEvent(event any) {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	data = append(data, '\n')
+
+	m.sockClientsMu.Lock()
+	defer m.sockClientsMu.Unlock()
+	// Iterate in reverse so we can splice out dead clients.
+	for i := len(m.sockClients) - 1; i >= 0; i-- {
+		c := m.sockClients[i]
+		_ = c.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+		if _, err := c.Write(data); err != nil {
+			c.Close()
+			m.sockClients = append(m.sockClients[:i], m.sockClients[i+1:]...)
+		}
 	}
 }
 
@@ -3130,7 +3228,88 @@ func (m *Magmux) waitForChild(p *Pane) {
 	}
 	p.overlayText = strings.Join(lines, "\n")
 	p.dirty = true
+	// Capture fields for broadcast under the lock, then release before I/O.
+	exitCode := p.exitCode
+	snap := p.controllerSnap
 	p.mu.Unlock()
+
+	// Find pane index (stable across the lifetime of Magmux).
+	paneIdx := -1
+	for i, pp := range m.allPanes {
+		if pp == p {
+			paneIdx = i
+			break
+		}
+	}
+
+	// Push an exit event over the IPC socket so subscribers (e.g. claudish)
+	// learn about per-pane completion without polling files.
+	m.broadcastEvent(map[string]any{
+		"type":     "exit",
+		"pane":     paneIdx,
+		"exitCode": exitCode,
+		"duration": duration,
+		"lastLine": lastMsg,
+		"response": snap.LastResponse,
+		"prompt":   snap.LastUserPrompt,
+		"tool":     snap.LastTool,
+		"model":    snap.Model,
+	})
+}
+
+// buildPaneResults collects the final state of every pane into a serializable
+// slice. Used to push an authoritative final state to subscribers right before
+// the socket closes.
+func (m *Magmux) buildPaneResults() []map[string]any {
+	results := make([]map[string]any, 0, len(m.allPanes))
+	for i, p := range m.allPanes {
+		p.mu.Lock()
+		snap := p.controllerSnap
+		var state string
+		switch {
+		case p.dead && p.exitCode == 0:
+			state = "completed"
+		case p.dead && p.exitCode != 0:
+			state = "failed"
+		case p.inputReady:
+			state = "awaiting_input"
+		default:
+			state = "running"
+		}
+		entry := map[string]any{
+			"pane":     i,
+			"state":    state,
+			"exitCode": p.exitCode,
+			"dead":     p.dead,
+		}
+		if p.controller != nil {
+			entry["controller"] = p.controller.Name()
+		}
+		if snap.Model != "" {
+			entry["model"] = snap.Model
+		}
+		if snap.Project != "" {
+			entry["project"] = snap.Project
+		}
+		if snap.LastUserPrompt != "" {
+			entry["prompt"] = snap.LastUserPrompt
+		}
+		if snap.LastResponse != "" {
+			entry["response"] = snap.LastResponse
+		}
+		if snap.LastTool != "" {
+			entry["tool"] = snap.LastTool
+		}
+		if !snap.StartedAt.IsZero() {
+			entry["startedAt"] = snap.StartedAt.UTC().Format(time.RFC3339)
+		}
+		if !snap.CompletedAt.IsZero() {
+			entry["completedAt"] = snap.CompletedAt.UTC().Format(time.RFC3339)
+		}
+		p.mu.Unlock()
+		results = append(results, entry)
+	}
+	return results
 }
 
 // allPanesDone returns true if every pane is either dead or inputReady.
