@@ -1072,6 +1072,15 @@ func (vt *VTParser) doPrint(w rune) {
 		}
 	}
 
+	// Guard against zero-sized screens (e.g. when the controlling terminal
+	// reports 0x0 rows/cols during startup or under `script`).
+	if s.rows <= 0 || s.cols <= 0 || s.curY >= len(s.cells) || s.curY < 0 {
+		return
+	}
+	if s.curX < 0 || s.curX >= len(s.cells[s.curY]) {
+		return
+	}
+
 	s.cells[s.curY][s.curX] = Cell{
 		Ch:   w,
 		Fg:   s.fg,
