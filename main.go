@@ -151,6 +151,15 @@ type Screen struct {
 }
 
 func newScreen(rows, cols int) *Screen {
+	// Clamp negative/zero dimensions so a PTY that reports 0x0 (or a layout
+	// that produces underflow on extreme terminal sizes) doesn't panic in
+	// makeGrid's underlying `make([][]Cell, rows)` call.
+	if rows < 1 {
+		rows = 1
+	}
+	if cols < 1 {
+		cols = 1
+	}
 	s := &Screen{
 		rows:      rows,
 		cols:      cols,
@@ -164,6 +173,12 @@ func newScreen(rows, cols int) *Screen {
 }
 
 func makeGrid(rows, cols int) [][]Cell {
+	if rows < 0 {
+		rows = 0
+	}
+	if cols < 0 {
+		cols = 0
+	}
 	grid := make([][]Cell, rows)
 	for i := range grid {
 		grid[i] = make([]Cell, cols)
@@ -461,6 +476,38 @@ func (vt *VTParser) p0(i int) int {
 	return vt.args[i]
 }
 
+// isNotificationOSC9 returns true if an OSC 9 body looks like an iTerm2-style
+// textual notification (e.g. "9;Claude is waiting for input") and NOT one of
+// the common collision cases:
+//   - OSC 9;4;... — ConEmu progress bar protocol (`9;4;<state>;<value>`)
+//   - OSC 9;<digits>;<digits> — numeric-only bodies used by various extensions
+func isNotificationOSC9(osc string) bool {
+	// body is everything after "9;"
+	if !strings.HasPrefix(osc, "9;") {
+		return false
+	}
+	body := osc[2:]
+	if body == "" {
+		return false
+	}
+	// ConEmu progress: 9;4;<state>;<value>
+	if strings.HasPrefix(body, "4;") {
+		return false
+	}
+	// Numeric-only body (e.g. "9;0", "9;1;2"): not a text notification.
+	allDigitsOrSemicolon := true
+	for _, r := range body {
+		if (r < '0' || r > '9') && r != ';' {
+			allDigitsOrSemicolon = false
+			break
+		}
+	}
+	if allDigitsOrSemicolon {
+		return false
+	}
+	return true
+}
+
 // handleOSC processes completed OSC sequences.
 // Detects notification sequences that signal "waiting for input":
 //   - OSC 9;...  — iTerm2-style notification
@@ -481,13 +528,24 @@ func (vt *VTParser) handleOSC() {
 	}
 
 	switch {
-	case strings.HasPrefix(osc, "9;"),
-		strings.HasPrefix(osc, "777;"),
+	// OSC 9 with a textual notification body (iTerm2-style "growl" notification).
+	// Excludes OSC 9;4;... (ConEmu progress bar protocol) and OSC 9 with numeric-
+	// only prefixes (various terminal extensions) because those aren't "waiting
+	// for input" signals.
+	case strings.HasPrefix(osc, "9;") && isNotificationOSC9(osc),
+		strings.HasPrefix(osc, "777;notify;"),
 		osc == "633;B":
-		p.inputReady = true
-		p.inputSignal = "osc"
-		if dbgFile != nil {
-			fmt.Fprintf(dbgFile, "[OSC] notification: %q → inputReady=true\n", osc)
+		// Gate to TUI-ish panes so plain shell commands that happen to emit
+		// OSC 9 notifications (e.g. a build script's completion bell) don't
+		// trigger false positives.
+		if p.altMode || p.controller != nil {
+			p.inputReady = true
+			p.inputSignal = "osc"
+			if dbgFile != nil {
+				fmt.Fprintf(dbgFile, "[OSC] notification: %q → inputReady=true\n", osc)
+			}
+		} else if dbgFile != nil {
+			fmt.Fprintf(dbgFile, "[OSC] notification ignored (no TUI/controller): %q\n", osc)
 		}
 
 	case strings.HasPrefix(osc, "0;"):
@@ -691,11 +749,14 @@ func (vt *VTParser) doCSI(w rune) {
 						vt.node.pasteWasOff = true
 						vt.node.textSincePasteOff = false
 						vt.node.inputReady = false
-					} else if set && !wasPaste && vt.node.pasteWasOff && vt.node.textSincePasteOff {
+					} else if set && !wasPaste && vt.node.pasteWasOff && vt.node.textSincePasteOff &&
+						(vt.node.altMode || vt.node.controller != nil) {
 						// Paste turning back ON after being off AND we saw real text
-						// in between — agent done, waiting for input.
-						// (The text gate filters Claude Code's startup 2004h→2004l→2004h
-						// cycle, which happens before any work has been done.)
+						// in between — TUI app done, waiting for input.
+						//
+						// Gated to alt-screen or controller-managed panes because plain
+						// Node-based shell commands (e.g. `bun run`) also cycle paste
+						// mode during startup/shutdown and would trigger false positives.
 						vt.node.inputReady = true
 						vt.node.inputSignal = "2004"
 					}
@@ -1238,12 +1299,19 @@ func (p *Pane) lastNonEmptyLine(maxLen int) string {
 	}
 	s := p.screen
 
+	// Guard against uninitialized or zero-sized screens that can arise when
+	// the controlling terminal reports 0x0 dimensions during startup.
+	if s.rows <= 0 || s.cols <= 0 || len(s.cells) == 0 {
+		return ""
+	}
+
 	// Read all rows into a slice of trimmed strings
 	lines := make([]string, s.rows)
-	for row := 0; row < s.rows; row++ {
+	for row := 0; row < s.rows && row < len(s.cells); row++ {
 		var sb strings.Builder
-		for c := 0; c < s.cols; c++ {
-			ch := s.cells[row][c].Ch
+		rowCells := s.cells[row]
+		for c := 0; c < s.cols && c < len(rowCells); c++ {
+			ch := rowCells[c].Ch
 			if ch == 0 {
 				sb.WriteByte(' ')
 			} else {
@@ -3356,10 +3424,16 @@ func (m *Magmux) render() {
 			p.mu.Lock()
 			// Title idle debounce: fire inputReady after the window title has been
 			// showing ✳ (idle) for at least 2 seconds without any spinner title
-			// reappearing. This filters Claude Code's brief "✳ → spinner → ✳"
-			// transitions between model response and stop hooks.
+			// reappearing. Targets long-running TUI apps (Claude Code interactive)
+			// that transition ✳ → spinner → ✳ between model response and stop hooks.
+			//
+			// Only active on alt-screen panes or panes with an attached tool
+			// controller. Plain shell commands that happen to update xterm
+			// titles (git, tmux, shell prompts) should NOT be mis-detected as
+			// "idle" just because they set a title briefly.
 			if !p.inputReady && !p.dead && !p.titleIdleAt.IsZero() &&
-				now.Sub(p.titleIdleAt) > 2*time.Second {
+				now.Sub(p.titleIdleAt) > 2*time.Second &&
+				(p.altMode || p.controller != nil) {
 				p.inputReady = true
 				p.inputSignal = "title"
 				if dbgFile != nil {
@@ -3368,9 +3442,20 @@ func (m *Magmux) render() {
 				}
 			}
 			// Text idle detection: if no printable text for 5s, mark as input-ready.
-			// This catches TUI apps (like Claude Code) that don't cycle bracketed paste.
+			// This catches TUI apps that stay running while waiting for input
+			// (like Claude Code interactive) without emitting a clear signal.
+			//
+			// For non-TUI / non-controlled panes, we deliberately do NOT fire
+			// text-idle because a non-interactive command that sleeps (e.g. an
+			// API call, a long compile) would be wrongly marked "done". The
+			// right signal for those is process exit, which lands in waitForChild.
+			//
+			// The heuristic therefore only activates when either:
+			//   - the pane is running in an alternate screen (a clear TUI marker), or
+			//   - a controller is attached but hasn't produced a snapshot yet (rare).
 			if !p.inputReady && !p.dead && p.hadTextOutput &&
-				!p.lastTextAt.IsZero() && now.Sub(p.lastTextAt) > 5*time.Second {
+				!p.lastTextAt.IsZero() && now.Sub(p.lastTextAt) > 5*time.Second &&
+				(p.altMode || p.controller != nil) {
 				p.inputReady = true
 				p.inputSignal = "idle"
 				if dbgFile != nil {
