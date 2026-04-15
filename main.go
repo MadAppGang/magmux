@@ -27,7 +27,7 @@ import (
 
 // Set by GoReleaser ldflags. Default value used for local builds.
 var (
-	Version = "v3.4.2"
+	Version = "dev"
 	Commit  = "none"
 )
 
