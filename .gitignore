@@ -6,3 +6,11 @@ dist/
 .task-grids/
 /.claude/.coaching
 /.claudemem
+
+# Added by claudeup
+.claude/scheduled_tasks.lock
+.claude/cache/
+.claude/.statusline-worktree-*
+.mnemex/
+gtd/sessions/
+.agents/

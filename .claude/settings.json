@@ -10,9 +10,9 @@
   "installedPluginVersions": {
     "code-analysis@magus": "5.1.0",
     "multimodel@magus": "3.1.2",
-    "browser-use@magus": "1.1.1",
+    "browser-use@magus": "1.1.2",
     "terminal@magus": "4.0.2",
-    "kanban@magus": "1.3.0",
+    "kanban@magus": "1.6.0",
     "dev@magus": "2.7.0"
   }
 }
