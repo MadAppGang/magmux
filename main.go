@@ -2575,15 +2575,40 @@ func (m *Magmux) inputLoop() {
 	// Buffered input reader — accumulates partial reads so escape sequences
 	// that span multiple read() calls are handled correctly.
 	inbuf := make([]byte, 0, 4096)
-	raw := make([]byte, 4096)
 	commandMode := false
 
-	for {
-		n, err := os.Stdin.Read(raw)
-		if err != nil {
-			return
+	// Stdin is read on a background goroutine so the main loop can also wake
+	// on m.quit. Without this, a renderLoop-driven close(m.quit) (e.g. -w
+	// auto-exit) cannot unblock the main goroutine, and magmux hangs.
+	stdinCh := make(chan []byte, 8)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				stdinCh <- chunk
+			}
+			if err != nil {
+				close(stdinCh)
+				return
+			}
 		}
-		inbuf = append(inbuf, raw[:n]...)
+	}()
+
+	for {
+		var chunk []byte
+		select {
+		case <-m.quit:
+			return
+		case c, ok := <-stdinCh:
+			if !ok {
+				return
+			}
+			chunk = c
+		}
+		inbuf = append(inbuf, chunk...)
 
 		for len(inbuf) > 0 {
 			b := inbuf[0]
