@@ -4,3 +4,5 @@ dist/
 /tmp/
 .task/
 .task-grids/
+/.claude/.coaching
+/.claudemem

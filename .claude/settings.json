@@ -1,0 +1,18 @@
+{
+  "enabledPlugins": {
+    "code-analysis@magus": true,
+    "multimodel@magus": true,
+    "browser-use@magus": true,
+    "terminal@magus": true,
+    "kanban@magus": true,
+    "dev@magus": true
+  },
+  "installedPluginVersions": {
+    "code-analysis@magus": "5.1.0",
+    "multimodel@magus": "3.1.2",
+    "browser-use@magus": "1.1.1",
+    "terminal@magus": "4.0.2",
+    "kanban@magus": "1.3.0",
+    "dev@magus": "2.7.0"
+  }
+}
