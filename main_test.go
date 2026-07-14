@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +13,50 @@ import (
 	"testing"
 	"time"
 )
+
+// testMagmuxBin is the path to a magmux binary built once for the whole test
+// package (see TestMain). Empty if the build failed or was skipped.
+var testMagmuxBin string
+
+// TestMain builds a single magmux binary that PTY/socket subprocess tests share,
+// avoiding a per-test `go build`.
+func TestMain(m *testing.M) {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		dir, err := os.MkdirTemp("", "magmux-test-bin")
+		if err == nil {
+			bin := filepath.Join(dir, "magmux")
+			build := exec.Command("go", "build", "-o", bin, ".")
+			if out, berr := build.CombinedOutput(); berr == nil {
+				testMagmuxBin = bin
+			} else {
+				fmt.Fprintf(os.Stderr, "TestMain: build magmux failed: %v\n%s", berr, out)
+			}
+			defer os.RemoveAll(dir)
+		}
+	}
+	os.Exit(m.Run())
+}
+
+// magmuxBinForTest returns the shared prebuilt binary, or builds a fallback.
+func magmuxBinForTest(t *testing.T) string {
+	t.Helper()
+	if testMagmuxBin != "" {
+		return testMagmuxBin
+	}
+	// Fallback: an already-built binary in the repo root.
+	if p, err := filepath.Abs("./magmux"); err == nil {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "magmux")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build magmux: %v\n%s", err, out)
+	}
+	return bin
+}
 
 // TestAutoExitNonTUIPane is a regression test for issue #1:
 // "Plain (non-TUI) panes never marked done; -w never auto-exits."
@@ -29,21 +77,7 @@ func TestAutoExitNonTUIPane(t *testing.T) {
 		t.Skip("PTY-based test requires darwin or linux")
 	}
 
-	// Locate the magmux binary. Prefer the freshly-built one in repo root;
-	// fall back to building one in a tempdir if not present.
-	binPath, err := filepath.Abs("./magmux")
-	if err != nil {
-		t.Fatalf("abs path: %v", err)
-	}
-	if _, err := os.Stat(binPath); err != nil {
-		// Build a binary into a tempdir for the test.
-		tmp := t.TempDir()
-		binPath = filepath.Join(tmp, "magmux")
-		build := exec.Command("go", "build", "-o", binPath, ".")
-		if out, err := build.CombinedOutput(); err != nil {
-			t.Fatalf("build magmux: %v\n%s", err, out)
-		}
-	}
+	binPath := magmuxBinForTest(t)
 
 	// Open a PTY pair so magmux gets a real controlling terminal (it requires
 	// raw mode and refuses to run otherwise).
@@ -100,6 +134,137 @@ func TestAutoExitNonTUIPane(t *testing.T) {
 				t.Fatalf("magmux exited with non-zero status %d: %v", exitErr.ExitCode(), err)
 			}
 			t.Fatalf("magmux wait error: %v", err)
+		}
+	}
+}
+
+// socketEvent is the decoded shape of one JSON line on the magmux IPC socket.
+// Only the fields the test asserts on are modeled; unknown fields are ignored.
+type socketEvent struct {
+	Type     string        `json:"type"`
+	Pane     *int          `json:"pane"`     // singular: per-pane snapshot/exit
+	Panes    []interface{} `json:"panes"`    // plural: connect snapshot + final results
+	ExitCode *int          `json:"exitCode"` // present on exit events
+}
+
+// TestSocketSubscriberContract exercises the stable socket integration API that
+// madbench (and other subscribers) depend on:
+//
+//  1. Late subscriber: even connecting after panes may have exited, the first
+//     line is an aggregate {"type":"snapshot","panes":[...]} carrying full state.
+//  2. Shutdown ordering: the final {"type":"results",...} event is delivered
+//     BEFORE the connection EOFs (the flush-then-close guarantee, replacing the
+//     old drain-sleep race).
+//
+// It spawns a real magmux under a PTY, derives the socket path from the child
+// PID, and reads the line-delimited JSON stream to EOF.
+func TestSocketSubscriberContract(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("PTY/socket test requires darwin or linux")
+	}
+
+	binPath := magmuxBinForTest(t)
+
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Fatalf("openPTY: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+
+	// One pane that lives ~1.5s, then exits cleanly; -w auto-exits magmux after.
+	// The window is long enough to connect a subscriber and observe the full
+	// lifecycle (snapshot → exit → results → EOF).
+	cmd := exec.Command(binPath, "-e", `sh -c "echo hi; sleep 1.5"`, "-w")
+	cmd.Stdin = slave
+	cmd.Stdout = slave
+	cmd.Stderr = slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start magmux: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	}()
+
+	// Drain the PTY master so magmux's writes never block.
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := master.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	sockPath := fmt.Sprintf("/tmp/magmux-%d.sock", cmd.Process.Pid)
+
+	// Dial with short retries: the socket binds during magmux init (a few ms
+	// after Start). ~50ms x 40 = 2s worst case.
+	var conn net.Conn
+	for i := 0; i < 40; i++ {
+		conn, err = net.Dial("unix", sockPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatalf("could not connect to magmux socket %s: %v", sockPath, err)
+	}
+	defer conn.Close()
+
+	// Read every event to EOF, with an overall deadline so a hang fails loudly.
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
+	var events []socketEvent
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		var ev socketEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue // ignore anything unparseable
+		}
+		events = append(events, ev)
+	}
+	// scanner ended: either EOF (clean shutdown) or read deadline.
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("socket read error before EOF (shutdown race?): %v", err)
+	}
+
+	if len(events) == 0 {
+		t.Fatal("received no events on socket")
+	}
+
+	// (1) First event must be the connect-time aggregate snapshot.
+	first := events[0]
+	if first.Type != "snapshot" || first.Panes == nil {
+		t.Fatalf("first event = %+v; want aggregate snapshot with non-nil panes array", first)
+	}
+
+	// (2) A final results event must have been received BEFORE EOF. Because the
+	// scanner reached clean EOF above, any results event in the stream proves
+	// the flush-then-close ordering held.
+	var sawResults bool
+	var resultsIdx int
+	for i, ev := range events {
+		if ev.Type == "results" && ev.Panes != nil {
+			sawResults = true
+			resultsIdx = i
+		}
+	}
+	if !sawResults {
+		t.Fatalf("no final results event before EOF; events=%+v", events)
+	}
+
+	// The shutdown event (if present) must not precede the results event —
+	// results is the authoritative final state and must land first.
+	for i, ev := range events {
+		if ev.Type == "shutdown" && i < resultsIdx {
+			t.Fatalf("shutdown event (idx %d) arrived before results (idx %d)", i, resultsIdx)
 		}
 	}
 }

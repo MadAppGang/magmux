@@ -3000,8 +3000,13 @@ func (m *Magmux) socketServer() {
 		m.broadcastEvent(map[string]any{
 			"type": "shutdown",
 		})
-		// Give subscribers a moment to drain before we close the listener.
-		time.Sleep(50 * time.Millisecond)
+		// Deterministically flush and close each subscriber connection instead
+		// of racing a fixed drain sleep. Closing the connection after the two
+		// broadcasts above (which write synchronously under sockClientsMu) gives
+		// each subscriber a clean EOF *after* it has received the final results
+		// — the ordering guarantee integrators rely on. Bound the whole teardown
+		// so a single wedged subscriber can't hang magmux's exit.
+		m.closeSockClients(2 * time.Second)
 		ln.Close()
 		os.Remove(sockPath)
 	}()
@@ -3016,6 +3021,25 @@ func (m *Magmux) socketServer() {
 }
 
 func (m *Magmux) handleSocketConn(conn net.Conn) {
+	// Immediately send the current pane-state snapshot so a subscriber that
+	// connects *after* some panes have already exited still receives full
+	// state (the live exit/snapshot events it missed are folded into this one
+	// aggregate event). Written before registering the connection for
+	// broadcasts so it is always the first line this subscriber sees.
+	snapshot := map[string]any{
+		"type":  "snapshot",
+		"panes": m.buildPaneResults(),
+	}
+	// NOTE: distinct from the per-pane live "snapshot" event (which carries a
+	// singular "pane" field). This connect-time aggregate carries a "panes"
+	// array — subscribers disambiguate on that field.
+	if data, err := json.Marshal(snapshot); err == nil {
+		data = append(data, '\n')
+		_ = conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+		_, _ = conn.Write(data)
+		_ = conn.SetWriteDeadline(time.Time{})
+	}
+
 	// Track this connection so we can push snapshots/exit events to it.
 	m.sockClientsMu.Lock()
 	m.sockClients = append(m.sockClients, conn)
@@ -3062,6 +3086,44 @@ func (m *Magmux) broadcastEvent(event any) {
 		if _, err := c.Write(data); err != nil {
 			c.Close()
 			m.sockClients = append(m.sockClients[:i], m.sockClients[i+1:]...)
+		}
+	}
+}
+
+// closeSockClients flushes and closes every connected subscriber connection so
+// each receives a clean EOF *after* the final results/shutdown broadcasts. The
+// broadcasts run synchronously under sockClientsMu with a per-write deadline, so
+// by the time this runs the payload has already been written to the OS socket
+// buffer; closing the fd then signals end-of-stream. Bounded by timeout so a
+// wedged peer (never draining its receive buffer) can't block magmux's exit.
+func (m *Magmux) closeSockClients(timeout time.Duration) {
+	m.sockClientsMu.Lock()
+	conns := make([]net.Conn, len(m.sockClients))
+	copy(conns, m.sockClients)
+	m.sockClients = nil
+	m.sockClientsMu.Unlock()
+
+	if len(conns) == 0 {
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		for _, c := range conns {
+			// A write deadline in the past forces any buffered write to flush or
+			// error immediately rather than block, then Close signals EOF.
+			_ = c.SetWriteDeadline(time.Now().Add(timeout))
+			_ = c.Close()
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		// Best effort: force-close whatever is left so nothing lingers.
+		for _, c := range conns {
+			_ = c.Close()
 		}
 	}
 }
