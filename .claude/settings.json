@@ -1,18 +1,23 @@
 {
   "enabledPlugins": {
+    "claudish@magus": true,
     "code-analysis@magus": true,
+    "mnemex@magus": true,
     "multimodel@magus": true,
+    "dev@magus": true,
+    "go@magus": true,
     "browser-use@magus": true,
     "terminal@magus": true,
-    "kanban@magus": true,
-    "dev@magus": true
+    "kanban@magus": true
   },
   "installedPluginVersions": {
-    "code-analysis@magus": "5.1.0",
-    "multimodel@magus": "3.1.2",
-    "browser-use@magus": "1.1.2",
-    "terminal@magus": "4.0.2",
+    "code-analysis@magus": "5.3.1",
+    "multimodel@magus": "3.4.0",
+    "browser-use@magus": "1.4.0",
+    "terminal@magus": "4.1.4",
     "kanban@magus": "1.6.0",
-    "dev@magus": "2.7.0"
+    "dev@magus": "2.7.0",
+    "claudish@magus": "1.0.0",
+    "go@magus": "0.1.1"
   }
 }

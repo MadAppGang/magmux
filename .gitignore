@@ -14,3 +14,8 @@ dist/
 .mnemex/
 gtd/sessions/
 .agents/
+
+# Added by claudeup
+# A managed rule says this path should stay out of git.
+.claude/_profiles/
+/ai-docs/sessions/ 
