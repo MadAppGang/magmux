@@ -19,3 +19,5 @@ gtd/sessions/
 # A managed rule says this path should stay out of git.
 .claude/_profiles/
 /ai-docs/sessions/ 
+node_modules/
+magmux
