@@ -541,6 +541,7 @@ func (vt *VTParser) handleOSC() {
 		if p.altMode || p.controller != nil {
 			p.inputReady = true
 			p.inputSignal = "osc"
+			p.inputReadyAt = time.Now()
 			if dbgFile != nil {
 				fmt.Fprintf(dbgFile, "[OSC] notification: %q → inputReady=true\n", osc)
 			}
@@ -759,6 +760,7 @@ func (vt *VTParser) doCSI(w rune) {
 						// mode during startup/shutdown and would trigger false positives.
 						vt.node.inputReady = true
 						vt.node.inputSignal = "2004"
+						vt.node.inputReadyAt = time.Now()
 					}
 					if dbgFile != nil {
 						fmt.Fprintf(dbgFile, "[2004] → inputReady=%v pasteWasOff=%v\n",
@@ -1207,8 +1209,13 @@ type Pane struct {
 	overlayText  string    // centered overlay text, may contain \n for multi-line (e.g. "✓ DONE")
 	overlayStyle string    // "success", "error", "info"
 	// Idle/completion detection
-	inputReady    bool      // TUI app is waiting for user input
-	inputSignal   string    // what triggered inputReady: "osc", "2004", "idle"
+	inputReady  bool   // TUI app is waiting for user input
+	inputSignal string // what triggered inputReady: "osc", "2004", "title", "idle", "ctrl", "perm"
+	// inputReadyAt is when inputReady was last set true. Controllers order it
+	// against their own transcript progress to decide which signal is fresher
+	// (see ClaudeCodeController.applyTerminalIdle). Every path that sets
+	// inputReady true must set this too.
+	inputReadyAt      time.Time
 	pasteWasOff       bool      // bracketed paste was disabled at least once (filters initial setup)
 	textSincePasteOff bool      // printable text was written after the last paste-off (filters startup 2004 cycle)
 	lastTextAt        time.Time // last time a printable character was output (for idle detection)
@@ -1717,7 +1724,7 @@ func (r *Renderer) renderOverlay(p *Pane) {
 	if innerW > maxInner {
 		innerW = maxInner
 	}
-	boxW := innerW + 4 // 1 border + 1 pad on each side
+	boxW := innerW + 4     // 1 border + 1 pad on each side
 	boxH := len(lines) + 2 // 1 border top + 1 border bottom
 
 	// Need room for drop shadow (1 col right + 1 row bottom)
@@ -1738,16 +1745,16 @@ func (r *Renderer) renderOverlay(p *Pane) {
 	var bgCode, borderFg string
 	switch p.overlayStyle {
 	case "success":
-		bgCode = "\x1b[48;5;22m"  // dark green background
+		bgCode = "\x1b[48;5;22m"   // dark green background
 		borderFg = "\x1b[38;5;46m" // bright green border
 	case "error":
-		bgCode = "\x1b[48;5;52m"  // dark red background
+		bgCode = "\x1b[48;5;52m"    // dark red background
 		borderFg = "\x1b[38;5;203m" // bright red border
 	case "info":
-		bgCode = "\x1b[48;5;17m"  // dark blue background
+		bgCode = "\x1b[48;5;17m"   // dark blue background
 		borderFg = "\x1b[38;5;75m" // bright blue border
 	default:
-		bgCode = "\x1b[48;5;236m" // dark gray background
+		bgCode = "\x1b[48;5;236m"   // dark gray background
 		borderFg = "\x1b[38;5;250m" // light gray border
 	}
 	reset := "\x1b[0m"
@@ -2031,25 +2038,25 @@ func (r *Renderer) flush() {
 // ── Multiplexer ───────────────────────────────────────────────────────────────
 
 type Magmux struct {
-	root            *Pane
-	focused         *Pane
-	allPanes        []*Pane // leaf panes only
-	rows, cols      int
-	statusText      string
-	renderer        Renderer
-	rawState        *term.State
-	quit            chan struct{}
-	quitOnce        sync.Once
-	wg              sync.WaitGroup
-	gridMode        bool   // -g flag was used
-	autoExit        bool   // -w flag: quit automatically when all panes done
-	sockPath        string    // /tmp/magmux-{pid}.sock
-	sockClients     []net.Conn // currently-connected socket subscribers (for push events)
-	sockClientsMu   sync.Mutex
-	lastDoneCount   int       // track status bar updates to avoid redundant rewrites
-	startedAt       time.Time // when magmux started (for status bar timer)
-	completedAt    time.Time // when all panes reached "done" (freezes timer)
-	lastTimerTick   int       // elapsed seconds at last forced status redraw
+	root          *Pane
+	focused       *Pane
+	allPanes      []*Pane // leaf panes only
+	rows, cols    int
+	statusText    string
+	renderer      Renderer
+	rawState      *term.State
+	quit          chan struct{}
+	quitOnce      sync.Once
+	wg            sync.WaitGroup
+	gridMode      bool       // -g flag was used
+	autoExit      bool       // -w flag: quit automatically when all panes done
+	sockPath      string     // /tmp/magmux-{pid}.sock
+	sockClients   []net.Conn // currently-connected socket subscribers (for push events)
+	sockClientsMu sync.Mutex
+	lastDoneCount int       // track status bar updates to avoid redundant rewrites
+	startedAt     time.Time // when magmux started (for status bar timer)
+	completedAt   time.Time // when all panes reached "done" (freezes timer)
+	lastTimerTick int       // elapsed seconds at last forced status redraw
 	// Interactive tool controllers
 	controllerFactories []ControllerFactory
 	lastControllerPoll  time.Time
@@ -2464,6 +2471,7 @@ func applyControllerSnapshot(p *Pane, s Snapshot) {
 		if !p.inputReady {
 			p.inputReady = true
 			p.inputSignal = "ctrl"
+			p.inputReadyAt = time.Now()
 			p.tint = "green"
 			p.overlayStyle = "success"
 			lines := []string{"\u2713 DONE"}
@@ -2489,6 +2497,7 @@ func applyControllerSnapshot(p *Pane, s Snapshot) {
 		if !p.inputReady || p.inputSignal != "perm" {
 			p.inputReady = true
 			p.inputSignal = "perm"
+			p.inputReadyAt = time.Now()
 			p.tint = "yellow"
 			p.overlayText = "\u26a0 NEEDS PERMISSION"
 			p.overlayStyle = "info"
@@ -2506,9 +2515,13 @@ func applyControllerSnapshot(p *Pane, s Snapshot) {
 		p.dirty = true
 
 	case CtrlWorking, CtrlStarting:
-		// If we previously fired DONE via a controller signal, clear it
-		// (a new turn started). Don't touch state set by other code paths.
-		if p.inputReady && p.inputSignal == "ctrl" {
+		// A new turn started, so clear any stale "done" state. Reaching here
+		// means applyTerminalIdle already declined to promote — the transcript
+		// advanced more recently than the terminal went idle — so a lingering
+		// terminal-derived inputReady is stale and would otherwise make
+		// buildPaneResults report awaiting_input mid-turn. "perm" is left
+		// alone: a permission prompt is a genuine block, not a finished turn.
+		if p.inputReady && p.inputSignal != "perm" {
 			p.inputReady = false
 			p.tint = ""
 			p.overlayText = ""
@@ -3523,6 +3536,7 @@ func (m *Magmux) render() {
 				(p.altMode || p.controller != nil) {
 				p.inputReady = true
 				p.inputSignal = "title"
+				p.inputReadyAt = now
 				if dbgFile != nil {
 					fmt.Fprintf(dbgFile, "[title] idle for %.1fs → inputReady=true\n",
 						now.Sub(p.titleIdleAt).Seconds())
@@ -3545,6 +3559,7 @@ func (m *Magmux) render() {
 				(p.altMode || p.controller != nil) {
 				p.inputReady = true
 				p.inputSignal = "idle"
+				p.inputReadyAt = now
 				if dbgFile != nil {
 					fmt.Fprintf(dbgFile, "[idle] pane text idle for %.1fs → inputReady=true\n",
 						now.Sub(p.lastTextAt).Seconds())
@@ -3643,6 +3658,14 @@ func (m *Magmux) render() {
 
 	// Auto-exit: quit when all panes done (-w flag)
 	if m.autoExit && m.gridMode && m.allPanesDone() {
+		// Final unthrottled controller poll before teardown. allPanesDone()
+		// became true because a pane went idle, and that same transition is
+		// what a controller would promote to awaiting_input — but the regular
+		// poll is throttled to 250ms, so quitting here can drop the last
+		// snapshot and leave subscribers to infer the state from `results`
+		// alone (issue #2). Polling once more guarantees it is broadcast.
+		m.lastControllerPoll = time.Time{}
+		m.pollControllers()
 		m.quitOnce.Do(func() { close(m.quit) })
 		return
 	}

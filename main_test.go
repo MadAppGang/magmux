@@ -141,10 +141,12 @@ func TestAutoExitNonTUIPane(t *testing.T) {
 // socketEvent is the decoded shape of one JSON line on the magmux IPC socket.
 // Only the fields the test asserts on are modeled; unknown fields are ignored.
 type socketEvent struct {
-	Type     string        `json:"type"`
-	Pane     *int          `json:"pane"`     // singular: per-pane snapshot/exit
-	Panes    []interface{} `json:"panes"`    // plural: connect snapshot + final results
-	ExitCode *int          `json:"exitCode"` // present on exit events
+	Type       string        `json:"type"`
+	Pane       *int          `json:"pane"`       // singular: per-pane snapshot/exit
+	Panes      []interface{} `json:"panes"`      // plural: connect snapshot + final results
+	ExitCode   *int          `json:"exitCode"`   // present on exit events
+	State      string        `json:"state"`      // controller lifecycle on snapshot events
+	Controller string        `json:"controller"` // controller name on snapshot events
 }
 
 // TestSocketSubscriberContract exercises the stable socket integration API that
@@ -266,5 +268,111 @@ func TestSocketSubscriberContract(t *testing.T) {
 		if ev.Type == "shutdown" && i < resultsIdx {
 			t.Fatalf("shutdown event (idx %d) arrived before results (idx %d)", i, resultsIdx)
 		}
+	}
+}
+
+// TestControllerSnapshotReachesAwaitingInput is the regression test for
+// issue #2: a pane with an attached controller broadcast exactly one
+// snapshot — state "starting" — and never another, even once the child was
+// idle at its prompt. Subscribers could only learn the real state from the
+// shutdown `results` event.
+//
+// The repro needs no real Claude Code. It needs the two conditions that
+// produced the bug:
+//
+//  1. A controller attaches (the command line mentions `claude `), so the
+//     pane is controller-managed and broadcasts snapshots.
+//  2. No transcript ever matches, so the transcript state machine never sees
+//     a stop_hook_summary and stays at CtrlStarting — the same dead end a
+//     mis-encoded project dir produced in the field.
+//
+// The pane then emits an OSC 9 notification, which is how the terminal
+// reports "idle, waiting for input" and is the signal `results` always
+// trusted. Post-fix the live snapshot must report awaiting_input too.
+func TestControllerSnapshotReachesAwaitingInput(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("PTY/socket test requires darwin or linux")
+	}
+
+	binPath := magmuxBinForTest(t)
+
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Fatalf("openPTY: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+
+	// "claude " in the command attaches ClaudeCodeController; the printf emits
+	// the OSC 9 notification; the sleep keeps the pane alive long enough for
+	// the ~4Hz controller poll to observe and broadcast the transition.
+	cmd := exec.Command(binPath, "-e",
+		`sh -c "printf 'starting claude now\n'; sleep 1; printf '\033]9;done\007'; sleep 1"`, "-w")
+	cmd.Stdin = slave
+	cmd.Stdout = slave
+	cmd.Stderr = slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start magmux: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	}()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := master.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	sockPath := fmt.Sprintf("/tmp/magmux-%d.sock", cmd.Process.Pid)
+	var conn net.Conn
+	for i := 0; i < 40; i++ {
+		conn, err = net.Dial("unix", sockPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatalf("could not connect to magmux socket %s: %v", sockPath, err)
+	}
+	defer conn.Close()
+
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+
+	var states []string
+	var sawAwaitingInput, sawController bool
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		var ev socketEvent
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			continue
+		}
+		// Per-pane snapshots only (the aggregate connect snapshot has Panes set).
+		if ev.Type != "snapshot" || ev.Pane == nil || ev.Panes != nil {
+			continue
+		}
+		sawController = sawController || ev.Controller != ""
+		states = append(states, ev.State)
+		if ev.State == "awaiting_input" {
+			sawAwaitingInput = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("socket read error before EOF: %v", err)
+	}
+
+	if !sawController {
+		t.Fatalf("no controller ever attached; the repro did not set up (states seen: %v)", states)
+	}
+	if !sawAwaitingInput {
+		t.Fatalf("live snapshot never reached awaiting_input (regression: issue #2); states seen: %v", states)
 	}
 }

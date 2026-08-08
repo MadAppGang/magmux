@@ -19,8 +19,23 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
       - name: Build
         run: go build -v ./...
 
       - name: Vet
         run: go vet ./...
+
+      # The PTY and socket tests spawn a real magmux under a pseudo-terminal,
+      # so they only run on darwin/linux — which is exactly the matrix here.
+      - name: Test
+        run: go test -race ./...

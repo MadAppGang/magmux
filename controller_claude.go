@@ -14,22 +14,56 @@ import (
 
 // ClaudeCodeController observes a Claude Code session by reading its JSONL
 // transcript file. Discovery: at attach time we capture the prompt the
-// pane was launched with; we then scan ~/.claude/projects/<dashed-cwd>/
+// pane was launched with; we then scan ~/.claude/projects/<encoded-cwd>/
 // for the JSONL file whose first "user" entry matches that prompt. This
 // correctly disambiguates multiple Claude panes running in the same cwd.
+//
+// The encoded-cwd directory name is an undocumented cross-process contract
+// owned by Claude Code, so we never let it be the only way in: if the
+// computed directory is missing or holds no match, discovery widens to
+// every directory under ~/.claude/projects and matches on transcript
+// content instead (see findActiveSession). That keeps a change to Claude
+// Code's encoding — or a pane whose real cwd differs from magmux's, as in
+// `cd /foo && claude '...'` — from silently stranding us in CtrlStarting.
 type ClaudeCodeController struct {
 	pane *Pane
 
-	cwd        string    // pane's cwd (used to find the project dir)
-	projectDir string    // ~/.claude/projects/<dashed-cwd>
-	spawnedAt  time.Time // when the controller was attached
-	wantPrompt string    // first user prompt passed to the pane (from cmd.Args)
+	cwd         string    // pane's cwd (used to find the project dir)
+	projectDir  string    // ~/.claude/projects/<encoded-cwd>
+	projectsDir string    // ~/.claude/projects (root, for the widened scan)
+	spawnedAt   time.Time // when the controller was attached
+	wantPrompt  string    // first user prompt passed to the pane (from cmd.Args)
 
 	sessionPath string // resolved active session file (empty until found)
 	fileSize    int64  // last read offset
 
+	// preexisting holds the transcripts that were already on disk the first
+	// time we scanned. Our pane's claude creates a *new* file shortly after
+	// spawn, so anything in this set belongs to some other session — the
+	// concurrent-session mix-up described in issue #3.
+	preexisting map[string]bool
+	baselined   map[string]bool // dirs whose baseline has been captured
+	lastBroadAt time.Time       // last widened scan (throttled)
+	lastApplyAt time.Time       // wall time we last applied a transcript entry
+
 	snap Snapshot
 }
+
+const (
+	// broadScanInterval throttles the widened scan over every project
+	// directory. A full walk of a large ~/.claude/projects (200+ dirs, 3k
+	// entries) measures ~15ms, and pollControllers runs on the render
+	// goroutine, so once a second keeps it under 2% duty.
+	broadScanInterval = time.Second
+
+	// broadScanWindow bounds how long we keep widening. Claude Code writes
+	// its first transcript entry within a second or two of starting; if
+	// nothing has matched in a minute, nothing will, and a pane that never
+	// locks on should not walk every project directory for the rest of the
+	// session. The cheap per-poll scan of the computed directory continues
+	// regardless.
+	broadScanWindow = time.Minute
+)
 
 func newClaudeCodeController(p *Pane) *ClaudeCodeController {
 	return &ClaudeCodeController{
@@ -38,14 +72,38 @@ func newClaudeCodeController(p *Pane) *ClaudeCodeController {
 	}
 }
 
+// encodeProjectDir converts a working directory into the directory name
+// Claude Code files its transcripts under in ~/.claude/projects.
+//
+// Claude Code replaces every character outside [A-Za-z0-9] with '-', not
+// just the path separator. Verified against the `cwd` recorded inside real
+// transcripts: `/Users/x/mag/babble_ml` is filed as `-Users-x-mag-babble-ml`
+// and `/Users/x/Models bioses` as `-Users-x-Models-bioses`. Replacing only
+// '/' leaves a literal dot (or underscore, or space) in the name, no such
+// directory exists, and discovery fails silently.
+func encodeProjectDir(cwd string) string {
+	var b strings.Builder
+	b.Grow(len(cwd))
+	for _, r := range cwd {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
+}
+
 // extractClaudePrompt parses the pane's command args for the prompt
 // argument to `claude`. Returns "" if the command is `claude` with no
 // prompt (interactive mode) or if the prompt can't be determined.
 //
 // Examples of cmd.Args this handles:
-//   ["zsh", "-l", "-c", `claude "say hi"`]
-//   ["zsh", "-l", "-c", `cd /foo && claude 'list files'`]
-//   ["claude", "say", "hi"]  (unlikely but possible)
+//
+//	["zsh", "-l", "-c", `claude "say hi"`]
+//	["zsh", "-l", "-c", `cd /foo && claude 'list files'`]
+//	["claude", "say", "hi"]  (unlikely but possible)
 func extractClaudePrompt(p *Pane) string {
 	if p.cmd == nil {
 		return ""
@@ -105,10 +163,14 @@ func (c *ClaudeCodeController) Start(ctx context.Context) error {
 	if c.spawnedAt.IsZero() {
 		c.spawnedAt = time.Now()
 	}
-	// Resolve cwd. magmux's spawned children inherit magmux's cwd,
-	// which is where `task` (or the user) ran the command from.
+	// Resolve cwd. magmux's spawned children inherit magmux's cwd, which is
+	// where `task` (or the user) ran the command from — but a pane launched
+	// as `cd /foo && claude '...'` writes its transcript under /foo instead,
+	// so prefer a cd target parsed out of the command when there is one.
 	if c.cwd == "" {
-		if wd, err := os.Getwd(); err == nil {
+		if dir := extractClaudeCwd(c.pane); dir != "" {
+			c.cwd = dir
+		} else if wd, err := os.Getwd(); err == nil {
 			c.cwd = wd
 		}
 	}
@@ -117,17 +179,114 @@ func (c *ClaudeCodeController) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	dashed := strings.ReplaceAll(c.cwd, "/", "-")
-	c.projectDir = filepath.Join(home, ".claude", "projects", dashed)
+	c.projectsDir = filepath.Join(home, ".claude", "projects")
+	c.projectDir = filepath.Join(c.projectsDir, encodeProjectDir(c.cwd))
 	c.snap.State = CtrlStarting
+	if dbgFile != nil {
+		fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p cwd=%q projectDir=%q exists=%v wantPrompt=%q\n",
+			c.pane, c.cwd, c.projectDir, dirExists(c.projectDir), c.wantPrompt)
+	}
 	return nil
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// extractClaudeCwd parses a leading `cd <dir> &&` out of the pane's command
+// so the controller looks under the directory claude will actually run in.
+// Returns "" when the command has no cd prefix, when the target is relative
+// (we cannot resolve it reliably against the shell's own state), or when the
+// directory does not exist.
+func extractClaudeCwd(p *Pane) string {
+	if p == nil || p.cmd == nil {
+		return ""
+	}
+	for _, arg := range p.cmd.Args {
+		idx := strings.Index(arg, "cd ")
+		if idx != 0 && !(idx > 0 && (arg[idx-1] == ' ' || arg[idx-1] == ';')) {
+			continue
+		}
+		rest := strings.TrimSpace(arg[idx+len("cd "):])
+		end := strings.Index(rest, "&&")
+		if end < 0 {
+			continue
+		}
+		dir := strings.TrimSpace(rest[:end])
+		dir = strings.Trim(dir, `"'`)
+		if !strings.HasPrefix(dir, "/") || !dirExists(dir) {
+			continue
+		}
+		return dir
+	}
+	return ""
 }
 
 func (c *ClaudeCodeController) Stop() error { return nil }
 
 func (c *ClaudeCodeController) Poll() (Snapshot, error) {
+	err := c.pollTranscript()
+	// Reconcile with the terminal's own idle detection. Runs even when the
+	// transcript was never found, so the live snapshot can still reach
+	// awaiting_input (issue #2).
+	c.applyTerminalIdle()
+	return c.snap, err
+}
+
+// applyTerminalIdle promotes the snapshot to CtrlAwaitingInput when the pane
+// itself has detected that its child is idle at a prompt.
+//
+// The transcript only announces "turn finished" via a stop_hook_summary
+// entry, which Claude Code emits only when a Stop hook is configured. A pane
+// can therefore sit at CtrlStarting indefinitely while it is visibly idle —
+// and if transcript discovery failed outright, forever. The pane's own idle
+// detection (OSC 9 notification, bracketed-paste cycle, window title, text
+// idle) already knows better, and buildPaneResults has always reported from
+// it. Promoting here is what stops the live `snapshot` event and the final
+// `results` event from disagreeing.
+//
+// Promotion is one-way and ordered: it applies only when the terminal went
+// idle *after* the last transcript entry we consumed. A new turn arriving on
+// the transcript is therefore authoritative and the state cannot flap
+// between working and awaiting_input.
+func (c *ClaudeCodeController) applyTerminalIdle() {
+	if c.pane == nil {
+		return
+	}
+	switch c.snap.State {
+	case CtrlAwaitingInput, CtrlAwaitingPermission, CtrlError, CtrlGone:
+		return // already settled; nothing to promote
+	}
+
+	c.pane.mu.Lock()
+	ready, signal, readyAt := c.pane.inputReady, c.pane.inputSignal, c.pane.inputReadyAt
+	c.pane.mu.Unlock()
+
+	// "ctrl"/"perm" are set *by* a controller snapshot — reading them back
+	// would be a feedback loop, not evidence.
+	if !ready || signal == "ctrl" || signal == "perm" {
+		return
+	}
+	// The transcript moved at or after the terminal went idle, so the
+	// transcript is the fresher signal. Leave the state alone.
+	if !readyAt.After(c.lastApplyAt) {
+		return
+	}
+
+	c.snap.State = CtrlAwaitingInput
+	if c.snap.CompletedAt.IsZero() {
+		c.snap.CompletedAt = readyAt
+	}
+	if dbgFile != nil {
+		fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p terminal idle (%s) → awaiting_input\n",
+			c.pane, signal)
+	}
+}
+
+func (c *ClaudeCodeController) pollTranscript() error {
 	if c.projectDir == "" {
-		return c.snap, nil
+		return nil
 	}
 
 	// 1. Resolve the active session file if we don't have one yet
@@ -135,7 +294,7 @@ func (c *ClaudeCodeController) Poll() (Snapshot, error) {
 		path := c.findActiveSession()
 		if path == "" {
 			// Not started yet
-			return c.snap, nil
+			return nil
 		}
 		c.sessionPath = path
 		c.fileSize = 0
@@ -150,51 +309,146 @@ func (c *ClaudeCodeController) Poll() (Snapshot, error) {
 		// Session file disappeared — reset
 		c.sessionPath = ""
 		c.fileSize = 0
-		return c.snap, nil
+		return nil
 	}
 	if info.Size() <= c.fileSize {
-		return c.snap, nil
+		return nil
 	}
 
 	f, err := os.Open(c.sessionPath)
 	if err != nil {
-		return c.snap, err
+		return err
 	}
 	defer f.Close()
 
 	if _, err := f.Seek(c.fileSize, io.SeekStart); err != nil {
-		return c.snap, err
+		return err
 	}
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024) // 4MB max line
 	for scanner.Scan() {
 		c.applyLine(scanner.Bytes())
+		// Record that the transcript advanced, so a terminal idle signal
+		// from *before* this entry cannot override it.
+		c.lastApplyAt = time.Now()
 	}
 	c.fileSize = info.Size()
-	return c.snap, nil
+	return nil
+}
+
+// sessionCandidate is one transcript that could belong to this pane.
+type sessionCandidate struct {
+	path  string
+	mtime time.Time
+	fresh bool // file appeared after we started scanning (not pre-existing)
 }
 
 // findActiveSession returns the path of the JSONL file that belongs to
 // THIS pane's claude process. Matching strategy:
-//   1. Prefer files whose first user prompt matches c.wantPrompt exactly.
-//   2. Fall back to "most recently modified, not already claimed" for
-//      panes where wantPrompt is empty (interactive mode).
+//  1. Prefer files whose first user prompt matches c.wantPrompt exactly.
+//     If the encoded-cwd directory yields no match, widen the search to
+//     every project directory — content matching is exact, so a wider net
+//     costs nothing in precision and makes the directory name, an
+//     undocumented contract we do not control, non-load-bearing.
+//  2. For panes with no prompt (interactive mode) fall back to mtime, but
+//     prefer transcripts that appeared *after* we attached over ones that
+//     were already on disk. A concurrent claude session in the same cwd is
+//     pre-existing, so this keeps us off its transcript (issue #3).
+//
 // Files already claimed by sibling controllers are skipped. Returns ""
 // if no matching file is found yet (we'll retry on the next poll).
 func (c *ClaudeCodeController) findActiveSession() string {
-	entries, err := os.ReadDir(c.projectDir)
-	if err != nil {
-		return ""
+	candidates := c.collectCandidates(c.projectDir)
+
+	if c.wantPrompt != "" {
+		if path := c.matchByPrompt(candidates); path != "" {
+			return path
+		}
+		// The computed directory held nothing matching. Either claude has
+		// not flushed the transcript yet (retry next poll is enough), or the
+		// directory is wrong — a dotted/underscored cwd we mis-encoded, or a
+		// pane that cd'd elsewhere. Widen the net, throttled.
+		if time.Since(c.lastBroadAt) < broadScanInterval ||
+			(!c.spawnedAt.IsZero() && time.Since(c.spawnedAt) > broadScanWindow) {
+			return ""
+		}
+		c.lastBroadAt = time.Now()
+		return c.matchByPrompt(c.collectAllCandidates())
 	}
 
-	type candidate struct {
-		path  string
-		mtime time.Time
+	// Strategy 2: interactive mode. Prefer a transcript that appeared after
+	// we attached; only fall back to a pre-existing one if there is none.
+	var best sessionCandidate
+	for _, cand := range candidates {
+		if best.path == "" ||
+			(cand.fresh && !best.fresh) ||
+			(cand.fresh == best.fresh && cand.mtime.After(best.mtime)) {
+			best = cand
+		}
 	}
-	var candidates []candidate
+	if best.path == "" {
+		return ""
+	}
+	if c.pane != nil && c.pane.mux != nil {
+		if !c.pane.mux.claimSession(best.path, c.pane) {
+			return ""
+		}
+	}
+	if dbgFile != nil {
+		fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p strategy=mtime fresh=%v %s\n",
+			c.pane, best.fresh, filepath.Base(best.path))
+	}
+	return best.path
+}
+
+// matchByPrompt returns the first candidate whose opening user message is
+// exactly c.wantPrompt and that we can claim. Returns "" if none match.
+func (c *ClaudeCodeController) matchByPrompt(candidates []sessionCandidate) string {
+	for _, cand := range candidates {
+		if readFirstUserPrompt(cand.path) != c.wantPrompt {
+			continue
+		}
+		if c.pane != nil && c.pane.mux != nil {
+			if !c.pane.mux.claimSession(cand.path, c.pane) {
+				continue
+			}
+		}
+		if dbgFile != nil {
+			fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p strategy=prompt %s\n",
+				c.pane, cand.path)
+		}
+		return cand.path
+	}
+	return ""
+}
+
+// collectCandidates lists the unclaimed transcripts in dir that were
+// touched at or after this controller attached.
+func (c *ClaudeCodeController) collectCandidates(dir string) []sessionCandidate {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if dbgFile != nil && c.sessionPath == "" {
+			fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p readdir %q failed: %v\n", c.pane, dir, err)
+		}
+		return nil
+	}
+	// The first scan of each directory establishes its baseline: everything
+	// already on disk there belongs to a session that started before us.
+	if c.preexisting == nil {
+		c.preexisting = make(map[string]bool)
+		c.baselined = make(map[string]bool)
+	}
+	first := !c.baselined[dir]
+	c.baselined[dir] = true
+
+	var candidates []sessionCandidate
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
 			continue
+		}
+		fullPath := filepath.Join(dir, e.Name())
+		if first {
+			c.preexisting[fullPath] = true
 		}
 		info, err := e.Info()
 		if err != nil {
@@ -204,50 +458,47 @@ func (c *ClaudeCodeController) findActiveSession() string {
 		if info.ModTime().Before(c.spawnedAt) {
 			continue
 		}
-		fullPath := filepath.Join(c.projectDir, e.Name())
 		// Skip sessions already owned by sibling panes
 		if c.pane != nil && c.pane.mux != nil &&
 			c.pane.mux.isSessionClaimed(fullPath, c.pane) {
 			continue
 		}
-		candidates = append(candidates, candidate{fullPath, info.ModTime()})
+		candidates = append(candidates, sessionCandidate{
+			path:  fullPath,
+			mtime: info.ModTime(),
+			fresh: !c.preexisting[fullPath],
+		})
 	}
+	return candidates
+}
 
-	// Strategy 1: match by prompt content (exact match on first user message)
-	if c.wantPrompt != "" {
-		for _, cand := range candidates {
-			if readFirstUserPrompt(cand.path) == c.wantPrompt {
-				if c.pane != nil && c.pane.mux != nil {
-					if !c.pane.mux.claimSession(cand.path, c.pane) {
-						continue
-					}
-				}
-				return cand.path
-			}
+// collectAllCandidates walks every project directory. Only used as a
+// fallback for prompt-matched discovery, where an exact content match
+// makes a wide search safe.
+func (c *ClaudeCodeController) collectAllCandidates() []sessionCandidate {
+	if c.projectsDir == "" {
+		return nil
+	}
+	dirs, err := os.ReadDir(c.projectsDir)
+	if err != nil {
+		return nil
+	}
+	var all []sessionCandidate
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
 		}
-		// No match yet — the target session file may not have been written
-		// to disk yet. Retry next poll.
-		return ""
-	}
-
-	// Strategy 2: fall back to most-recent mtime (interactive mode)
-	var best string
-	var bestMtime time.Time
-	for _, cand := range candidates {
-		if best == "" || cand.mtime.After(bestMtime) {
-			best = cand.path
-			bestMtime = cand.mtime
+		full := filepath.Join(c.projectsDir, d.Name())
+		if full == c.projectDir {
+			continue // already scanned
 		}
+		all = append(all, c.collectCandidates(full)...)
 	}
-	if best == "" {
-		return ""
+	if dbgFile != nil {
+		fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p widened scan: %d dirs, %d candidates\n",
+			c.pane, len(dirs), len(all))
 	}
-	if c.pane != nil && c.pane.mux != nil {
-		if !c.pane.mux.claimSession(best, c.pane) {
-			return ""
-		}
-	}
-	return best
+	return all
 }
 
 // readFirstUserPrompt returns the content of the first `type:"user"`

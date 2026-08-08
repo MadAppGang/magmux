@@ -72,13 +72,13 @@ type Snapshot struct {
 type ControllerState int
 
 const (
-	CtrlUnknown             ControllerState = iota // controller hasn't observed enough to decide
-	CtrlStarting                                   // tool is initializing
-	CtrlWorking                                    // tool is actively processing
-	CtrlAwaitingInput                              // tool finished a turn, waiting for user
-	CtrlAwaitingPermission                         // tool is blocked on a permission prompt
-	CtrlError                                      // tool reported an error
-	CtrlGone                                       // tool process has exited
+	CtrlUnknown            ControllerState = iota // controller hasn't observed enough to decide
+	CtrlStarting                                  // tool is initializing
+	CtrlWorking                                   // tool is actively processing
+	CtrlAwaitingInput                             // tool finished a turn, waiting for user
+	CtrlAwaitingPermission                        // tool is blocked on a permission prompt
+	CtrlError                                     // tool reported an error
+	CtrlGone                                      // tool process has exited
 )
 
 func (s ControllerState) String() string {
