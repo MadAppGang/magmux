@@ -271,6 +271,106 @@ func TestSocketSubscriberContract(t *testing.T) {
 	}
 }
 
+// TestSocketResultsDeliveredAtAnyConnectTime hammers the connect/shutdown
+// race that made TestSocketSubscriberContract flaky (~1 failure in 20).
+//
+// The old handleSocketConn wrote its connect-time aggregate snapshot and
+// only then registered the connection for broadcasts. A subscriber landing
+// in that window — or any time after the final broadcasts began — was never
+// sent `results` and saw a bare EOF instead, breaking the ordering
+// guarantee integrators rely on. The window is microseconds wide, so a
+// subscriber that always connects early (as the contract test does) hits it
+// only occasionally.
+//
+// This test aims straight at it: short-lived panes, and a connect delay
+// swept across the whole run so subscribers land before, during, and after
+// teardown. Every connection that reaches the socket must receive `results`
+// before EOF.
+func TestSocketResultsDeliveredAtAnyConnectTime(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("PTY/socket test requires darwin or linux")
+	}
+	binPath := magmuxBinForTest(t)
+
+	// Delays sweep past the pane's ~300ms lifetime so some subscribers
+	// connect while the shutdown broadcasts are in flight.
+	delays := []time.Duration{
+		0, 50 * time.Millisecond, 150 * time.Millisecond, 250 * time.Millisecond,
+		300 * time.Millisecond, 320 * time.Millisecond, 340 * time.Millisecond,
+		360 * time.Millisecond, 380 * time.Millisecond, 400 * time.Millisecond,
+	}
+
+	for i, delay := range delays {
+		t.Run(fmt.Sprintf("connect_after_%s", delay), func(t *testing.T) {
+			master, slave, err := openPTY()
+			if err != nil {
+				t.Fatalf("openPTY: %v", err)
+			}
+			defer master.Close()
+			defer slave.Close()
+
+			cmd := exec.Command(binPath, "-e", `sh -c "echo hi; sleep 0.3"`, "-w")
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("start magmux: %v", err)
+			}
+			defer func() {
+				_ = cmd.Process.Signal(syscall.SIGKILL)
+				_, _ = cmd.Process.Wait()
+			}()
+			go func() {
+				buf := make([]byte, 4096)
+				for {
+					if _, err := master.Read(buf); err != nil {
+						return
+					}
+				}
+			}()
+
+			sockPath := fmt.Sprintf("/tmp/magmux-%d.sock", cmd.Process.Pid)
+			time.Sleep(delay)
+
+			// Connect once, with brief retries only while the socket is still
+			// being bound. A refused connection after magmux has exited is a
+			// legitimate outcome (nothing to subscribe to) and is not a failure.
+			var conn net.Conn
+			for a := 0; a < 10; a++ {
+				conn, err = net.Dial("unix", sockPath)
+				if err == nil || delay > 0 {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if conn == nil {
+				t.Skipf("iteration %d: magmux already gone at +%s (nothing to subscribe to)", i, delay)
+			}
+			defer conn.Close()
+			_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
+			var sawResults, sawAny bool
+			scanner := bufio.NewScanner(conn)
+			scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+			for scanner.Scan() {
+				var ev socketEvent
+				if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+					continue
+				}
+				sawAny = true
+				if ev.Type == "results" && ev.Panes != nil {
+					sawResults = true
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				t.Fatalf("read error before EOF (connected at +%s): %v", delay, err)
+			}
+			if sawAny && !sawResults {
+				t.Fatalf("subscriber connected at +%s received events but no `results` before EOF", delay)
+			}
+		})
+	}
+}
+
 // TestControllerSnapshotReachesAwaitingInput is the regression test for
 // issue #2: a pane with an attached controller broadcast exactly one
 // snapshot — state "starting" — and never another, even once the child was

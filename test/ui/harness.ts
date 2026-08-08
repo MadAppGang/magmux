@@ -5,7 +5,7 @@
  * watch the IPC socket, so they validate the whole chain the way a
  * subscriber (claudish, madbench) experiences it.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
@@ -203,34 +203,60 @@ export async function streamEvents(
 }
 
 /**
- * Launch a command in a NEW VISIBLE pane split off our own, and return its
- * pane id. Used by cases whose point is that you watch the real magmux UI.
- * Uses the default tmux server (the one the user is attached to), unlike the
- * headless runs which use a private -L server.
+ * Run magmux directly in THIS terminal, inheriting our stdio, and return a
+ * handle. The point of a visual case is that you watch the real UI, so it
+ * should work in any plain terminal — no tmux, no multiplexer, no split.
+ *
+ * Inheriting stdio gets us both things magmux needs at once: a real TTY, and
+ * an stdin that stays open (so claude idles at its prompt instead of exiting
+ * on EOF). Those are the two requirements that made script(1) unworkable.
+ *
+ * While magmux owns the screen we must not print anything, or we corrupt its
+ * rendering — callers collect events silently and report after `stop()`
+ * restores the terminal.
  */
-export function splitVisiblePane(cmd: string, cwd: string, sizePct = 72): string {
-  const self = process.env.TMUX_PANE;
-  if (!process.env.TMUX || !self) {
-    throw new Error("this case must be run from inside tmux so it has a pane to split");
+export class InlineMagmuxRun {
+  private proc: ReturnType<typeof spawn> | null = null;
+  private exited = false;
+  readonly startedAt = Date.now();
+
+  constructor(readonly binary: string, readonly args: string[], readonly cwd: string) {}
+
+  static supported(): boolean {
+    return Boolean(process.stdout.isTTY && process.stdin.isTTY);
   }
-  return execFileSync(
-    "tmux",
-    ["split-window", "-h", "-l", `${sizePct}%`, "-t", self, "-c", cwd,
-     "-P", "-F", "#{pane_id}", cmd],
-    { encoding: "utf8", env: process.env },
-  ).trim();
-}
 
-export function killPane(paneId: string) {
-  try {
-    execFileSync("tmux", ["kill-pane", "-t", paneId], { stdio: "ignore" });
-  } catch {}
-}
+  start() {
+    this.proc = spawn(this.binary, this.args, {
+      cwd: this.cwd,
+      env: cleanEnv(),
+      stdio: "inherit",
+    });
+    this.proc.on("exit", () => { this.exited = true; });
+  }
 
-/** `env -u FOO -u BAR ...` prefix that strips Claude Code session markers from
- *  a command we hand to tmux (which would otherwise inherit our own). */
-export function envStripPrefix(): string {
-  return ["env", ...strippedMarkers().map((k) => `-u ${k}`)].join(" ");
+  get hasExited(): boolean {
+    return this.exited;
+  }
+
+  /** Stop magmux and put the terminal back the way we found it. */
+  async stop() {
+    if (this.proc && !this.exited) {
+      try { this.proc.kill("SIGTERM"); } catch {}
+      for (let i = 0; i < 40 && !this.exited; i++) await sleep(50);
+      if (!this.exited) { try { this.proc.kill("SIGKILL"); } catch {} }
+    }
+    await sleep(150);
+    if (!process.stdout.isTTY) return;
+    // Leave the alternate screen and restore the cursor...
+    process.stdout.write("\x1b[?1049l\x1b[?25h\x1b[0m");
+    // ...and take the tty out of raw mode. magmux only restores it on its own
+    // clean exit, and we killed it mid-run, so without this the terminal
+    // keeps raw mode's missing ONLCR and every subsequent line staircases.
+    try {
+      execFileSync("stty", ["sane"], { stdio: "inherit" });
+    } catch {}
+  }
 }
 
 /** Per-pane live snapshot (has `pane`, not the connect-time `panes` aggregate). */

@@ -2053,6 +2053,20 @@ type Magmux struct {
 	sockPath      string     // /tmp/magmux-{pid}.sock
 	sockClients   []net.Conn // currently-connected socket subscribers (for push events)
 	sockClientsMu sync.Mutex
+	// finalEvents holds the marshaled shutdown payloads (results, then
+	// shutdown) once teardown begins. Guarded by sockClientsMu. Non-empty
+	// means "shutdown has started": a client connecting from that moment on
+	// is never registered for broadcasts, and is instead replayed these
+	// events directly before being closed. That makes "every subscriber
+	// receives results before EOF" hold no matter when it connects — see
+	// handleSocketConn and recordFinalEvents.
+	finalEvents [][]byte
+	// sockDone is closed once the socket server has finished its teardown —
+	// final results/shutdown broadcast, subscribers flushed and closed,
+	// listener removed. main waits on it before exiting, because that
+	// teardown is what delivers `results`; exiting first drops it entirely.
+	sockDone      chan struct{}
+	sockDoneOnce  sync.Once
 	lastDoneCount int       // track status bar updates to avoid redundant rewrites
 	startedAt     time.Time // when magmux started (for status bar timer)
 	completedAt   time.Time // when all panes reached "done" (freezes timer)
@@ -2995,6 +3009,7 @@ func (m *Magmux) socketServer() {
 		if dbgFile != nil {
 			fmt.Fprintf(dbgFile, "socket listen error: %v\n", err)
 		}
+		m.markSocketDone() // nothing to tear down; don't make main wait
 		return
 	}
 
@@ -3004,15 +3019,21 @@ func (m *Magmux) socketServer() {
 		// Push a final aggregated results event with the last-known state of
 		// every pane. Subscribers (e.g. claudish) use this as the authoritative
 		// final state — no file-based fallback needed.
-		m.broadcastEvent(map[string]any{
+		results := map[string]any{
 			"type":    "results",
 			"panes":   m.buildPaneResults(),
 			"endedAt": time.Now().UTC().Format(time.RFC3339),
-		})
+		}
+		shutdown := map[string]any{"type": "shutdown"}
+		// Record before broadcasting. From this point a connection either wins
+		// the race and is registered (so the broadcasts below reach it), or it
+		// arrives after and is replayed these same events by handleSocketConn.
+		// Both paths deliver exactly once, because a client that sees
+		// finalEvents is never added to sockClients.
+		m.recordFinalEvents(results, shutdown)
+		m.broadcastEvent(results)
 		// Push a shutdown event so clients know the socket is closing.
-		m.broadcastEvent(map[string]any{
-			"type": "shutdown",
-		})
+		m.broadcastEvent(shutdown)
 		// Deterministically flush and close each subscriber connection instead
 		// of racing a fixed drain sleep. Closing the connection after the two
 		// broadcasts above (which write synchronously under sockClientsMu) gives
@@ -3022,6 +3043,7 @@ func (m *Magmux) socketServer() {
 		m.closeSockClients(2 * time.Second)
 		ln.Close()
 		os.Remove(sockPath)
+		m.markSocketDone()
 	}()
 
 	for {
@@ -3046,15 +3068,42 @@ func (m *Magmux) handleSocketConn(conn net.Conn) {
 	// NOTE: distinct from the per-pane live "snapshot" event (which carries a
 	// singular "pane" field). This connect-time aggregate carries a "panes"
 	// array — subscribers disambiguate on that field.
-	if data, err := json.Marshal(snapshot); err == nil {
-		data = append(data, '\n')
-		_ = conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
-		_, _ = conn.Write(data)
-		_ = conn.SetWriteDeadline(time.Time{})
+	//
+	// Build the payload BEFORE taking sockClientsMu: buildPaneResults locks
+	// each pane, and the established lock order is p.mu -> sockClientsMu
+	// (pollControllers releases p.mu before broadcasting). Taking them the
+	// other way round here would invert it.
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		conn.Close()
+		return
 	}
+	data = append(data, '\n')
 
-	// Track this connection so we can push snapshots/exit events to it.
+	// Write the aggregate and register for broadcasts ATOMICALLY, under the
+	// same lock broadcastEvent uses. Writing first and registering after left
+	// a window in which a shutdown broadcast (results/shutdown) could run
+	// against a client list that did not yet contain this connection: the
+	// subscriber then saw a clean EOF with no `results` event, violating the
+	// ordering guarantee integrators rely on. That was rare but real — it is
+	// what made TestSocketSubscriberContract flaky.
 	m.sockClientsMu.Lock()
+	_ = conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	_, _ = conn.Write(data)
+	_ = conn.SetWriteDeadline(time.Time{})
+	if len(m.finalEvents) > 0 {
+		// Teardown already began, so this connection will never be broadcast
+		// to. Replay the final events it missed, then give it a clean EOF.
+		// Registering instead would either lose `results` or leave the
+		// connection dangling.
+		for _, ev := range m.finalEvents {
+			_ = conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+			_, _ = conn.Write(ev)
+		}
+		m.sockClientsMu.Unlock()
+		conn.Close()
+		return
+	}
 	m.sockClients = append(m.sockClients, conn)
 	m.sockClientsMu.Unlock()
 
@@ -3079,6 +3128,50 @@ func (m *Magmux) handleSocketConn(conn net.Conn) {
 		}
 		m.dispatchSocketMsg(msg)
 	}
+}
+
+// markSocketDone signals that socket teardown is complete (or will never
+// happen). Safe to call repeatedly.
+func (m *Magmux) markSocketDone() {
+	if m.sockDone == nil {
+		return
+	}
+	m.sockDoneOnce.Do(func() { close(m.sockDone) })
+}
+
+// waitSocketShutdown blocks until the socket server has flushed its final
+// results/shutdown broadcasts and closed every subscriber, or until timeout.
+//
+// Without this, main can return from inputLoop and exit while the teardown
+// goroutine is still running, so subscribers see the connection drop with no
+// `results` event at all — the ordering guarantee integrators rely on,
+// broken by process exit rather than by anything on the socket path. Bounded
+// so a wedged subscriber cannot stop magmux from exiting.
+func (m *Magmux) waitSocketShutdown(timeout time.Duration) {
+	if m.sockDone == nil {
+		return
+	}
+	select {
+	case <-m.sockDone:
+	case <-time.After(timeout):
+	}
+}
+
+// recordFinalEvents marshals the shutdown payloads and stores them so a
+// subscriber connecting during or after teardown can still be given them.
+// Must be called before the corresponding broadcasts.
+func (m *Magmux) recordFinalEvents(events ...any) {
+	var encoded [][]byte
+	for _, e := range events {
+		data, err := json.Marshal(e)
+		if err != nil {
+			continue
+		}
+		encoded = append(encoded, append(data, '\n'))
+	}
+	m.sockClientsMu.Lock()
+	m.finalEvents = encoded
+	m.sockClientsMu.Unlock()
 }
 
 // broadcastEvent serializes an event as JSON and pushes it to all connected
@@ -3908,6 +4001,7 @@ func main() {
 	mux := &Magmux{
 		gridMode: useGrid,
 		autoExit: autoExit,
+		sockDone: make(chan struct{}),
 		controllerFactories: []ControllerFactory{
 			claudeCodeFactory,
 		},
@@ -3953,7 +4047,13 @@ func main() {
 	go mux.renderLoop()
 	mux.inputLoop()
 
-	// Cleanup socket
+	// The socket server broadcasts the final `results` event and then closes
+	// each subscriber, giving it a clean EOF *after* that event. That happens
+	// in a goroutine woken by m.quit, so we must let it finish — exiting here
+	// races it and drops results entirely.
+	mux.waitSocketShutdown(3 * time.Second)
+
+	// Cleanup socket (normally already removed by the teardown above)
 	if mux.sockPath != "" {
 		os.Remove(mux.sockPath)
 	}
