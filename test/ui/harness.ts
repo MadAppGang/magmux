@@ -127,62 +127,16 @@ export class MagmuxRun {
     return out.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-n);
   }
 
-  /** magmux binds /tmp/magmux-<pid>.sock; script(1) hides that pid from us,
-   *  so find the socket that appeared after we started. */
   async waitForSocket(timeoutMs = 15000): Promise<string> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      let entries: string[] = [];
-      try {
-        entries = fs.readdirSync("/tmp").filter((f) => /^magmux-\d+\.sock$/.test(f));
-      } catch {}
-      for (const e of entries) {
-        const full = path.join("/tmp", e);
-        try {
-          if (fs.statSync(full).ctimeMs >= this.startedAt - 500) {
-            this.sockPath = full;
-            return full;
-          }
-        } catch {}
-      }
-      await sleep(50);
-    }
-    throw new Error("magmux socket never appeared");
+    this.sockPath = await findSocket(this.startedAt, timeoutMs);
+    return this.sockPath;
   }
 
-  /** Stream line-delimited JSON events until `onEvent` returns true or we time out. */
   async readEvents(
     onEvent: (ev: SnapshotEvent, tSec: number) => boolean | void,
     timeoutMs: number,
   ): Promise<void> {
-    const t0 = Date.now();
-    await new Promise<void>((resolve) => {
-      const conn = net.createConnection(this.sockPath);
-      let buf = "";
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        try { conn.destroy(); } catch {}
-        clearTimeout(timer);
-        resolve();
-      };
-      const timer = setTimeout(finish, timeoutMs);
-      conn.on("data", (chunk) => {
-        buf += chunk.toString();
-        let nl: number;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 1);
-          if (!line) continue;
-          let ev: SnapshotEvent;
-          try { ev = JSON.parse(line); } catch { continue; }
-          if (onEvent(ev, (Date.now() - t0) / 1000) === true) return finish();
-        }
-      });
-      conn.on("end", finish);
-      conn.on("error", finish);
-    });
+    return streamEvents(this.sockPath, onEvent, timeoutMs);
   }
 
   stop() {
@@ -191,6 +145,93 @@ export class MagmuxRun {
 }
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** magmux binds /tmp/magmux-<pid>.sock. We usually can't see that pid (it is
+ *  a grandchild of tmux), so find the socket that appeared after we started. */
+export async function findSocket(startedAt: number, timeoutMs = 15000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let entries: string[] = [];
+    try {
+      entries = fs.readdirSync("/tmp").filter((f) => /^magmux-\d+\.sock$/.test(f));
+    } catch {}
+    for (const e of entries) {
+      const full = path.join("/tmp", e);
+      try {
+        if (fs.statSync(full).ctimeMs >= startedAt - 500) return full;
+      } catch {}
+    }
+    await sleep(50);
+  }
+  throw new Error("magmux socket never appeared");
+}
+
+/** Stream line-delimited JSON events until `onEvent` returns true or we time out. */
+export async function streamEvents(
+  sockPath: string,
+  onEvent: (ev: SnapshotEvent, tSec: number) => boolean | void,
+  timeoutMs: number,
+): Promise<void> {
+  const t0 = Date.now();
+  await new Promise<void>((resolve) => {
+    const conn = net.createConnection(sockPath);
+    let buf = "";
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      try { conn.destroy(); } catch {}
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    conn.on("data", (chunk) => {
+      buf += chunk.toString();
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let ev: SnapshotEvent;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (onEvent(ev, (Date.now() - t0) / 1000) === true) return finish();
+      }
+    });
+    conn.on("end", finish);
+    conn.on("error", finish);
+  });
+}
+
+/**
+ * Launch a command in a NEW VISIBLE pane split off our own, and return its
+ * pane id. Used by cases whose point is that you watch the real magmux UI.
+ * Uses the default tmux server (the one the user is attached to), unlike the
+ * headless runs which use a private -L server.
+ */
+export function splitVisiblePane(cmd: string, cwd: string, sizePct = 72): string {
+  const self = process.env.TMUX_PANE;
+  if (!process.env.TMUX || !self) {
+    throw new Error("this case must be run from inside tmux so it has a pane to split");
+  }
+  return execFileSync(
+    "tmux",
+    ["split-window", "-h", "-l", `${sizePct}%`, "-t", self, "-c", cwd,
+     "-P", "-F", "#{pane_id}", cmd],
+    { encoding: "utf8", env: process.env },
+  ).trim();
+}
+
+export function killPane(paneId: string) {
+  try {
+    execFileSync("tmux", ["kill-pane", "-t", paneId], { stdio: "ignore" });
+  } catch {}
+}
+
+/** `env -u FOO -u BAR ...` prefix that strips Claude Code session markers from
+ *  a command we hand to tmux (which would otherwise inherit our own). */
+export function envStripPrefix(): string {
+  return ["env", ...strippedMarkers().map((k) => `-u ${k}`)].join(" ");
+}
 
 /** Per-pane live snapshot (has `pane`, not the connect-time `panes` aggregate). */
 export function isLiveSnapshot(ev: SnapshotEvent): boolean {

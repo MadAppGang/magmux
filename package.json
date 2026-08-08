@@ -3,6 +3,7 @@
   "private": true,
   "description": "Visual end-to-end cases that drive a real magmux binary with real Claude Code panes and assert on the IPC socket contract. Not part of `go test` — these cost real Claude Code usage and need auth, so they are run on demand.",
   "scripts": {
-    "test:ui:case1": "bun test/ui/case1.ts"
+    "test:ui:case1": "bun test/ui/case1.ts",
+    "test:ui:case2": "bun test/ui/case2.ts"
   }
 }
