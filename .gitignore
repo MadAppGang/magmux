@@ -25,3 +25,5 @@ magmux
 # Local credentials for the pilot.
 .env
 .env.*
+# Session transcripts and scratch notes are local working artifacts.
+ai-docs/sessions/

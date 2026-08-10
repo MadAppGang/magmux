@@ -8,7 +8,9 @@
     "go@magus": true,
     "browser-use@magus": true,
     "terminal@magus": true,
-    "kanban@magus": true
+    "kanban@magus": true,
+    "setup@magus": true,
+    "style@magus": true
   },
   "installedPluginVersions": {
     "code-analysis@magus": "5.3.1",
@@ -16,8 +18,11 @@
     "browser-use@magus": "1.4.0",
     "terminal@magus": "4.1.4",
     "kanban@magus": "1.6.0",
-    "dev@magus": "2.7.0",
+    "dev@magus": "3.3.0",
     "claudish@magus": "1.0.0",
-    "go@magus": "0.1.1"
+    "go@magus": "0.1.1",
+    "statusline@magus": "3.0.0",
+    "setup@magus": "1.0.0",
+    "style@magus": "1.0.0"
   }
 }
