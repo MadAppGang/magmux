@@ -100,6 +100,24 @@ func (s ControllerState) String() string {
 	}
 }
 
+// InputNotifier is an optional interface a ToolController may implement to
+// learn that input was pushed into its pane from outside magmux — a pilot's
+// `send` on the IPC socket.
+//
+// It exists because a controller's idle state is otherwise one-way. A
+// controller promotes itself to CtrlAwaitingInput when the terminal looks
+// idle, but only the tool's own transcript can move it back to working. When
+// a pilot injects an instruction and the transcript is missing or lagging,
+// nothing else would ever unstick the state, and the pilot would wait
+// forever for a turn that had in fact already begun.
+//
+// Implementations should treat the call as "a new turn is starting now" and
+// must remain safe if the tool ignores the input — the ordinary idle
+// heuristics have to be able to settle the state again on their own.
+type InputNotifier interface {
+	NotifyInput()
+}
+
 // ControllerFactory inspects a pane's command/env and returns a controller
 // if it can handle that tool, or nil if not. magmux walks the registered
 // factories in order; the first non-nil result wins.

@@ -93,6 +93,20 @@ func TestExtractClaudePrompt(t *testing.T) {
 		{"unquoted with redirect", `claude do a thing > /tmp/out`, "do a thing"},
 		{"interactive, no prompt", `claude`, ""},
 		{"not claude at all", `vim main.go`, ""},
+		// REGRESSION: a flag as the final token was returned as the prompt.
+		// The flag-skipping loop looked for a following space to advance
+		// past, found none, and fell out still holding the flag. A non-empty
+		// wantPrompt then routes discovery down match-by-prompt, hunting for
+		// a transcript whose first user message is "--dangerously-skip-
+		// permissions". Nothing matches, the mtime fallback that interactive
+		// panes depend on is never reached, and the controller never locks
+		// on — so model/response/tool stay empty for the whole session while
+		// the pane looks perfectly healthy. This is the exact command a
+		// controlled session uses, so it broke every pilot run.
+		{"trailing flag only", `claude --dangerously-skip-permissions`, ""},
+		{"two trailing flags", `claude --verbose --dangerously-skip-permissions`, ""},
+		{"flag with value, no prompt", `claude --model opus`, ""},
+		{"flags then prompt still works", `claude --verbose -p "do it"`, "do it"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

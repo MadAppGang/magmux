@@ -24,9 +24,20 @@ terminal core; the tool-controller layer lives beside it.
 Tool controllers:
 
 - `controller.go` — the `ToolController` interface and the `Snapshot` /
-  `ControllerState` surface every controller produces.
+  `ControllerState` surface every controller produces, plus the optional
+  `InputNotifier` interface.
 - `controller_claude.go` — observes a Claude Code pane by tailing its JSONL
   transcript under `~/.claude/projects/`.
+
+Controlled sessions (an external AI agent steering a pane):
+
+- `pilot.go` — the `send` socket verb and PTY injection. The inbound half.
+- `control.go` — the control panel: the OUT/IN log of pilot↔session traffic,
+  painted into a PTY-less pane.
+- `pilot/pilot.ts` — the pi.dev agent that does the steering, with its
+  toolbox replaced by `send_to_session` + `finish`.
+- `pilot/magmux.ts` — its socket bridge.
+- `test/ui/case3.ts` — the visual end-to-end case for the whole loop.
 
 ## Key Design Decisions
 
@@ -38,7 +49,7 @@ Tool controllers:
 
 ### Controller invariants
 
-Two of these are easy to re-break; both caused filed bugs.
+These are easy to re-break; each caused a filed bug or cost real debugging time.
 
 - **Pane idleness has two independent sources, and they must be reconciled.**
   A pane learns it is idle from the terminal (OSC 9 notification, bracketed-paste
@@ -61,9 +72,56 @@ Two of these are easy to re-break; both caused filed bugs.
   matching on transcript content. Keep it that way — a wrong directory name
   otherwise strands the controller in `starting` silently and forever.
 
+- **Controller idle state is one-way, so injected input must un-stick it.**
+  `applyTerminalIdle` promotes a snapshot to `awaiting_input` and then refuses
+  to touch it ("already settled"); only a new transcript entry moves it back
+  to working. That is fine for a human typing — Claude Code writes the
+  submitted prompt to its transcript immediately — but transcript discovery
+  can lag or fail outright, and then a pilot's `send` would leave the state
+  settled and the pilot would wait forever for a turn that had already begun.
+  `sendToPane` therefore calls `InputNotifier.NotifyInput`, and the next
+  `Poll` demotes a settled snapshot to working. The demotion is deliberately
+  *not* sticky: if the tool ignores the instruction, the idle heuristics
+  settle the pane again, so a dropped instruction surfaces as a suspiciously
+  fast empty turn rather than a permanent "working".
+
+### Controlled-session invariants
+
+- **`send` must bypass `writePTY`, and that is the whole point.** In grid mode
+  `writePTY` suppresses input to a pane that is `dead || inputReady`, so a
+  finished grid can be dismissed with `q`. But `inputReady` is exactly the
+  state a pilot wants to act on — the session finished its turn and is waiting
+  for the next instruction. Pilot sends therefore take `injectPTY`, which
+  skips that guard while still clearing the completion state (tint, overlay,
+  `inputReady`, `hadTextOutput`) the way a real keystroke would. Route a pilot
+  send through `writePTY` and every instruction after the first is silently
+  dropped.
+
+- **The panel's two directions come from different places, and must stay that
+  way.** `▶ OUT` rows are recorded from the pilot's own `send`; `◀ IN` rows are
+  recorded only from `pollControllers`, i.e. from what magmux itself observed
+  the pane do. A pilot can therefore never fabricate a completion, and the
+  panel can show the session disagreeing with what the pilot believes it
+  asked for. Relatedly, an IN row only counts when an instruction is
+  outstanding (`sent > observed`) — a session is idle from the moment it
+  boots, and counting that as a completed turn showed `done 1` against zero
+  instructions and drove the progress meter on a run that had not started.
+
+- **The control pane has no process, so every "every pane" loop must skip it.**
+  It is never dead and never goes idle, so `allPanesDone` counting it means
+  `-w` can never fire; `startReadLoops` and `waitForChild` would dereference a
+  nil PTY and nil `cmd`. It also has no child to redraw it on SIGWINCH, so the
+  resize path must repaint it explicitly or it comes back blank.
+
 ## Dependencies
 
-Only `golang.org/x/sys` (PTY ioctls) and `golang.org/x/term` (raw mode). Zero third-party.
+Go: only `golang.org/x/sys` (PTY ioctls) and `golang.org/x/term` (raw mode).
+Zero third-party — the control panel is raw ANSI written through the pane's own
+VT parser rather than a TUI library, which is what keeps that true.
+
+The pilot is separate and out-of-process by design: it is TypeScript
+(`@earendil-works/pi-coding-agent`, run with bun), talks to magmux only over
+the documented socket, and nothing in the Go binary depends on it.
 
 ## Release
 
