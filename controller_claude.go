@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,6 +46,13 @@ type ClaudeCodeController struct {
 	baselined   map[string]bool // dirs whose baseline has been captured
 	lastBroadAt time.Time       // last widened scan (throttled)
 	lastApplyAt time.Time       // wall time we last applied a transcript entry
+
+	// injected is set by NotifyInput when a pilot pushes an instruction into
+	// the pane, and consumed by the next Poll. An atomic rather than a lock
+	// because NotifyInput runs on the socket goroutine while everything else
+	// in this controller runs on the render goroutine; a flag keeps that the
+	// only shared state between them.
+	injected atomic.Bool
 
 	snap Snapshot
 }
@@ -120,21 +128,38 @@ func extractClaudePrompt(p *Pane) string {
 		}
 		after := arg[idx+len("claude "):]
 		// Skip any flags (starting with -) and their values
+		sawFlag := false
 		for {
 			after = strings.TrimLeft(after, " ")
 			if after == "" || after[0] != '-' {
 				break
 			}
+			sawFlag = true
 			// Skip one flag (and optional value)
 			sp := strings.Index(after, " ")
 			if sp < 0 {
+				// A trailing flag with nothing after it, e.g.
+				// `claude --dangerously-skip-permissions`. There is no
+				// prompt — this is interactive mode.
+				//
+				// Breaking here instead would leave the flag itself in
+				// `after` and return it as the prompt. That is not a
+				// cosmetic slip: a non-empty wantPrompt sends discovery
+				// down the match-by-prompt path, hunting for a transcript
+				// whose first user message is literally
+				// "--dangerously-skip-permissions". Nothing ever matches,
+				// the mtime fallback interactive panes rely on is never
+				// reached, and the controller silently never locks on — so
+				// model, response and tool stay empty forever while the
+				// pane looks fine on screen.
+				after = ""
 				break
 			}
 			after = after[sp+1:]
 		}
 		// Now `after` starts with the prompt, which may be quoted.
 		after = strings.TrimSpace(after)
-		if after == "" {
+		if after == "" || after[0] == '-' {
 			continue
 		}
 		// Strip surrounding quotes if present
@@ -145,6 +170,20 @@ func extractClaudePrompt(p *Pane) string {
 			if end >= 0 {
 				return after[1 : 1+end]
 			}
+		}
+		// Unquoted, and we skipped at least one flag on the way here: this
+		// token is more likely that flag's value than a prompt. We have no
+		// table of which claude flags take values, and cannot get one — it
+		// is someone else's CLI. So prefer to claim no prompt.
+		//
+		// The two outcomes are not symmetric. An empty wantPrompt falls back
+		// to mtime discovery, which is correct for an interactive pane. A
+		// *wrong* wantPrompt (e.g. "opus" from `claude --model opus`) sends
+		// discovery hunting for a transcript that cannot exist, and the
+		// controller never locks on at all. Guessing costs far more than
+		// abstaining.
+		if sawFlag {
+			continue
 		}
 		// Unquoted: take up to end of line or next shell operator
 		for _, delim := range []string{";", "&&", "||", " | ", " 2>", " >"} {
@@ -225,7 +264,46 @@ func extractClaudeCwd(p *Pane) string {
 
 func (c *ClaudeCodeController) Stop() error { return nil }
 
+// NotifyInput records that a pilot pushed an instruction into this pane.
+// See the InputNotifier docs for why a controller needs to be told.
+func (c *ClaudeCodeController) NotifyInput() {
+	c.injected.Store(true)
+}
+
+// consumeInjected demotes a settled snapshot back to working when an
+// instruction has been injected since the last poll.
+//
+// Without this the state is one-way: applyTerminalIdle promotes to
+// awaiting_input and only a transcript entry can move it off again. Claude
+// Code normally writes the submitted prompt to its transcript straight away,
+// which would do the job — but transcript discovery can lag or fail outright
+// (that is why the widened scan exists), and in that case a pilot would sit
+// waiting for a turn that had already started.
+//
+// Deliberately not sticky: if the tool ignores the instruction, the ordinary
+// idle heuristics settle the pane again and applyTerminalIdle promotes it
+// back, so a dropped instruction surfaces as a fast empty turn rather than a
+// permanent "working".
+func (c *ClaudeCodeController) consumeInjected() {
+	if !c.injected.Swap(false) {
+		return
+	}
+	switch c.snap.State {
+	case CtrlAwaitingInput, CtrlAwaitingPermission, CtrlError:
+		c.snap.State = CtrlWorking
+		c.snap.StartedAt = time.Now()
+		c.snap.CompletedAt = time.Time{}
+		c.snap.LastTool = ""
+		if dbgFile != nil {
+			fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p input injected → working\n", c.pane)
+		}
+	}
+}
+
 func (c *ClaudeCodeController) Poll() (Snapshot, error) {
+	// Runs first: an injected instruction starts a new turn, so it must not
+	// be overridden by transcript state left over from the previous one.
+	c.consumeInjected()
 	err := c.pollTranscript()
 	// Reconcile with the terminal's own idle detection. Runs even when the
 	// transcript was never found, so the live snapshot can still reach
@@ -546,11 +624,23 @@ func (c *ClaudeCodeController) applyLine(line []byte) {
 	t, _ := entry["type"].(string)
 	switch t {
 	case "user":
-		// New turn starting
+		// Claude Code files tool RESULTS as "user" entries too, with an array
+		// content instead of a string. Only a string is a real prompt, and
+		// only a real prompt starts a new turn.
+		//
+		// Treating a tool result as a turn boundary resets the turn mid-flight:
+		// StartedAt jumps forward (so the reported duration is the time since
+		// the last tool, not since the prompt), and LastResponse/LastTool are
+		// wiped. The response usually reappears from the closing assistant
+		// message, but the tool does not — which is why a turn that plainly ran
+		// Bash reported no tool at all.
 		msg, _ := entry["message"].(map[string]any)
-		if content, ok := msg["content"].(string); ok {
-			c.snap.LastUserPrompt = content
+		content, isPrompt := msg["content"].(string)
+		if !isPrompt {
+			return
 		}
+		// New turn starting
+		c.snap.LastUserPrompt = content
 		c.snap.State = CtrlWorking
 		c.snap.StartedAt = parseClaudeTimestamp(entry["timestamp"])
 		c.snap.CompletedAt = time.Time{}

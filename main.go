@@ -1227,6 +1227,11 @@ type Pane struct {
 	agentProject string // project name from hook
 	agentTool    string // last tool being used
 	agentPrompt  string // last user prompt
+	// isControl marks the pane as magmux's own control panel: no PTY, no
+	// child process, painted by ControlPanel.render. Every path that assumes
+	// a pane owns a process (read loops, child waits, done-counting) must
+	// skip it.
+	isControl bool
 	// Interactive tool controller (e.g. ClaudeCodeController). Optional.
 	controller     ToolController
 	controllerSnap Snapshot
@@ -1253,6 +1258,33 @@ func newPane(y, x, h, w int, command string, args ...string) (*Pane, error) {
 		return nil, fmt.Errorf("spawn PTY: %w", err)
 	}
 	return p, nil
+}
+
+// newControlPane builds a pane with no PTY and no child. It still gets a
+// Screen and a VT parser, because that is how it is painted: ControlPanel
+// writes ANSI into the parser exactly as a child process would, so the pane
+// renders, scrolls, and selects through the ordinary pane path.
+func newControlPane(y, x, h, w int) *Pane {
+	p := &Pane{
+		y: y, x: x, h: h, w: w,
+		ratio:     0.5,
+		charsetG0: 'B',
+		charsetG1: 'B',
+		isControl: true,
+	}
+	p.screen = newScreen(h, w)
+	p.primaryScreen = p.screen
+	p.vt.node = p
+	return p
+}
+
+// newPaneFor builds either a normal child-process pane or the control pane,
+// depending on the config.
+func newPaneFor(y, x, h, w int, cfg PaneConfig) (*Pane, error) {
+	if cfg.Control {
+		return newControlPane(y, x, h, w), nil
+	}
+	return newPane(y, x, h, w, cfg.Cmd, cfg.Args...)
 }
 
 func (p *Pane) spawnPTY(command string, args ...string) error {
@@ -2080,6 +2112,16 @@ type Magmux struct {
 	// same JSONL file when running in the same project directory.
 	claimedSessions map[string]*Pane
 	claimedMu       sync.Mutex
+	// control is the controlled-session panel. Always non-nil so the record*
+	// methods are safe to call unconditionally; it only paints if a control
+	// pane was built for it (magmux -c).
+	control *ControlPanel
+	// autoCloseAfter is how long to wait after a pilot declares the run over
+	// before quitting (-x). Zero means wait for an explicit keypress, which
+	// is the default: a finished run that vanishes before it is read is
+	// worse than one that lingers.
+	autoCloseAfter time.Duration
+	closeAt        time.Time // when the armed countdown fires; zero if not armed
 }
 
 // claimSession atomically attempts to mark `path` as owned by `p`. Returns
@@ -2252,7 +2294,7 @@ func (m *Magmux) buildLayout(commands []PaneConfig) error {
 // buildColumn recursively splits a slice of commands into a vertical binary tree.
 func buildColumn(cmds []PaneConfig, y, x, h, w int) (*Pane, []*Pane, error) {
 	if len(cmds) == 1 {
-		p, err := newPane(y, x, h, w, cmds[0].Cmd, cmds[0].Args...)
+		p, err := newPaneFor(y, x, h, w, cmds[0])
 		if err != nil {
 			return nil, nil, err
 		}
@@ -2298,7 +2340,7 @@ func (m *Magmux) buildGrid(commands []PaneConfig) error {
 	switch len(commands) {
 	case 1:
 		// Single pane — fullscreen
-		p, err := newPane(0, 0, availH, m.cols, commands[0].Cmd, commands[0].Args...)
+		p, err := newPaneFor(0, 0, availH, m.cols, commands[0])
 		if err != nil {
 			return err
 		}
@@ -2310,11 +2352,11 @@ func (m *Magmux) buildGrid(commands []PaneConfig) error {
 		// Horizontal split: left | right
 		w1 := m.cols / 2
 		w2 := m.cols - w1 - 1
-		p1, err := newPane(0, 0, availH, w1, commands[0].Cmd, commands[0].Args...)
+		p1, err := newPaneFor(0, 0, availH, w1, commands[0])
 		if err != nil {
 			return err
 		}
-		p2, err := newPane(0, w1+1, availH, w2, commands[1].Cmd, commands[1].Args...)
+		p2, err := newPaneFor(0, w1+1, availH, w2, commands[1])
 		if err != nil {
 			return err
 		}
@@ -2369,6 +2411,9 @@ func (m *Magmux) buildGrid(commands []PaneConfig) error {
 
 func (m *Magmux) startReadLoops() {
 	for _, p := range m.allPanes {
+		if p.isControl {
+			continue // no PTY to read from
+		}
 		m.wg.Add(1)
 		go p.readLoop(&m.wg)
 	}
@@ -2435,6 +2480,10 @@ func (m *Magmux) pollControllers() {
 		// Broadcast on meaningful change (state transition, new response,
 		// tool change, or new prompt). Skip no-op polls.
 		if snapshotChanged(prev, snap) {
+			// Feed the control panel from what magmux actually observed,
+			// not from what the pilot claims it asked for — the panel has
+			// to be able to show the two disagreeing.
+			m.control.recordObserved(idx, snap.State.String(), snap.LastResponse, snap.LastTool)
 			m.broadcastEvent(map[string]any{
 				"type":        "snapshot",
 				"pane":        idx,
@@ -2560,6 +2609,11 @@ func (m *Magmux) handleSIGWINCH() {
 				m.cols = w
 				statusH := 1
 				m.root.resize(0, 0, h-statusH, w)
+				// resize rebuilds each pane's Screen. A child process
+				// redraws itself on SIGWINCH; the control panel has no
+				// process to do that, so it must be repainted here or it
+				// comes back blank.
+				m.control.markDirty()
 			case <-m.quit:
 				return
 			}
@@ -2653,6 +2707,23 @@ func (m *Magmux) inputLoop() {
 				}
 				inbuf = inbuf[1:]
 				continue
+			}
+
+			// Any keystroke cancels an armed auto-close: someone is here and
+			// reading, so the window must not disappear under them.
+			if !m.closeAt.IsZero() {
+				m.closeAt = time.Time{}
+				m.control.cancelClose()
+			}
+
+			// Keys aimed at the control panel scroll it. The panel has no PTY,
+			// so without this every key pressed while it is focused is silently
+			// swallowed and the pane looks broken.
+			if m.focused != nil && m.focused.isControl {
+				if n := m.consumeControlKey(inbuf); n > 0 {
+					inbuf = inbuf[n:]
+					continue
+				}
 			}
 
 			// Grid mode: when all panes are done (dead or idle), q/Esc/Ctrl-C exits
@@ -2901,6 +2972,20 @@ func (m *Magmux) parseSGRMouse(buf []byte) (int, bool) {
 		}
 	}
 
+	// Wheel over the control panel scrolls its exchange, whichever pane has
+	// focus. Checked before the alt-screen forward below: the panel has no
+	// PTY, so forwarding would drop the event entirely.
+	if btn == 64 || btn == 65 {
+		if target := m.findPaneAt(row0, col0); target != nil && target.isControl {
+			if btn == 64 {
+				m.control.scrollBy(3)
+			} else {
+				m.control.scrollBy(-3)
+			}
+			return end + 1, true
+		}
+	}
+
 	// If focused pane is in alternate screen (vim, htop, Claude Code, OpenCode),
 	// forward ALL mouse events to it — like tmux does.
 	if m.focused != nil && m.focused.altMode {
@@ -2992,6 +3077,14 @@ type sockMsg struct {
 	Prompt           string `json:"prompt,omitempty"`            // from UserPromptSubmit
 	Project          string `json:"project,omitempty"`           // project name
 	NotificationType string `json:"notification_type,omitempty"` // idle_prompt, permission_prompt, etc.
+	// Controlled-session fields (type="send" / type="pilot")
+	Keys    []string `json:"keys,omitempty"`    // named keys to press after Text
+	Enter   *bool    `json:"enter,omitempty"`   // submit after Text; defaults true
+	Label   string   `json:"label,omitempty"`   // short tag for the control log ("step 2/5")
+	Goal    string   `json:"goal,omitempty"`    // the task the pilot is driving
+	Steps   int      `json:"steps,omitempty"`   // planned step count, 0 if open-ended
+	Model   string   `json:"model,omitempty"`   // model the pilot itself is running
+	Summary string   `json:"summary,omitempty"` // pilot's closing summary
 }
 
 func (m *Magmux) socketServer() {
@@ -3282,6 +3375,23 @@ func (m *Magmux) dispatchSocketMsg(msg sockMsg) {
 			p.mu.Unlock()
 		}
 
+	case "send":
+		// Drive a pane from outside — the inbound half of a controlled
+		// session. Defaults to the pilot's target pane so a pilot that has
+		// announced itself need not repeat the index on every instruction.
+		paneIdx := m.parsePaneIndex(msg.Pane)
+		if paneIdx < 0 {
+			paneIdx = m.control.targetPane()
+		}
+		enter := true
+		if msg.Enter != nil {
+			enter = *msg.Enter
+		}
+		m.sendToPane(paneIdx, msg.Text, msg.Keys, enter, msg.Label)
+
+	case "pilot":
+		m.dispatchPilotMsg(msg)
+
 	case "agent":
 		paneIdx := m.parsePaneIndex(msg.Pane)
 		if paneIdx < 0 || paneIdx >= len(m.allPanes) {
@@ -3533,6 +3643,15 @@ func (m *Magmux) waitForChild(p *Pane) {
 func (m *Magmux) buildPaneResults() []map[string]any {
 	results := make([]map[string]any, 0, len(m.allPanes))
 	for i, p := range m.allPanes {
+		if p.isControl {
+			// Reported rather than omitted, so a subscriber walking results
+			// still sees every pane index and can tell why this one has no
+			// session state of its own.
+			results = append(results, map[string]any{
+				"pane": i, "state": "panel", "control": true,
+			})
+			continue
+		}
 		p.mu.Lock()
 		snap := p.controllerSnap
 		var state string
@@ -3582,14 +3701,21 @@ func (m *Magmux) buildPaneResults() []map[string]any {
 	return results
 }
 
-// allPanesDone returns true if every pane is either dead or inputReady.
+// allPanesDone returns true if every session pane is either dead or
+// inputReady. The control panel is not a session — it is never "done" and has
+// no process to exit, so counting it would deadlock -w forever.
 func (m *Magmux) allPanesDone() bool {
+	sessions := 0
 	for _, p := range m.allPanes {
+		if p.isControl {
+			continue
+		}
+		sessions++
 		if !p.dead && !p.inputReady {
 			return false
 		}
 	}
-	return len(m.allPanes) > 0
+	return sessions > 0
 }
 
 func (m *Magmux) renderLoop() {
@@ -3682,6 +3808,9 @@ func (m *Magmux) render() {
 	if m.gridMode {
 		done, running := 0, 0
 		for _, p := range m.allPanes {
+			if p.isControl {
+				continue // the panel is chrome, not a tracked session
+			}
 			p.mu.Lock()
 			if p.dead || p.inputReady {
 				done++
@@ -3693,7 +3822,7 @@ func (m *Magmux) render() {
 		// Rebuild status text every render so the timer stays current
 		// while work is in progress; freeze it the moment everything
 		// finishes so the user sees the final elapsed time.
-		total := len(m.allPanes)
+		total := done + running
 		allDone := total > 0 && running == 0 && done == total
 		if allDone && m.completedAt.IsZero() {
 			m.completedAt = time.Now()
@@ -3763,6 +3892,23 @@ func (m *Magmux) render() {
 		return
 	}
 
+	// Auto-close countdown, armed when a pilot declares the run over. Feed
+	// the remaining time to the panel so the countdown is visible rather
+	// than the window disappearing without warning.
+	if !m.closeAt.IsZero() {
+		remain := time.Until(m.closeAt)
+		if remain <= 0 {
+			m.quitOnce.Do(func() { close(m.quit) })
+			return
+		}
+		m.control.setCloseIn(remain)
+	}
+
+	// Repaint the control panel before the dirty sweep below, so the frame it
+	// produces is picked up in this same render pass rather than one later.
+	// render() no-ops unless the panel actually has a pane.
+	m.control.render()
+
 	// Check if any pane has new content
 	anyDirty := false
 	for _, p := range m.allPanes {
@@ -3824,6 +3970,9 @@ func (m *Magmux) cleanup() {
 type PaneConfig struct {
 	Cmd  string
 	Args []string
+	// Control makes this a control-panel pane instead of a child process:
+	// magmux paints it itself and Cmd/Args are ignored.
+	Control bool
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -3895,6 +4044,8 @@ func main() {
 			fmt.Println("  -g FILE   Grid file (one command per line, overrides -e)")
 			fmt.Println("  -e CMD    Run CMD in a pane (can be repeated)")
 			fmt.Println("  -w        Auto-exit when all panes are done (dead or idle)")
+			fmt.Println("  -c        Add a control panel pane for a controlled session")
+			fmt.Println("  -x SECS   Close SECS after a pilot finishes (default: wait for a keypress)")
 			fmt.Println("  -v        Show version")
 			fmt.Println("  -h        Show this help")
 			fmt.Println()
@@ -3906,6 +4057,8 @@ func main() {
 			fmt.Println()
 			fmt.Println("Controls:")
 			fmt.Println("  Ctrl-G q      Quit (always)")
+			fmt.Println("  ↑/↓ PgUp/PgDn Scroll the control panel (when focused); wheel works anywhere")
+			fmt.Println("  End / G       Control panel: resume following the newest exchange")
 			fmt.Println("  q / Esc       Quit (when all panes done, grid mode)")
 			fmt.Println("  Ctrl-G Tab    Switch focus to next pane")
 			fmt.Println("  Mouse click   Switch focus to clicked pane")
@@ -3918,6 +4071,18 @@ func main() {
 			fmt.Println("Agent Status Monitoring:")
 			fmt.Println("  Send agent hook events via IPC socket:")
 			fmt.Println("  {\"type\":\"agent\",\"pane\":0,\"event\":\"Stop\",\"project\":\"myapp\"}")
+			fmt.Println()
+			fmt.Println("Controlled Sessions:")
+			fmt.Println("  An external agent (the \"pilot\") reads pane state off the socket and")
+			fmt.Println("  pushes the next instruction back in. Run with -c to watch the traffic.")
+			fmt.Println()
+			fmt.Println("  {\"type\":\"pilot\",\"event\":\"start\",\"pane\":0,\"goal\":\"...\",\"steps\":3}")
+			fmt.Println("  {\"type\":\"send\",\"pane\":0,\"text\":\"run the tests\",\"label\":\"step 1/3\"}")
+			fmt.Println("  {\"type\":\"send\",\"pane\":0,\"keys\":[\"escape\"],\"enter\":false}")
+			fmt.Println("  {\"type\":\"pilot\",\"event\":\"finish\",\"summary\":\"all green\"}")
+			fmt.Println()
+			fmt.Println("  `send` writes to a pane even when it is idle — steering a finished")
+			fmt.Println("  turn is the point — and clears its done state like a real keystroke.")
 			fmt.Println()
 			fmt.Println("  Events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,")
 			fmt.Println("          Stop, Notification, PermissionRequest, PreCompact, PostCompact,")
@@ -3944,6 +4109,8 @@ func main() {
 	var gridFile string
 	var customCmds []PaneConfig
 	autoExit := false
+	withControl := false
+	var autoClose time.Duration
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-g":
@@ -3961,6 +4128,16 @@ func main() {
 			}
 		case "-w":
 			autoExit = true
+		case "-c", "--control":
+			withControl = true
+		case "-x", "--close-after":
+			if i+1 < len(args) {
+				i++
+				var secs int
+				if _, err := fmt.Sscanf(args[i], "%d", &secs); err == nil && secs > 0 {
+					autoClose = time.Duration(secs) * time.Second
+				}
+			}
 		}
 	}
 
@@ -3989,6 +4166,12 @@ func main() {
 	} else if len(customCmds) > 0 {
 		commands = customCmds
 		useGrid = true
+	} else if withControl {
+		// -c with no commands is a bare control panel: useful for watching a
+		// pilot drive nothing yet, and it keeps the flag from silently
+		// falling through to the default 3-shell layout.
+		commands = nil
+		useGrid = true
 	} else {
 		// Default: 3 panes running user's login shell
 		commands = []PaneConfig{
@@ -3998,10 +4181,18 @@ func main() {
 		}
 	}
 
+	// The control panel is the last pane, so session panes keep the indices a
+	// pilot would naturally use (pane 0 is the first -e command).
+	if withControl && useGrid {
+		commands = append(commands, PaneConfig{Control: true})
+	}
+
 	mux := &Magmux{
-		gridMode: useGrid,
-		autoExit: autoExit,
-		sockDone: make(chan struct{}),
+		gridMode:       useGrid,
+		autoExit:       autoExit,
+		autoCloseAfter: autoClose,
+		sockDone:       make(chan struct{}),
+		control:        newControlPanel(),
 		controllerFactories: []ControllerFactory{
 			claudeCodeFactory,
 		},
@@ -4032,12 +4223,33 @@ func main() {
 		}
 	}
 
+	// Bind the panel to whichever pane was built for it, and keep focus on a
+	// real session — typing into the panel does nothing, so starting there
+	// would look broken.
+	for _, p := range mux.allPanes {
+		if p.isControl {
+			mux.control.pane = p
+			mux.control.markDirty()
+			if mux.focused == p {
+				for _, q := range mux.allPanes {
+					if !q.isControl {
+						mux.focused = q
+						break
+					}
+				}
+			}
+		}
+	}
+
 	mux.startReadLoops()
 	mux.attachControllers()
 
 	// In grid mode, start waiters for each child process
 	if useGrid {
 		for _, p := range mux.allPanes {
+			if p.isControl {
+				continue // no child to wait on
+			}
 			go mux.waitForChild(p)
 		}
 	}

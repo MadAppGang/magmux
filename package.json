@@ -1,9 +1,15 @@
 {
   "name": "magmux-ui-tests",
   "private": true,
-  "description": "Visual end-to-end cases that drive a real magmux binary with real Claude Code panes and assert on the IPC socket contract. Not part of `go test` — these cost real Claude Code usage and need auth, so they are run on demand.",
+  "description": "The pi.dev pilot that drives a controlled magmux session, plus the visual end-to-end cases that exercise it against a real magmux binary and real Claude Code panes. Not part of `go test` — these cost real model usage and need auth, so they are run on demand.",
   "scripts": {
     "test:ui:case1": "bun test/ui/case1.ts",
-    "test:ui:case2": "bun test/ui/case2.ts"
+    "test:ui:case2": "bun test/ui/case2.ts",
+    "test:ui:case3": "bun test/ui/case3.ts",
+    "pilot": "bun pilot/pilot.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "typebox": "^1.3.11"
   }
 }

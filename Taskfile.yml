@@ -1,5 +1,9 @@
 version: '3'
 
+# Provider credentials for the pilot. Optional — a missing .env is not an error.
+dotenv:
+  - .env
+
 # magmux — Taskfile
 # Visual smoke tests for the dev build of magmux.
 #
@@ -27,6 +31,28 @@ vars:
   # block the terminal forever. Override with TEAM_TIMEOUT=300 task ...
   TEAM_TIMEOUT: '120'
 
+  # ── Controlled sessions ───────────────────────────────────────────────────
+  # Scratch cwd for pilot demos, so a driven session writes its files there
+  # instead of into the repo.
+  PILOT_DIR: '{{.GRID_DIR}}/pilot'
+  # The pilot writes no code — it only sequences instructions and reads short
+  # results — but it does have to track what is and is not done across turns,
+  # and small models fall down exactly there (haiku-4-5 spent most of a run
+  # re-checking state it had already confirmed, then reported work it never
+  # finished). Mid-tier is the cheapest model that reliably completes a run.
+  PILOT_MODEL: '{{.PILOT_MODEL | default "anthropic/claude-sonnet-5"}}'
+  # Hard ceiling on instructions. Both sides of a controlled session cost real
+  # model time, so a confused pilot must not be able to loop indefinitely.
+  PILOT_MAX_STEPS: '{{.PILOT_MAX_STEPS | default "12"}}'
+  # Seconds to wait after the pilot finishes before closing the window. Empty
+  # (the default) means it stays up until you press q — a finished run that
+  # vanishes before you have read it is worse than one that lingers.
+  #   PILOT_CLOSE_AFTER=20 task pilot:demo
+  PILOT_CLOSE_AFTER: '{{if .PILOT_CLOSE_AFTER}}-x {{.PILOT_CLOSE_AFTER}}{{end}}'
+  # Default task for `task pilot` when no GOAL is given. Deliberately
+  # read-only: the obvious first run should not edit anything.
+  GOAL: '{{.GOAL | default "Summarize what this repository does and how its main components fit together, in under 10 lines. Do not change any files."}}'
+
 tasks:
   default:
     desc: List available tasks
@@ -37,9 +63,12 @@ tasks:
 
   build:
     desc: Build the dev magmux binary
+    # A glob, not a hand-listed set: the previous list named only main.go and
+    # pty_*.go, so edits to controller_claude.go (and later control.go /
+    # pilot.go) did not invalidate the build and `task test:*` would silently
+    # run a stale binary.
     sources:
-      - main.go
-      - pty_*.go
+      - '*.go'
       - go.mod
       - go.sum
     generates:
@@ -131,6 +160,95 @@ tasks:
     deps: [build]
     cmds:
       - '{{.MAGMUX}} -e "claude \"{{.TEST_PROMPT}}\"" -e "claude \"what is 2+2? reply in one word\"" -e "claude \"list files in current directory in one sentence\""'
+
+  # ── Controlled sessions (pi.dev pilot drives a Claude Code pane) ──────────
+  # A pilot reads pane state off the IPC socket and pushes the next
+  # instruction back in, guiding the session through a multi-step task. `-c`
+  # adds the control panel so you can watch the traffic; `-w` exits once the
+  # pilot is done and the session is idle.
+  #
+  # Needs a provider configured for pi (https://pi.dev) as well as Claude Code
+  # auth. Run `task pilot:deps` once first (or let it run as a dep).
+
+  pilot:deps:
+    desc: Install the pilot's node dependencies (pi.dev SDK)
+    sources:
+      - package.json
+    generates:
+      - node_modules/.package-lock.json
+    cmds:
+      - npm install --ignore-scripts
+
+  pilot:check:
+    desc: "Show which models pi can use for the pilot (auth preflight)"
+    deps: [pilot:deps]
+    cmds:
+      - |
+        bun -e '
+          const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
+          const available = await (await ModelRuntime.create()).getAvailable();
+          if (available.length === 0) {
+            const vars = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_GEMINI_API_KEY"];
+            console.error("pi has no usable model: it found no provider credentials.\n");
+            console.error("pi reads keys from the environment, and none are set here:");
+            for (const v of vars) console.error(`  ${v}=${process.env[v] ? "set" : "(unset)"}`);
+            console.error("\nExport one in the environment this task runs in, then re-run.");
+            console.error("See https://pi.dev for the providers pi supports.");
+            process.exit(1);
+          }
+          console.log(`${available.length} model(s) available, e.g.:`);
+          for (const m of available.slice(0, 8)) console.log(`  ${m.provider}/${m.id}`);
+        '
+
+  pilot:
+    desc: 'Pilot a Claude Code session through a task — GOAL="..." task pilot'
+    deps: [build, pilot:deps]
+    cmds:
+      - |
+        {{.MAGMUX}} -c {{.PILOT_CLOSE_AFTER}} \
+          -e 'claude --dangerously-skip-permissions' \
+          -e "bun {{.ROOT_DIR}}/pilot/pilot.ts --pane 0 \
+              --model {{.PILOT_MODEL}} \
+              --max-steps {{.PILOT_MAX_STEPS}} \
+              --goal '{{.GOAL}}'"
+
+  pilot:demo:
+    desc: "Watch a pilot build a file line by line — cheap, deterministic, no repo changes"
+    deps: [build, pilot:deps]
+    cmds:
+      # Wipe rather than clean specific files: the pilot decides what to
+      # create, so we cannot know the filenames in advance.
+      - rm -rf {{.PILOT_DIR}} && mkdir -p {{.PILOT_DIR}}
+      # cd into the scratch dir so the session writes there, not into the repo.
+      - |
+        cd {{.PILOT_DIR}} && {{.MAGMUX}} -c {{.PILOT_CLOSE_AFTER}} \
+          -e 'claude --dangerously-skip-permissions' \
+          -e "bun {{.ROOT_DIR}}/pilot/pilot.ts --pane 0 \
+              --model {{.PILOT_MODEL}} --max-steps 10 \
+              --goal 'Set up a tiny command-line tool in this directory: a script that prints the squares of 1 through N, where N is its first argument; a README.md explaining how to run it; and squares.txt holding the output for N=5, one value per line and nothing else. Make sure it actually runs and the file really holds the right values.'"
+      - |
+        echo
+        echo "on disk (the pilot cannot fake this):"
+        ls {{.PILOT_DIR}} 2>/dev/null | sed 's/^/  /'
+        echo "squares.txt — expect 1 4 9 16 25:"
+        cat {{.PILOT_DIR}}/squares.txt 2>/dev/null | sed 's/^/  /' || echo "  (not created — the run failed)"
+
+  pilot:panel:
+    desc: "Control panel + a plain shell — drive it by hand over the socket to see the panel react"
+    deps: [build]
+    cmds:
+      - |
+        echo "In another terminal, with \$SOCK=/tmp/magmux-<pid>.sock:"
+        echo "  echo '{\"type\":\"pilot\",\"event\":\"start\",\"pane\":0,\"goal\":\"try it\",\"steps\":2}' | nc -U \$SOCK"
+        echo "  echo '{\"type\":\"send\",\"pane\":0,\"text\":\"hello\",\"label\":\"step 1/2\"}'        | nc -U \$SOCK"
+        echo
+      - '{{.MAGMUX}} -c -e "cat"'
+
+  test:pilot:
+    desc: "UI case 3 — full e2e: pilot guides a real session, asserts the artifact on disk"
+    deps: [build, pilot:deps]
+    cmds:
+      - bun test/ui/case3.ts
 
   # ── Team tests (multi-pane via claudish) ──────────────────────────────────
   # Each team target launches claudish in a different mode. claudish itself
