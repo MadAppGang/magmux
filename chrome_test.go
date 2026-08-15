@@ -129,6 +129,18 @@ func statusBarWidth(text string) int {
 	return w
 }
 
+// paneName identifies a pane in a failure message without dumping the struct,
+// which is several hundred cells of Screen.
+func paneName(p *Pane) string {
+	if p == nil {
+		return "nil"
+	}
+	if p.isControl {
+		return fmt.Sprintf("the control panel (pane %d)", p.id)
+	}
+	return fmt.Sprintf("pane %d", p.id)
+}
+
 // ── the panel starts hidden ─────────────────────────────────────────────────
 
 // TestPanelVisibilityAtStartup is the back-compat contract in one test.
@@ -499,6 +511,159 @@ func TestHiddenPanelIsNeverASplitTarget(t *testing.T) {
 }
 
 // ── Ctrl-G s ────────────────────────────────────────────────────────────────
+
+// visiblePanelMux is hintMux with the panel brought on screen: n real sessions
+// plus a panel a human can Tab onto, which is the state the tests below are
+// about. hintMux alone leaves the panel hidden, and hidden is already covered.
+func visiblePanelMux(t *testing.T, cols, n int) (*Magmux, *Pane) {
+	t.Helper()
+	m := hintMux(t, cols, n)
+	m.treeMu.RLock()
+	panel := m.panel
+	m.treeMu.RUnlock()
+	if panel == nil {
+		t.Fatalf("hintMux built no panel")
+	}
+	m.togglePanel()
+	if panel.hidden {
+		t.Fatalf("the panel refused to come on screen at %d columns", cols)
+	}
+	return m, panel
+}
+
+// TestVisiblePanelIsNeverASplitTarget. largestLiveLeafLocked and the
+// targetFocused branch of resolveSplitTargetLocked filtered nil, closed, hidden
+// and non-leaf — but not isControl, unlike firstLiveLeaf, allPanesDone and
+// buildPaneResults. focusNext filters only !p.hidden, so Ctrl-G Tab really does
+// park focus on a VISIBLE panel: with `magmux -c -e claude`, a human Tabs onto
+// the panel to read the ledger, an MCP client calls open_pane with no target,
+// and the agent's pane is halved out of magmux's own chrome and nested inside
+// it. The panel is an instrument, not a place to put a session.
+func TestVisiblePanelIsNeverASplitTarget(t *testing.T) {
+	m, panel := visiblePanelMux(t, 120, 2)
+
+	// The door: focus really can land on a visible panel.
+	m.treeMu.Lock()
+	m.focused = panel
+	m.treeMu.Unlock()
+	for i := 0; i < 6; i++ {
+		if m.focusedPane() == panel {
+			break
+		}
+		m.focusNext()
+	}
+	m.treeMu.Lock()
+	m.focused = panel
+	m.treeMu.Unlock()
+
+	m.treeMu.RLock()
+	byFocus := m.resolveSplitTargetLocked(targetFocused)
+	m.treeMu.RUnlock()
+	if byFocus == panel {
+		t.Errorf("with focus on the panel, an untargeted open_pane would split magmux's own chrome")
+	}
+	if byFocus == nil || byFocus.isControl {
+		t.Errorf("resolveSplitTargetLocked(targetFocused) returned %s; it must fall back to a session", paneName(byFocus))
+	}
+
+	// And the fallback it falls back TO must not nominate it either. The panel
+	// is frequently the biggest thing on screen — it is a full column.
+	m.treeMu.Lock()
+	panel.h, panel.w = 1000, 1000
+	m.treeMu.Unlock()
+
+	m.treeMu.RLock()
+	largest := m.largestLiveLeafLocked()
+	m.treeMu.RUnlock()
+	if largest == panel {
+		t.Errorf("largestLiveLeafLocked nominated the control panel")
+	}
+	if largest == nil || largest.isControl {
+		t.Errorf("largestLiveLeafLocked returned %s, want a session", paneName(largest))
+	}
+}
+
+// TestOpenPaneWithFocusMovesThePanelMarker. focusNext, parseSGRMouse, ClosePane
+// and sockFocus all tell the panel where focus went; OpenPane's `focus:true`
+// set m.focused and told it nothing, so the route table's ▸ stayed on the pane
+// the agent had just navigated away from — the panel disagreeing with magmux
+// about a fact magmux owns.
+func TestOpenPaneWithFocusMovesThePanelMarker(t *testing.T) {
+	m := newTestMux(t, ctrlPanes(2)...)
+	m.control.setFocused(0)
+
+	id, err := m.OpenPane(OpenPaneRequest{
+		PaneConfig: PaneConfig{Control: true},
+		Target:     0,
+		Split:      SplitVertical,
+		Focus:      true,
+	})
+	if err != nil {
+		t.Fatalf("OpenPane: %v", err)
+	}
+	if got := m.focusedPane(); got == nil || got.id != id {
+		t.Fatalf("focus:true did not move magmux's own focus to pane %d", id)
+	}
+
+	m.control.mu.Lock()
+	marked := m.control.focused
+	m.control.mu.Unlock()
+	if marked != id {
+		t.Errorf("the panel still marks pane %d as focused after open_pane focus:true opened pane %d",
+			marked, id)
+	}
+}
+
+// TestOpenPaneReVerifyCatchesAConcurrentHide. The post-fork re-verify checked
+// only that the target was still in the id table, which catches a concurrent
+// close and not a concurrent HIDE — and hidden is the third state, not a
+// synonym for either. If the human presses Ctrl-G p during the fork/exec
+// window, removeLeafLocked detaches the panel and splitLeafLocked would splice
+// the new pane onto a node no longer reachable from m.root: alive, never
+// painted, undismissable.
+func TestOpenPaneReVerifyCatchesAConcurrentHide(t *testing.T) {
+	m, panel := visiblePanelMux(t, 120, 2)
+
+	m.treeMu.RLock()
+	session := m.largestLiveLeafLocked()
+	okBefore := m.splitTargetIntactLocked(session) && m.splitTargetIntactLocked(panel)
+	m.treeMu.RUnlock()
+	if !okBefore {
+		t.Fatalf("setup: a live on-screen leaf did not survive its own re-verify")
+	}
+
+	// What Ctrl-G p does during the window.
+	m.togglePanel()
+	if !panel.hidden {
+		t.Fatalf("setup: the panel did not hide")
+	}
+
+	m.treeMu.RLock()
+	stillOK := m.splitTargetIntactLocked(panel)
+	inTree := m.nodeInTreeLocked(panel)
+	m.treeMu.RUnlock()
+	if inTree {
+		t.Fatalf("setup: the hidden panel is still spliced into the tree")
+	}
+	if stillOK {
+		t.Errorf("the re-verify accepted a target that was hidden while the child was forking; " +
+			"the new pane would be spliced onto a node m.root cannot reach")
+	}
+
+	// A close is still caught, which is the case the check already had.
+	m.treeMu.RLock()
+	victim := m.largestLiveLeafLocked()
+	m.treeMu.RUnlock()
+	if err := m.ClosePane(victim.id, true); err != nil {
+		t.Fatalf("ClosePane: %v", err)
+	}
+	m.treeMu.RLock()
+	closedOK := m.splitTargetIntactLocked(victim)
+	m.treeMu.RUnlock()
+	if closedOK {
+		t.Errorf("the re-verify accepted a closed target")
+	}
+}
 
 // TestStatusBarToggleGivesItsRowToTheLayout. Hiding is not "stop painting the
 // bar" — the row has to go somewhere, and it goes to the panes.
@@ -901,6 +1066,54 @@ func TestStatusBarNeverOverrunsAtAnyWidth(t *testing.T) {
 		m.treeMu.RUnlock()
 		if w := statusBarWidth(menu); w > cols {
 			t.Errorf("at %d columns the chord menu paints %d columns: %q", cols, w, menu)
+		}
+	}
+}
+
+// TestChromeNoteNeverOverrunsTheStatusBar. The refusal notes are the only
+// status-bar text that was never measured: renderLocked checked whether
+// note+"\t"+text fitted, and dropped `text` when it did not — but bare `note`
+// was written out whatever its length, and renderStatusBar pads rather than
+// truncating.
+//
+// The two live notes are both longer than the terminals that produce them, and
+// that is not a coincidence — it is the same condition twice:
+//
+//   - panelTooNarrow is 41 runes and splitFits refuses whenever cols <= 40, so
+//     Ctrl-G p on a 40-column terminal wrote 42 columns into a 40-column row.
+//   - the alternate-screen note is 50 runes and fires on Ctrl-G [ against any
+//     Claude Code, vim or htop pane, at every width.
+//
+// A status row wider than the terminal wraps onto the pane above it and
+// corrupts the session's output — announcing magmux by damaging the thing
+// magmux exists to carry.
+func TestChromeNoteNeverOverrunsTheStatusBar(t *testing.T) {
+	notes := []string{
+		panelTooNarrow,
+		"no scrollback: this pane is on the alternate screen",
+		"nothing has scrolled off this pane yet",
+		"the panel scrolls with k/j/g/G",
+	}
+	for _, cols := range []int{20, 30, 40, 60, 80, 120, 200} {
+		for _, note := range notes {
+			m := hintMux(t, cols, 2)
+			m.treeMu.Lock()
+			m.noteChromeLocked(note)
+			m.markAllDirtyLocked()
+			_, _, _ = m.renderLocked()
+			row := m.noteRowLocked(m.statusText)
+			m.treeMu.Unlock()
+
+			if w := statusBarWidth(row); w > cols {
+				t.Errorf("at %d columns the note %q paints a %d-column status row: %q",
+					cols, note, w, row)
+			}
+			// Truncated is not the same as dropped: the refusal still has to be
+			// said, or a keystroke that did nothing is indistinguishable from a
+			// broken one.
+			if !strings.HasPrefix(row, "R: ") || len(strings.TrimSpace(row)) <= len("R:") {
+				t.Errorf("at %d columns the note %q was swallowed entirely: %q", cols, note, row)
+			}
 		}
 	}
 }

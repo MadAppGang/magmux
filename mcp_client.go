@@ -35,7 +35,30 @@ const (
 	sockReadTimeout      = 5 * time.Second
 	sockLifecycleTimeout = 10 * time.Second
 	sockSendTimeout      = 20 * time.Second
-	sockProbeTimeout     = 1500 * time.Millisecond
+)
+
+// Capability-probe budgets. Vars rather than consts so a test can exercise both
+// verdicts without paying real seconds of silence for the legacy one.
+var (
+	// sockProbeTimeout bounds the probe made during dial. It is short because
+	// attach must stay snappy, and — the whole point of the two budgets —
+	// silence under it is therefore NOT evidence of anything.
+	sockProbeTimeout = 1500 * time.Millisecond
+
+	// sockProbeConfirmTimeout bounds every later probe, the ones whose answer
+	// decides whether a verb is refused. A magmux re-scanning ~/.claude/projects
+	// under treeMu.RLock can miss the short budget without being unhealthy; it
+	// gets a lifecycle-grade wait before it is written off. Only a magmux that
+	// really is silent ever pays it, and then at most once per legacyRecheckAfter
+	// — which is the right way round, because the alternative for a legacy
+	// magmux is a `send` that lands and is then reported as a 20s failure.
+	sockProbeConfirmTimeout = sockLifecycleTimeout
+
+	// legacyRecheckAfter is how long a "silent" verdict stands before another
+	// probe is spent on it. The verdict is a guess made from an absence, so it
+	// expires; a magmux that was wedged for a minute must not be refused for the
+	// rest of the server's life.
+	legacyRecheckAfter = 30 * time.Second
 )
 
 // Default two-phase waits, matching pilot/magmux.ts.
@@ -99,6 +122,21 @@ func sockErrCode(err error) string {
 		return re.Code
 	}
 	return ""
+}
+
+// sockTimeoutError is "our own timer fired and magmux said nothing". It is a
+// type rather than a formatted string because it is the ONE failure that says
+// anything about capabilities: a cancelled context, a disconnect or a write
+// error are failures of ours, and treating them as silence from magmux is how
+// a healthy session gets written off. Its text is unchanged from the plain
+// fmt.Errorf it replaces.
+type sockTimeoutError struct {
+	Verb    string
+	Timeout time.Duration
+}
+
+func (e *sockTimeoutError) Error() string {
+	return fmt.Sprintf("magmux did not answer %q within %s", e.Verb, e.Timeout)
 }
 
 // ── pane state ──────────────────────────────────────────────────────────────
@@ -436,7 +474,13 @@ type Session struct {
 	ID, SockPath string
 	PID          int
 	Owned        bool // reserved: we never spawn magmux ourselves
-	legacy       bool // no reply plumbing on the other end
+
+	// capState is the capability verdict: capsUnknown, capsProven or
+	// capsSilent. Atomic because it is written from the reader goroutine (a
+	// reply arriving is proof) as well as from probing tool calls.
+	capState atomic.Int32
+	probeMu  sync.Mutex
+	probedAt time.Time // guarded by probeMu
 
 	conn    net.Conn
 	writeMu sync.Mutex
@@ -448,7 +492,7 @@ type Session struct {
 	once    sync.Once
 
 	// caps is the `capabilities` reply, kept for list_sessions and for
-	// explaining refusals.
+	// explaining refusals. Guarded by probeMu.
 	caps map[string]any
 
 	// turnMu guards inFlight: two concurrent send_and_wait on one pane is
@@ -562,6 +606,11 @@ func (s *Session) routeReply(line []byte) {
 	if key == "" {
 		return
 	}
+	// Before the routing, and deliberately before the pending lookup: a reply
+	// this session can no longer deliver — one that arrived just past its
+	// waiter's deadline — is still proof that the reply plumbing exists, and
+	// that is exactly the case a probe timeout gets wrong.
+	s.proveReplies()
 	s.pendMu.Lock()
 	ch, ok := s.pending[key]
 	s.pendMu.Unlock()
@@ -588,27 +637,126 @@ func replyKey(raw json.RawMessage) string {
 	return s
 }
 
-// probeCapabilities decides whether this magmux has the reply plumbing.
+// The capability verdict. Negotiation by timeout is ugly, but a protocol with
+// no error replies leaves no alternative: a legacy magmux has no `default:`
+// case, so an unknown verb — and a known verb carrying an `id` — is answered
+// with silence.
 //
-// Negotiation by timeout is ugly, but a protocol with no error replies leaves
-// no alternative: a legacy magmux has no `default:` case, so an unknown verb —
-// and a known verb carrying an `id` — is answered with silence.
+// The trap that follows from that, and the reason this is a three-state machine
+// rather than a bool, is that silence has two causes and only one of them is
+// old software. A current magmux that is merely BUSY — `pollControllers`
+// re-scanning every directory under ~/.claude/projects, which this PR's own
+// comment notes is how a healthy magmux misses a 10s lifecycle timeout — is
+// silent for exactly as long as it is busy. So:
+//
+//   - capsProven is the only terminal state, and it is reached only by POSITIVE
+//     evidence: a `reply` arrived. Any reply proves the plumbing exists, so
+//     routeReply records it, including a reply to a request whose waiter has
+//     already given up and including an `ok:false` one.
+//   - capsSilent is a guess made from an absence. It needs two silences — the
+//     short dial probe and a lifecycle-grade one — and it EXPIRES after
+//     legacyRecheckAfter, so it can never be the permanent write-off it was.
+//   - Only a probe timeout is evidence. A cancelled context or a closed socket
+//     leaves the verdict exactly where it was.
+const (
+	capsUnknown int32 = iota
+	capsProven
+	capsSilent
+)
+
+// proveReplies records the one piece of positive evidence there is. Monotone:
+// nothing ever demotes capsProven, because a reply having existed is not a
+// fact that can stop being true.
+func (s *Session) proveReplies() { s.capState.Store(capsProven) }
+
+// probeCapabilities makes the cheap dial-time probe. Its silence deliberately
+// decides nothing — see capsVerdict.
 func (s *Session) probeCapabilities(ctx context.Context) {
-	res, err := s.request(ctx, map[string]any{"type": "capabilities"}, sockProbeTimeout)
-	if err != nil {
-		s.legacy = true
-		return
-	}
-	s.caps = res
+	s.capsVerdict(ctx)
 }
 
-func (s *Session) isLegacy() bool { return s.legacy }
+// isLegacy reports whether this magmux lacks the reply plumbing. It may block
+// for one probe when the verdict is not yet settled, which is why it takes a
+// context: every refusal in the server is made from this answer, so it must be
+// the considered one rather than a stale guess.
+func (s *Session) isLegacy(ctx context.Context) bool {
+	return s.capsVerdict(ctx) == capsSilent
+}
 
-// request sends a message with an id and waits for its single reply.
+// capsNote is the verdict as a word, WITHOUT probing for it — for logging, and
+// for nothing else. A decision made from this rather than from isLegacy is a
+// decision made from a guess that may not have been checked yet.
+func (s *Session) capsNote() string {
+	switch s.capState.Load() {
+	case capsProven:
+		return "replies"
+	case capsSilent:
+		return "silent (treated as legacy)"
+	}
+	return "unproven"
+}
+
+// capsVerdict returns the current verdict, probing when that is what it takes.
+func (s *Session) capsVerdict(ctx context.Context) int32 {
+	if v := s.capState.Load(); v == capsProven {
+		return v
+	}
+	// One probe at a time: N concurrent tool calls against a silent magmux must
+	// not each spend a lifecycle timeout discovering the same thing.
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	v := s.capState.Load()
+	if v == capsProven {
+		return v
+	}
+
+	timeout := sockProbeConfirmTimeout
+	first := s.probedAt.IsZero()
+	if first {
+		timeout = sockProbeTimeout
+	} else if v == capsSilent && time.Since(s.probedAt) < legacyRecheckAfter {
+		return capsSilent // a fresh verdict; do not spend another timeout on it
+	}
+	s.probedAt = time.Now()
+
+	res, err := s.requestRaw(ctx, map[string]any{"type": "capabilities"}, timeout)
+	if err == nil {
+		s.caps = res
+		s.proveReplies()
+		return capsProven
+	}
+	// An error REPLY is still a reply: a magmux that answers `capabilities` with
+	// unknown_verb has the plumbing and merely lacks the verb.
+	var re *sockRequestError
+	if errors.As(err, &re) {
+		s.proveReplies()
+		return capsProven
+	}
+	var to *sockTimeoutError
+	if !errors.As(err, &to) || first {
+		// Not evidence: a cancelled context, a disconnect, or silence under the
+		// dial budget that was never meant to settle anything. Leave the verdict
+		// alone — a late reply may have proven the session in the meantime.
+		return s.capState.Load()
+	}
+	// CAS rather than Store: a reply landing just past the deadline proves the
+	// session, and proof must never be clobbered by the silence that raced it.
+	s.capState.CompareAndSwap(capsUnknown, capsSilent)
+	return s.capState.Load()
+}
+
+// request sends a message with an id and waits for its single reply, refusing
+// up front against a magmux that cannot answer.
 func (s *Session) request(ctx context.Context, msg map[string]any, timeout time.Duration) (map[string]any, error) {
-	if s.legacy {
+	if s.isLegacy(ctx) {
 		return nil, errLegacyMagmux
 	}
+	return s.requestRaw(ctx, msg, timeout)
+}
+
+// requestRaw is request without the capability gate, so that the probe which
+// establishes the verdict is not gated on the verdict.
+func (s *Session) requestRaw(ctx context.Context, msg map[string]any, timeout time.Duration) (map[string]any, error) {
 	id := strconv.FormatUint(s.nextID.Add(1), 10)
 	msg["id"] = id
 	ch := make(chan mcpReply, 1)
@@ -641,7 +789,7 @@ func (s *Session) request(ctx context.Context, msg map[string]any, timeout time.
 	case <-s.closed:
 		return nil, fmt.Errorf("magmux session %s disconnected", s.ID)
 	case <-timer.C:
-		return nil, fmt.Errorf("magmux did not answer %q within %s", verb, timeout)
+		return nil, &sockTimeoutError{Verb: verb, Timeout: timeout}
 	}
 }
 
@@ -710,7 +858,7 @@ func (s *Session) endTurn(pane int) {
 // the broadcasts have already given us when the verb is unavailable. The
 // fallback is what keeps list_panes working against a legacy magmux.
 func (s *Session) listPanes(ctx context.Context) ([]paneInfo, error) {
-	if s.legacy {
+	if s.isLegacy(ctx) {
 		return s.state.all(), nil
 	}
 	res, err := s.request(ctx, map[string]any{"type": "list"}, sockReadTimeout)
@@ -823,7 +971,7 @@ func (s *Session) sendKeys(ctx context.Context, pane int, text string, keys []st
 	if label != "" {
 		msg["label"] = label
 	}
-	if s.legacy {
+	if s.isLegacy(ctx) {
 		// No reply to wait for; the broadcasts are the only feedback there is.
 		return s.fire(msg)
 	}

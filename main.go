@@ -78,6 +78,39 @@ func approxStatusWidth(s string) int {
 	return w
 }
 
+// fitNote cuts a plain-text status-bar segment to w painted columns, marking
+// the cut with an ellipsis. Returns "" when there is no room at all.
+//
+// Deliberately NOT control.go's truncANSI, which is the panel's: that one wraps
+// its ellipsis in SGR and closes with the panel's own ground state, and the bar
+// has a different one (barBase), so the panel's colour would leak into every
+// segment after it. approxStatusWidth counts runes, so the escape bytes would
+// be counted as columns on top of that.
+func fitNote(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	width := 0
+	for _, r := range s {
+		width += runeWidth(r)
+	}
+	if width <= w {
+		return s
+	}
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		cw := runeWidth(r)
+		if n+cw > w-1 { // leave the last column for the ellipsis
+			break
+		}
+		b.WriteRune(r)
+		n += cw
+	}
+	b.WriteRune('…')
+	return b.String()
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const (
@@ -739,8 +772,11 @@ func colorQueryCode(osc string) (string, bool) {
 // plausible answer that matches magmux's own chrome is a small inaccuracy; no
 // answer is a blank screen.
 //
-// The reply goes out through writePTY on the parser's own goroutine, exactly as
-// the DA and DSR replies below do, and under the same lock they hold.
+// The reply goes out through replyLocked on the parser's own goroutine, exactly
+// as the DA and DSR replies below do, and under the same p.mu they hold. NOT
+// through writePTY: that is the human-input path, which refuses a settled pane
+// in grid mode and clears its completion state — see replyLocked for what each
+// of those cost.
 func (vt *VTParser) answerColorQuery(code string) {
 	c, ok := terminalColor(code)
 	if !ok {
@@ -757,7 +793,7 @@ func (vt *VTParser) answerColorQuery(code string) {
 	if dbgFile != nil {
 		fmt.Fprintf(dbgFile, "[OSC] colour query %s → %q\n", code, resp)
 	}
-	vt.node.writePTY([]byte(resp))
+	vt.node.replyLocked([]byte(resp))
 }
 
 // handleOSC processes completed OSC sequences.
@@ -1044,7 +1080,7 @@ func (vt *VTParser) doCSI(w rune) {
 	if vt.inter == '>' {
 		switch w {
 		case 'c': // DA2
-			vt.node.writePTY([]byte("\x1b[>1;10;0c"))
+			vt.node.replyLocked([]byte("\x1b[>1;10;0c"))
 		case 'm', 'n': // MODSET/MODOFF — xterm key modification modes, ignore
 		case 'u': // Push keyboard enhancement (Kitty protocol), ignore
 		case 'q': // xterm query, ignore
@@ -1180,8 +1216,16 @@ func (vt *VTParser) doCSI(w rune) {
 		//
 		// p0 keeps the absent/zero distinction intact, and 0 is also the explicit
 		// "use the default" value DEC assigns, so both spellings land here.
+		//
+		// The bottom parameter MUST be read with p0 and the guard below must stay
+		// reachable. This comment once described that fix while the line under it
+		// still said p1, so `bot` could never be 0, `top >= bot` fired instead,
+		// and a bare `CSI r` was IGNORED — leaving whatever region was already in
+		// force. TestDECSTBMDefaultsToTheWholePage now starts every case from a
+		// non-default region so it can tell "reset" from "ignored"; the version
+		// that started at the default could not, which is how this shipped.
 		top := vt.p1(0)
-		bot := vt.p1(1)
+		bot := vt.p0(1)
 		if bot == 0 || bot > s.rows {
 			bot = s.rows
 		}
@@ -1230,9 +1274,9 @@ func (vt *VTParser) doCSI(w rune) {
 				fmt.Fprintf(dbgFile, "DSR: curY=%d curX=%d altMode=%v rows=%d cols=%d\n",
 					cur.curY, cur.curX, vt.node.altMode, cur.rows, cur.cols)
 			}
-			vt.node.writePTY([]byte(resp))
+			vt.node.replyLocked([]byte(resp))
 		} else if vt.p0(0) == 5 { // Device status - report OK
-			vt.node.writePTY([]byte("\x1b[0n"))
+			vt.node.replyLocked([]byte("\x1b[0n"))
 		}
 	case 'Z': // CBT - cursor backward tabulation
 		n := vt.p1(0)
@@ -1249,7 +1293,7 @@ func (vt *VTParser) doCSI(w rune) {
 			vt.doPrint(vt.node.lastChar)
 		}
 	case 'c': // DA - primary device attributes
-		vt.node.writePTY([]byte("\x1b[?1;2c"))
+		vt.node.replyLocked([]byte("\x1b[?1;2c"))
 	case 'g': // TBC - tab clear
 		// Ignore for now (would need tab stop tracking)
 	case 'h': // SM - set mode
@@ -1264,10 +1308,10 @@ func (vt *VTParser) doCSI(w rune) {
 		switch vt.p0(0) {
 		case 18: // Report terminal size in characters
 			resp := fmt.Sprintf("\x1b[8;%d;%dt", vt.node.h, vt.node.w)
-			vt.node.writePTY([]byte(resp))
+			vt.node.replyLocked([]byte(resp))
 		case 14: // Report window size in pixels (fake it)
 			resp := fmt.Sprintf("\x1b[4;%d;%dt", vt.node.h*16, vt.node.w*8)
-			vt.node.writePTY([]byte(resp))
+			vt.node.replyLocked([]byte(resp))
 		}
 	}
 }
@@ -1770,12 +1814,30 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh %dm", h, m)
 }
 
+// writePTY forwards HUMAN input to the pane's child.
+//
+// Every field it touches belongs to p.mu — the render goroutine reads
+// inputReady, tint, overlayText, overlayStyle and hadTextOutput under that lock
+// in leafTint, allPanesDoneLocked, the grid counter and renderLocked — and this
+// runs on the INPUT goroutine, once per keystroke (typeToFocused) and once per
+// forwarded mouse event (parseSGRMouse). It used to test and assign all of them
+// with no lock at all. injectPTY is the correct twin and this now matches it,
+// down to releasing p.mu before the write: a child that has stopped reading can
+// block a PTY write for as long as it likes, and treeMu -> p.mu means a stalled
+// keystroke would stall the next frame behind it.
+//
+// Caller must NOT hold p.mu.
 func (p *Pane) writePTY(data []byte) {
+	p.mu.Lock()
 	if p.ptmx == nil {
+		p.mu.Unlock()
 		return
 	}
-	// In grid mode, don't forward input to dead or completed panes
+	// In grid mode, don't forward input to dead or completed panes: this is what
+	// lets `q` dismiss a finished grid. It is also why magmux's own replies to a
+	// child's queries must NOT come through here — see replyLocked.
 	if p.gridMode && (p.dead || p.inputReady) {
+		p.mu.Unlock()
 		return
 	}
 	// User input resets idle state — pane is no longer "done"
@@ -1785,9 +1847,41 @@ func (p *Pane) writePTY(data []byte) {
 		p.overlayText = ""
 		p.overlayStyle = ""
 		p.hadTextOutput = false // require new output before re-detecting idle
+		p.dirty = true          // the completion chrome just went; repaint it away
 		if dbgFile != nil {
 			fmt.Fprintf(dbgFile, "[input] user keystroke → inputReady reset\n")
 		}
+	}
+	ptmx := p.ptmx
+	p.mu.Unlock()
+
+	ptmx.Write(data)
+}
+
+// replyLocked writes magmux's own answer to a child's query straight to the PTY.
+//
+// This is magmux being the TERMINAL, not a human being at a keyboard, and the
+// two must not share a path. Routing replies through writePTY broke both halves
+// of that:
+//
+//  1. writePTY refuses a pane that is dead or awaiting input in grid mode. But
+//     awaiting-input is exactly where a long-lived TUI sits, and Claude Code
+//     re-queries OSC 11 on every SIGWINCH — which magmux sends to every pane
+//     each time `Ctrl-G p` reshapes the layout. The question went into a void
+//     and the child blocked: the blank-pane hang answerColorQuery exists to
+//     prevent, reached by a second route. DA and DSR block a TUI just as hard.
+//  2. writePTY clears inputReady, the tint, the overlay and hadTextOutput under
+//     "user input resets idle state". A reply is not input, so a settled pane
+//     silently read as working again and lost its ✓ DONE chrome.
+//
+// Caller HOLDS p.mu. Every caller is the VT parser, which runs inside
+// readLoop's p.mu, so this cannot take the lock and cannot hand it back — the
+// write goes out under it, exactly as it always has. That is safe for what it
+// carries: a reply is a few dozen bytes and the child is by definition blocked
+// reading them.
+func (p *Pane) replyLocked(data []byte) {
+	if p.ptmx == nil {
+		return
 	}
 	p.ptmx.Write(data)
 }
@@ -2446,6 +2540,18 @@ func (r *Renderer) renderSelection(p *Pane) {
 	}
 	r.buf.WriteString("m")
 
+	// Both ends of both axes, and the lower ends are not theoretical: a click on
+	// a split border leaves the anchor one cell outside the focused pane, and an
+	// unbounded subscript here is a panic that kills the whole multiplexer. The
+	// clamp in the click branch of parseSGRMouse is the first line of defence;
+	// this is the second, because sel is package-level state that several paths
+	// write and only one of them reads it back.
+	if sy < 0 {
+		sy = 0
+	}
+	if sx < 0 {
+		sx = 0
+	}
 	for row := sy; row <= ey && row < p.h; row++ {
 		cs := 0
 		ce := p.w - 1
@@ -2461,11 +2567,11 @@ func (r *Renderer) renderSelection(p *Pane) {
 		// company whenever geometry has changed and the screen has not been
 		// resized yet. The old cells grid was rows+1000 tall so an overrun landed
 		// in the dead tail; now it would be out of range.
-		if row >= len(p.screen.cells) {
+		if row < 0 || row >= len(p.screen.cells) {
 			p.mu.Unlock()
 			continue
 		}
-		for c := cs; c <= ce && c < p.screen.cols; c++ {
+		for c := cs; c >= 0 && c <= ce && c < p.screen.cols; c++ {
 			ch := p.screen.cells[row][c].Ch
 			if ch == 0 || ch == ' ' {
 				r.buf.WriteByte(' ')
@@ -3210,6 +3316,36 @@ func (m *Magmux) consumeScrollKey(buf []byte) int {
 		end++
 	}
 	return 0
+}
+
+// noteRowLocked puts a live refusal note in front of the status row's own text.
+//
+// The note rides in FRONT of the run's summary rather than being written into
+// it: it belongs to the keystroke that caused it. If the two together would
+// overrun, the keystroke wins — the run's summary is back on the next frame,
+// the refusal is not.
+//
+// Caller holds at least treeMu.RLock. Split out of renderLocked so the width
+// can be measured by a test; renderStatusBar pads its segments and never
+// truncates them, so nothing downstream will catch an overrun.
+func (m *Magmux) noteRowLocked(text string) string {
+	n := m.chromeNoteLocked()
+	if n == "" {
+		return text
+	}
+	// The note itself was the one thing on this row nobody measured, and the two
+	// that exist are both longer than the terminals that produce them:
+	// panelTooNarrow is 41 runes and splitFits refuses at exactly the widths it
+	// cannot fit, and the alternate-screen note is 50 and fires on Ctrl-G [
+	// against any Claude Code or vim pane. renderStatusBar pads its segments and
+	// never truncates them, so an unbounded note wraps onto the pane above and
+	// corrupts the session's output. The budget is m.cols minus the bar's own
+	// leading pad, which is the only column renderStatusBar spends before this.
+	note := "R: " + fitNote(n, m.cols-1)
+	if text != "" && approxStatusWidth(note+"\t"+text) <= m.cols {
+		note += "\t" + text
+	}
+	return note
 }
 
 // chromeNoteLocked returns the live refusal message, or "" once it has expired.
@@ -4503,10 +4639,17 @@ func (m *Magmux) parseSGRMouse(buf []byte) (int, bool) {
 			case press && btn == 0: // Left click → start selection
 				m.selClear()
 				if f := m.focused; f != nil {
+					// Clamp, exactly as the drag and release branches below do.
+					// findPaneAtLocked returns nil on a split border, so a click
+					// there does NOT move focus — it stays on the pane it was
+					// already on, one cell away. A border above or to the left of
+					// that pane then yields -1 here, and renderSelection indexes
+					// p.screen.cells with it on the very next frame: magmux
+					// panics and takes every session inside it down.
 					sel.pane = f
 					sel.active = true
-					sel.sy = row0 - f.y
-					sel.sx = col0 - f.x
+					sel.sy = clamp(row0-f.y, 0, maxInt(0, f.h-1))
+					sel.sx = clamp(col0-f.x, 0, maxInt(0, f.w-1))
 					sel.ey = sel.sy
 					sel.ex = sel.sx
 				}
@@ -5710,10 +5853,7 @@ func (m *Magmux) OpenPane(req OpenPaneRequest) (int, error) {
 		m.unwindPane(np)
 		return -1, errClosing
 	}
-	// Re-verify: a concurrent close_pane may have detached t while we were
-	// forking. Splicing onto a detached node would attach the new pane to a
-	// subtree that is no longer reachable from m.root — invisible, undismissable.
-	if m.paneByIDLocked(t.id) != t {
+	if !m.splitTargetIntactLocked(t) {
 		m.treeMu.Unlock()
 		m.unwindPane(np)
 		return -1, errTargetGone
@@ -5731,6 +5871,16 @@ func (m *Magmux) OpenPane(req OpenPaneRequest) (int, error) {
 	}
 	id := np.id
 	m.treeMu.Unlock()
+
+	// The panel's route table marks the focused pane with a ▸, and it is told
+	// by whoever moved the focus: focusNext, parseSGRMouse, ClosePane and
+	// sockFocus all do. This did not, so `focus:true` left the marker on the
+	// pane the agent had just navigated away from — the instrument disagreeing
+	// with magmux about a fact magmux owns. Outside the lock, like ClosePane's,
+	// because cp.mu is a second lock and there is nothing here that needs both.
+	if req.Focus {
+		m.control.setFocused(id)
+	}
 
 	// 6. Start the pane's goroutines now that it is reachable. The waiter is
 	// NOT conditional on grid mode: it is the only caller of cmd.Wait, so
@@ -5852,6 +6002,21 @@ func (m *Magmux) ClosePane(id int, force bool) error {
 	return nil
 }
 
+// splitTargetIntactLocked re-verifies, after the fork, that the target OpenPane
+// resolved before it is still a node a new pane can be spliced onto.
+//
+// Everything the fork/exec window can do to it: a concurrent close_pane
+// tombstones the id slot, and Ctrl-G p HIDES the panel — removeLeafLocked
+// detaches it from the tree while leaving it very much alive and in the id
+// table. Splicing onto either attaches the new pane to a subtree m.root cannot
+// reach: alive, never painted, undismissable. Hidden is the third state, not a
+// synonym for closed, and the id check alone only ever caught the second.
+//
+// Caller holds at least treeMu.RLock.
+func (m *Magmux) splitTargetIntactLocked(t *Pane) bool {
+	return t != nil && m.paneByIDLocked(t.id) == t && !t.hidden
+}
+
 // resolveSplitTargetLocked turns a Target into a live LEAF pane, or nil.
 // Caller holds at least treeMu.RLock.
 func (m *Magmux) resolveSplitTargetLocked(target int) *Pane {
@@ -5865,7 +6030,14 @@ func (m *Magmux) resolveSplitTargetLocked(target int) *Pane {
 		return p
 	}
 	if target == targetFocused {
-		if p := m.focused; p != nil && !p.closed && !p.hidden && p.splitType == SplitNone {
+		// isControl is filtered here for the same reason firstLiveLeaf,
+		// allPanesDone and buildPaneResults filter it: the panel is magmux's own
+		// chrome, not a place to put a session. focusNext filters only
+		// !p.hidden, so `Ctrl-G Tab` really does park focus on a VISIBLE panel —
+		// with `magmux -c -e claude` a human Tabs onto it to read the ledger, an
+		// MCP client calls open_pane with no target, and the agent's pane gets
+		// halved out of the control panel's column and nested inside it.
+		if p := m.focused; p != nil && !p.closed && !p.hidden && !p.isControl && p.splitType == SplitNone {
 			return p
 		}
 		// Focus can be nil after the last pane closed, or on a pane that was
@@ -5875,21 +6047,41 @@ func (m *Magmux) resolveSplitTargetLocked(target int) *Pane {
 }
 
 // largestLiveLeafLocked returns the live leaf with the most cells, which is the
-// one a split hurts least. Caller holds at least treeMu.RLock.
+// one a split hurts least — preferring a real SESSION over the control panel,
+// exactly as firstLiveLeaf does and for the same reason.
+//
+// The panel is magmux's own chrome, and it is frequently the biggest thing on
+// screen because it is a full column: with `magmux -c -e claude` an untargeted
+// open_pane would halve it and nest the agent's session inside the instrument
+// that is supposed to be watching it. The panel is only ever nominated when
+// there is no session leaf left at all, which in a running magmux means the
+// last session just closed and the layout is on its way out.
+//
+// Caller holds at least treeMu.RLock.
 func (m *Magmux) largestLiveLeafLocked() *Pane {
-	var best *Pane
-	bestArea := -1
+	var best, fallback *Pane
+	bestArea, fallbackArea := -1, -1
 	for _, p := range m.allPanes {
 		// Hidden panes carry stale geometry — the size they had when they left
 		// the tree — so an unqualified h*w would happily nominate one.
 		if p == nil || p.closed || p.hidden || p.splitType != SplitNone {
 			continue
 		}
-		if a := p.h * p.w; a > bestArea {
+		a := p.h * p.w
+		if p.isControl {
+			if a > fallbackArea {
+				fallback, fallbackArea = p, a
+			}
+			continue
+		}
+		if a > bestArea {
 			best, bestArea = p, a
 		}
 	}
-	return best
+	if best != nil {
+		return best
+	}
+	return fallback
 }
 
 // firstLiveLeaf returns the first live leaf under node, preferring a real
@@ -6856,17 +7048,7 @@ func (m *Magmux) renderLocked() (events []any, out string, quit bool) {
 				text = menu
 			}
 		}
-		// The refusal note rides in front of the run's own text rather than
-		// being written into it: it belongs to the keystroke that caused it.
-		// If the two together would overrun, the keystroke wins — the run's
-		// summary is back on the next frame, the refusal is not.
-		if n := m.chromeNoteLocked(); n != "" {
-			note := "R: " + n
-			if text != "" && approxStatusWidth(note+"\t"+text) <= m.cols {
-				note += "\t" + text
-			}
-			text = note
-		}
+		text = m.noteRowLocked(text)
 		r.renderStatusBar(m.rows-1, m.cols, text)
 	}
 

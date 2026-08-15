@@ -39,7 +39,13 @@ const (
 	sockCodeNoSuchPane    = "no_such_pane"
 	sockCodePaneIsControl = "pane_is_control"
 	sockCodePaneDead      = "pane_dead"
-	sockCodeUnknownVerb   = "unknown_verb"
+	// sockCodePaneHidden means the pane is alive and holds its id but is not in
+	// the layout, so nothing paints it. Distinct from no_such_pane because the
+	// pane is real and its history is intact, and distinct from pane_is_control
+	// because it is about VISIBILITY: the panel is a perfectly good focus target
+	// while it is on screen, and every other pane could in principle be hidden.
+	sockCodePaneHidden  = "pane_hidden"
+	sockCodeUnknownVerb = "unknown_verb"
 	// sockCodeNotReady means the socket is up but the layout is not: magmux
 	// binds before the first child forks and can therefore be reached before
 	// buildGrid has run. Distinct from no_such_pane on purpose — "pane 0 does
@@ -244,6 +250,27 @@ func (m *Magmux) paneForMsg(idx int) (*Pane, error) {
 	return p, nil
 }
 
+// refuseRequest files a controller request magmux turned down before it could
+// resolve a pane.
+//
+// It is recorded at RUN level (pane -1) on purpose, and that is the whole of
+// the ordering rule this exists to enforce: recordRequest opens a route for any
+// pane >= 0, so filing a request against an index that resolves to nothing
+// manufactures a permanent route to a pane that does not exist. A route means
+// "a pane this controller has touched", and a request magmux refused touched
+// none. The damage is not cosmetic — 32 phantoms exhaust ctrlMaxRoutes so real
+// panes stop getting table rows, and ONE is enough for targetPane to see two
+// routes where there is one, after which every pane-less `send` from a pilot
+// that had exactly one session is refused for the rest of the run.
+//
+// The request is still recorded, with its refusal as the ack: a controller that
+// got a pane id wrong should find that out from the panel rather than from the
+// damage, which is the same argument targetPane's own refusal note makes.
+func (m *Magmux) refuseRequest(verb, text string, err error) {
+	seq := m.control.recordRequest(-1, verb, text)
+	m.control.recordAck(seq, false, verbErrCode(err), err.Error())
+}
+
 // sockCapabilities describes this magmux to a client that has to decide what it
 // may ask for. It doubles as the version probe: a magmux predating replies
 // answers nothing at all, because an unknown verb without an id is silent.
@@ -302,14 +329,16 @@ func (m *Magmux) sockList() (map[string]any, error) {
 // way to tell that two successive reads returned the same screen.
 func (m *Magmux) sockCapture(msg sockMsg) (map[string]any, error) {
 	idx := m.parsePaneIndex(msg.Pane)
+	// Resolve BEFORE the panel hears about it: recording an unvalidated index
+	// opens a route to a pane that does not exist. See refuseRequest.
+	p, err := m.paneForMsg(idx)
+	if err != nil {
+		m.refuseRequest("capture", "read the screen", err)
+		return nil, err
+	}
 	// Reading a pane is the controller touching it, so it opens a route: a
 	// pane the agent looks at is a pane the panel should be able to compare.
 	seq := m.control.recordRequest(idx, "capture", "read the screen")
-	p, err := m.paneForMsg(idx)
-	if err != nil {
-		m.control.recordAck(seq, false, verbErrCode(err), err.Error())
-		return nil, err
-	}
 	// The control pane is capturable on purpose: it has a screen like any
 	// other, and reading the panel is observation, which is all this verb does.
 	shot := p.captureAt(msg.Offset, msg.Lines, true)
@@ -355,15 +384,18 @@ func (m *Magmux) sockCapture(msg sockMsg) (map[string]any, error) {
 // claim about MAGMUX, and the two lead a driver to opposite next steps.
 func (m *Magmux) sockTranscript(msg sockMsg) (map[string]any, error) {
 	idx := m.parsePaneIndex(msg.Pane)
-	seq := m.control.recordRequest(idx, "transcript", "read the session's own record")
+	const what = "read the session's own record"
+	// Resolve BEFORE the panel hears about it, for the reason refuseRequest
+	// states: an unvalidated index would open a route to a pane that is not there.
+	p, err := m.paneForMsg(idx)
+	if err != nil {
+		m.refuseRequest("transcript", what, err)
+		return nil, err
+	}
+	seq := m.control.recordRequest(idx, "transcript", what)
 	fail := func(err error) (map[string]any, error) {
 		m.control.recordAck(seq, false, verbErrCode(err), err.Error())
 		return nil, err
-	}
-
-	p, err := m.paneForMsg(idx)
-	if err != nil {
-		return fail(err)
 	}
 	// p.controller is written by attachController while the pane is still
 	// private — before it is reachable from any other goroutine — and never
@@ -552,6 +584,14 @@ func (m *Magmux) sockClosePane(msg sockMsg) (map[string]any, error) {
 	case idx < 0:
 		return nil, sockErrf(sockCodeBadRequest, "close_pane needs a pane index")
 	}
+	text := fmt.Sprintf("pane %d", idx)
+	// Resolve BEFORE the panel hears about it (see refuseRequest); the error was
+	// previously discarded here and the phantom route filed anyway.
+	p, err := m.paneForMsg(idx)
+	if err != nil {
+		m.refuseRequest("close_pane", text, err)
+		return nil, err
+	}
 	// The panel is an instrument, not a session, and it is refused here rather
 	// than only in the MCP layer: the deeper rule is that a controller may not
 	// close the thing that reports on it. "Who closed pane 2" must not be a
@@ -559,11 +599,16 @@ func (m *Magmux) sockClosePane(msg sockMsg) (map[string]any, error) {
 	// keeps the panel read-only from the keyboard (see consumeControlKey). The
 	// internal ClosePane stays capable, because a Control pane opened through
 	// OpenPane still has to be closable.
-	if p, err := m.paneForMsg(idx); err == nil && p.isControl {
-		return nil, sockErrf(sockCodePaneIsControl,
+	//
+	// The refusal is filed at run level for that same reason: routing it to the
+	// panel's own index would have the panel report on itself.
+	if p.isControl {
+		err := sockErrf(sockCodePaneIsControl,
 			"pane %d is the control panel; it is magmux's own display and cannot be closed", idx)
+		m.refuseRequest("close_pane", text, err)
+		return nil, err
 	}
-	seq := m.control.recordRequest(idx, "close_pane", fmt.Sprintf("pane %d", idx))
+	seq := m.control.recordRequest(idx, "close_pane", text)
 	if err := m.ClosePane(idx, msg.Force); err != nil {
 		m.control.recordAck(seq, false, verbErrCode(err), err.Error())
 		return nil, err
@@ -586,6 +631,18 @@ func firstField(s string) string {
 // sockFocus moves keyboard focus. Included because open_pane's focus flag is
 // one-shot: without this, a client that opened a pane unfocused can never
 // change its mind.
+//
+// It refuses a HIDDEN pane, and refuses nothing else. The distinction is
+// deliberate: the control panel is a legitimate focus target while it is on
+// screen — inputLoop routes keys to consumeControlKey, which scrolls it, and
+// Ctrl-G o already cycles onto it — so refusing isControl outright would take
+// away something that works. What does not work is focus on a pane that is not
+// in the tree: it is never painted, the panel has no PTY, and writePTY
+// therefore swallows every later keystroke with nothing on screen to explain
+// where it went. The panel is hidden by DEFAULT and buildPaneResults publishes
+// its id as state:"panel", hidden:true, so any client can reach that state by
+// reading `list`. It is the exact state hidePanelLocked repairs and focusNext /
+// resolveSplitTargetLocked skip; this was the one door left open into it.
 func (m *Magmux) sockFocus(msg sockMsg) (map[string]any, error) {
 	idx := m.parsePaneIndex(msg.Pane)
 	p, err := m.paneForMsg(idx)
@@ -599,6 +656,21 @@ func (m *Magmux) sockFocus(msg sockMsg) (map[string]any, error) {
 	if m.paneByIDLocked(idx) != p {
 		m.treeMu.Unlock()
 		return nil, sockErrf(sockCodeNoSuchPane, "no pane %d (it may have been closed)", idx)
+	}
+	// `hidden` is a structural fact about the tree, so it is treeMu's and is
+	// read here rather than before the lock.
+	if p.hidden {
+		// isControl is written at construction and never again; the hint is
+		// conditional because "hidden" is a property of any pane, even though
+		// the panel is the only one magmux ever hides today.
+		hint := ""
+		if p.isControl {
+			hint = " It is magmux's own control panel, hidden by default; Ctrl-G p reveals it."
+		}
+		m.treeMu.Unlock()
+		return nil, sockErrf(sockCodePaneHidden,
+			"pane %d is not on screen, so focusing it would send every keystroke somewhere "+
+				"nobody can see.%s", idx, hint)
 	}
 	m.focused = p
 	m.treeMu.Unlock()

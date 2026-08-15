@@ -1052,6 +1052,98 @@ func TestControlPanelRendersInBothPalettes(t *testing.T) {
 	}
 }
 
+// TestControlPanelTicksWhileAnyRouteWorks — liveness is PER ROUTE.
+//
+// cp.state is the run-global last-observed state, written by whichever route
+// moved most recently. Deciding the once-a-second repaint from it means that
+// with two driven panes, the moment route 1 settles to awaiting_input the tick
+// stops while route 0 is still mid-turn — and nothing restarts it, because
+// recordObserved only marks the panel dirty on a change and a working pane
+// changing tools is not one. routeRow's in-flight ‹elapsed and the header clock
+// then sit frozen on screen for the pane the operator is actually waiting on,
+// which is precisely the "wedged, or just slow?" question they exist to answer.
+func TestControlPanelTicksWhileAnyRouteWorks(t *testing.T) {
+	cp := newControlPanel()
+	cp.recordStart(0, "drive two sessions", "", "claude-code/2.1", 0)
+	cp.recordSend(0, "step 1", "work on pane 0")
+	cp.recordSend(1, "step 1", "work on pane 1")
+	// Route 1 finishes; route 0 is still mid-turn. This is the write that leaves
+	// cp.state saying "awaiting_input" for the whole run.
+	cp.recordObserved(1, "awaiting_input", "42 passed, 0 failed", "Bash")
+
+	p := newControlPane(0, 0, 24, 80, "control")
+	cp.attach(p)
+	cp.markDirty()
+	cp.render() // the paint those records earned
+
+	// repainted reports whether an aged panel paints again with nothing new to
+	// say — i.e. whether the elapsed counters are still moving.
+	repainted := func() bool {
+		cp.mu.Lock()
+		cp.lastPaint = time.Now().Add(-2 * time.Second)
+		cp.mu.Unlock()
+		p.mu.Lock()
+		p.dirty = false
+		p.mu.Unlock()
+		cp.render()
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.dirty
+	}
+
+	if !repainted() {
+		t.Error("the panel stopped ticking while route 0's turn was still in flight: " +
+			"its ‹elapsed and the header clock are frozen on the pane that has not finished")
+	}
+
+	// The converse half, which is what stops the fix being "always tick": once
+	// every route has settled the panel is idle, and an idle pane costs nothing.
+	cp.recordObserved(0, "awaiting_input", "done too", "Bash")
+	cp.render() // consume the dirty flag that observation set
+	if repainted() {
+		t.Error("the panel keeps repainting once every route has settled; an idle pane must cost nothing")
+	}
+}
+
+// TestControlPanelFinishedOutcomeWinsInTheHeader — the header may not
+// contradict the footer.
+//
+// recordFinish states the run's outcome by setting cp.state to
+// finished/failed, but applyRouteToState overwrites s.state with the route's
+// last OBSERVED state, and snapshotLocked applies it on every single-route run —
+// which is the pilot path. The session's last turn ended fine, so after a
+// `pilot fail` the header painted a green AWAITING directly above a red FAILED
+// footer, on exactly the run whose outcome matters most.
+func TestControlPanelFinishedOutcomeWinsInTheHeader(t *testing.T) {
+	cp := samplePanel()
+	// The last turn completed normally: the failure is the RUN's verdict, not
+	// this turn's, which is what makes the two disagree.
+	cp.recordObserved(0, "awaiting_input", "go vet is clean", "Bash")
+	cp.recordFinish("could not reproduce the reported bug", true)
+
+	lines := cp.frame(sampleFrameState(cp), cp.steplogOf(0), 80, 30)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "FAILED") {
+		t.Fatal("a failed run does not say FAILED anywhere")
+	}
+	header := strings.Join(lines[:minInt(len(lines), 4)], "\n")
+	if strings.Contains(header, "AWAITING") {
+		t.Errorf("the header badge reports the last turn's state, contradicting the FAILED footer:\n%s", header)
+	}
+	if !strings.Contains(header, stateBadge("failed")) {
+		t.Errorf("the header does not carry the run's own outcome:\n%s", header)
+	}
+
+	// A finished run is the same rule with the other verdict.
+	ok := samplePanel()
+	ok.recordObserved(0, "awaiting_input", "all green", "Bash")
+	ok.recordFinish("done", false)
+	okHeader := strings.Join(ok.frame(sampleFrameState(ok), ok.steplogOf(0), 80, 30)[:4], "\n")
+	if !strings.Contains(okHeader, stateBadge("finished")) {
+		t.Errorf("a finished run does not carry its outcome in the header:\n%s", okHeader)
+	}
+}
+
 // TestControlPanelDump prints a full frame with escapes so the panel can be
 // screenshotted and judged visually. The renderer cannot be reviewed from
 // source; colour and alignment have to be seen.

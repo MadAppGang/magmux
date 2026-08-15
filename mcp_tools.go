@@ -448,7 +448,7 @@ func (s *mcpServer) attach(ctx context.Context, id, sock string, pid int) (*Sess
 			s.logf("could not announce %q to session %s: %v", client, id, err)
 		}
 	}
-	s.logf("attached session %s (%s), legacy=%v", id, sock, sess.isLegacy())
+	s.logf("attached session %s (%s), capabilities=%s", id, sock, sess.capsNote())
 	return sess, nil
 }
 
@@ -545,15 +545,35 @@ func mcpFirstWord(s string) string {
 	return f[0]
 }
 
-// markSelfPanes flags panes whose process is one of our own ancestors.
-func (s *mcpServer) markSelfPanes(panes []paneInfo) {
-	anc := s.ancestorPIDs()
+// markSelfPanes flags panes whose process is one of our own ancestors, and
+// reports whether that answer can be trusted.
+//
+// It cannot when the ancestry walk broke partway (an unreadable /proc entry, a
+// restricted container) AND no pane matched what little was walked: the guard
+// then has no way to know it would recognise our own pane, and an unmarked pane
+// means "not ours" everywhere downstream. Finding our pane anyway settles it —
+// the walk got far enough for the only question being asked.
+func (s *mcpServer) markSelfPanes(panes []paneInfo) bool {
+	anc, complete := s.ancestry()
+	found := false
 	for i := range panes {
 		if panes[i].PID > 0 && anc[panes[i].PID] {
 			panes[i].Self = true
+			found = true
 		}
 	}
+	return complete || found
 }
+
+// selfGuardWarning is what a pane listing says when markSelfPanes could not
+// vouch for its answer. Saying nothing would present an unchecked list as a
+// checked one, and the agent would drive its own pane believing the guard had
+// looked — the deadlock the guard exists to prevent, arrived at politely.
+const selfGuardWarning = "\n\nNOTE: this process's ancestry could not be read (a container, a " +
+	"restricted /proc, or a transient failure), so magmux cannot tell which of these panes it " +
+	"is running inside and has marked none of them as your own. Driving your own pane " +
+	"deadlocks — the turn you would wait for is the one you are inside — so if one of these " +
+	"panes is the agent making this call, do not send to it."
 
 // refuseUndrivable rejects the panes that cannot be driven at all. The self
 // check is the important one: an agent that instructs its own pane waits for a
@@ -606,7 +626,8 @@ func toolListSessions(ctx context.Context, s *mcpServer, raw json.RawMessage) (m
 	}
 
 	found := discoverSessions(ctx, time.Second)
-	anc := s.ancestorPIDs()
+	anc, ancComplete := s.ancestry()
+	sawSelf := false
 	host := os.Getenv("MAGMUX_SOCK")
 
 	s.sessMu.Lock()
@@ -665,9 +686,13 @@ func toolListSessions(ctx context.Context, s *mcpServer, raw json.RawMessage) (m
 			}
 			if pid > 0 && anc[pid] {
 				line += "  [your own pane — cannot be driven]"
+				sawSelf = true
 			}
 			b.WriteString(line)
 		}
+	}
+	if !ancComplete && !sawSelf {
+		b.WriteString(selfGuardWarning)
 	}
 	b.WriteString("\n\nAttach with attach_session, or just call a pane tool: the session you " +
 		"are running inside, or the only reachable one, is used automatically.")
@@ -702,10 +727,10 @@ func toolAttachSession(ctx context.Context, s *mcpServer, raw json.RawMessage) (
 	s.sessMu.Unlock()
 
 	panes, listErr := sess.listPanes(ctx)
-	s.markSelfPanes(panes)
+	reliable := s.markSelfPanes(panes)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Attached to session %s (%s). It is now the default.\n", sess.ID, sess.SockPath)
-	if sess.isLegacy() {
+	if sess.isLegacy(ctx) {
 		b.WriteString("\nThis magmux is an older build without the request/reply socket " +
 			"protocol: send_keys and send_and_wait work, everything else does not. Ask the " +
 			"human to restart magmux with the current binary.\n")
@@ -714,6 +739,9 @@ func toolAttachSession(ctx context.Context, s *mcpServer, raw json.RawMessage) (
 		fmt.Fprintf(&b, "\nCould not list panes: %v\n", listErr)
 	}
 	b.WriteString("\n" + renderPaneTable(panes))
+	if !reliable {
+		b.WriteString(selfGuardWarning)
+	}
 	return toolText(b.String()), nil
 }
 
@@ -780,9 +808,13 @@ func toolListPanes(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[
 	if err != nil {
 		return toolResultError("could not list panes of session %s: %v", sess.ID, err), nil
 	}
-	s.markSelfPanes(panes)
-	header := fmt.Sprintf("session %s (%s)\n\n", sess.ID, sess.SockPath)
-	return toolText(header + renderPaneTable(panes)), nil
+	reliable := s.markSelfPanes(panes)
+	body := fmt.Sprintf("session %s (%s)\n\n", sess.ID, sess.SockPath)
+	body += renderPaneTable(panes)
+	if !reliable {
+		body += selfGuardWarning
+	}
+	return toolText(body), nil
 }
 
 func renderPaneTable(panes []paneInfo) string {
@@ -848,7 +880,7 @@ func toolOpenPane(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 	if err != nil {
 		return toolResultError("%v", err), nil
 	}
-	if sess.isLegacy() {
+	if sess.isLegacy(ctx) {
 		return toolResultError("%v", errLegacyMagmux), nil
 	}
 
@@ -928,7 +960,7 @@ func toolClosePane(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[
 	if err != nil {
 		return toolResultError("%v", err), nil
 	}
-	if sess.isLegacy() {
+	if sess.isLegacy(ctx) {
 		return toolResultError("%v", errLegacyMagmux), nil
 	}
 	p, err := s.resolvePane(ctx, sess, args.Pane)
@@ -1017,9 +1049,12 @@ func toolReadPane(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 		// somewhere to send a caller who wants the whole thing.
 		flat := mcpFlatten(p.Response)
 		fmt.Fprintf(&b, "\nlast response: %s", mcpTruncate(flat, 300))
-		if len(flat) > 300 {
+		// Counted in runes, like the cut itself: telling a model it is seeing
+		// "the first 300 of 412 characters" when 412 was a byte count sends it
+		// after text that is not missing.
+		if total := utf8.RuneCountInString(flat); total > 300 {
 			fmt.Fprintf(&b, "\n  (that is the first 300 of %d characters — call read_pane with "+
-				"transcript:1 for the full text)", len(flat))
+				"transcript:1 for the full text)", total)
 		}
 	}
 
@@ -1034,7 +1069,7 @@ func toolReadPane(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 		}
 		return out, nil
 	}
-	if sess.isLegacy() {
+	if sess.isLegacy(ctx) {
 		b.WriteString("\n\nThis magmux is too old to render a pane's screen, so state above is " +
 			"all there is. Ask the human to restart magmux with the current binary.")
 		return toolText(b.String()), nil
@@ -1134,7 +1169,7 @@ const (
 // MAGMUX's side.
 func readPaneTranscript(ctx context.Context, sess *Session, p paneInfo, turns int) (string, bool) {
 	head := fmt.Sprintf("══ TRANSCRIPT — pane %d's own record on disk ══", p.Index)
-	if sess.isLegacy() {
+	if sess.isLegacy(ctx) {
 		return head + "\nThis magmux predates transcripts, so there is no record to read. Ask " +
 			"the human to restart magmux with the current binary; until then the screen below " +
 			"is all there is.", false
@@ -1307,7 +1342,7 @@ func toolSendKeys(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 		b.WriteString(" then Enter")
 	}
 	b.WriteString(".")
-	if sess.isLegacy() {
+	if sess.isLegacy(ctx) {
 		b.WriteString("\n\n(This magmux cannot confirm delivery — it predates the reply " +
 			"protocol. Read the pane to check.)")
 	}
@@ -1318,7 +1353,7 @@ func toolSendKeys(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 		case <-time.After(wait):
 		case <-ctx.Done():
 		}
-		if !sess.isLegacy() {
+		if !sess.isLegacy(ctx) {
 			if res, err := sess.capture(ctx, p.Index, 20, 0); err == nil {
 				if text, _ := evStr(res, "text"); strings.TrimSpace(text) != "" {
 					b.WriteString("\n\nThe pane now shows:\n```\n" +
@@ -1402,7 +1437,7 @@ func toolSendAndWait(ctx context.Context, s *mcpServer, raw json.RawMessage) (ma
 	// A turn that settles with nothing to say used to leave the driver
 	// guessing; now that capture exists, show it the screen instead.
 	screen := ""
-	if res.Response == "" && !sess.isLegacy() {
+	if res.Response == "" && !sess.isLegacy(ctx) {
 		capCtx, cancel := context.WithTimeout(context.Background(), sockReadTimeout)
 		if cres, cerr := sess.capture(capCtx, p.Index, 15, 0); cerr == nil {
 			screen, _ = evStr(cres, "text")
@@ -1421,11 +1456,33 @@ func toolSendAndWait(ctx context.Context, s *mcpServer, raw json.RawMessage) (ma
 
 // ── small helpers ───────────────────────────────────────────────────────────
 
+// mcpTruncate shortens s to n CHARACTERS, the last of which is the ellipsis.
+//
+// Characters and not bytes, for two reasons that happen to agree. The cut has
+// to land on a rune boundary — an em dash or an emoji straddling the cut point
+// becomes U+FFFD once json.Marshal sees it, and the model then reads back a
+// mangled quote of what a session said (p.Response is cut at 300, where a real
+// answer is very likely to have one). And the two callers that pad the result
+// into a column (`%-10s`, and the width of the command column) are measured by
+// fmt in runes as well, so a byte budget would misalign the table on exactly
+// the same strings.
+//
+// mcpClip is NOT interchangeable with this: it appends "[clipped: N more
+// characters]", which is right for a transcript payload and wrong inside a
+// table cell or a quoted echo of what was sent.
 func mcpTruncate(s string, n int) string {
-	if n <= 1 || len(s) <= n {
+	if n <= 1 || utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	cut, seen := len(s), 0
+	for i := range s {
+		if seen == n-1 {
+			cut = i
+			break
+		}
+		seen++
+	}
+	return s[:cut] + "…"
 }
 
 // mcpClip shortens s to n bytes and says how much it left out, so a model can

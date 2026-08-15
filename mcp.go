@@ -407,32 +407,67 @@ func decodeArgs(raw json.RawMessage, dst any) error {
 	return nil
 }
 
-// ancestorPIDs returns our own pid and every ancestor pid, memoised.
+// ppidLookup is ppidOf, indirected so a test can stage the unreadable
+// /proc/<pid>/stat this guard has to survive. Never reassigned in production.
+var ppidLookup = ppidOf
+
+// ancestorPIDs returns our own pid and every ancestor pid.
 //
 // This is the self-pane guard's raw material: if a pane's process is one of
 // these, that pane is the one we are running inside, and driving it would
 // block forever on a turn we are ourselves in the middle of.
 func (s *mcpServer) ancestorPIDs() map[int]bool {
+	pids, _ := s.ancestry()
+	return pids
+}
+
+// ancestry returns the pid set and whether the walk actually REACHED THE TOP.
+//
+// Only a complete walk is memoised, and that is the whole point. One unreadable
+// /proc/<pid>/stat — a restrictive container, an LSM, a transient sysctl
+// failure — breaks the walk after a single step, and caching that leaves the
+// guard knowing nothing but our own pid for the life of the process. The pane
+// the MCP server is running inside then fails to be recognised as
+// self-targeting, and a send_and_wait aimed at it deadlocks on a turn the
+// caller is itself inside: exactly what the guard exists to prevent.
+//
+// So a partial walk is returned but not kept, and the next call retries. The
+// second return value is the "degrade loudly" half: callers that would
+// otherwise silently permit a self-target say instead that they could not tell.
+func (s *mcpServer) ancestry() (map[int]bool, bool) {
 	s.ancMu.Lock()
 	defer s.ancMu.Unlock()
 	if s.ancestors != nil {
-		return s.ancestors
+		return s.ancestors, true
 	}
-	seen := map[int]bool{}
-	pid := os.Getpid()
-	for i := 0; i < 64 && pid > 1; i++ {
-		if seen[pid] {
-			break // a cycle is impossible, but a bad read should not spin
-		}
-		seen[pid] = true
-		parent, err := ppidOf(pid)
-		if err != nil || parent <= 0 {
+	// Seeded rather than filled by the loop: we are always our own ancestor, and
+	// under `os.Getpid() == 1` the loop body never runs at all.
+	self := os.Getpid()
+	seen := map[int]bool{self: true}
+	pid, complete := self, false
+	for i := 0; i < 64; i++ {
+		if pid <= 1 {
+			complete = true // walked all the way to init
 			break
 		}
+		parent, err := ppidLookup(pid)
+		if err != nil {
+			break // this link is unreadable, so everything above it is unknown
+		}
+		if parent <= 0 {
+			complete = true // no parent: the top of the tree, reached honestly
+			break
+		}
+		if seen[parent] {
+			break // a cycle is impossible, but a bad read must not spin
+		}
+		seen[parent] = true
 		pid = parent
 	}
-	s.ancestors = seen
-	return seen
+	if complete {
+		s.ancestors = seen
+	}
+	return seen, complete
 }
 
 // ctxWithTimeout is context.WithTimeout with 0 meaning "no deadline", which is

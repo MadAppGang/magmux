@@ -986,6 +986,40 @@ func stateBadgeShort(state string) string {
 	}
 }
 
+// liveLocked reports whether anything is still in flight, which is what buys
+// the once-a-second repaint that keeps the elapsed counters honest.
+//
+// It is evaluated PER ROUTE, for the same reason `outstanding` is. cp.state is
+// the run-GLOBAL last-observed state, written unconditionally by recordObserved
+// for whichever route moved last, so reading liveness off it means that with two
+// driven panes the tick stops the moment the first one settles — while the other
+// is still mid-turn, and with nothing to restart it, because recordObserved only
+// marks the panel dirty on a change and a working pane changing tools is not
+// one. routeRow's in-flight ‹elapsed and the header clock then freeze on screen
+// for the pane that has not finished, which is exactly the "wedged, or just
+// slow?" question the elapsed time exists to answer.
+//
+// A closed route is skipped: recordRouteClosed leaves its counters alone, so an
+// instruction that was outstanding when its pane went away would otherwise tick
+// forever. Caller holds cp.mu.
+func (cp *ControlPanel) liveLocked() bool {
+	for _, r := range cp.routes {
+		if r == nil || r.closed() {
+			continue
+		}
+		// `sent > observed` is included because it is the exact condition
+		// routeRow paints its growing ‹elapsed under: a number still growing on
+		// screen must not be a number that stopped being updated.
+		if r.state == "working" || r.state == "starting" || r.sent > r.observed {
+			return true
+		}
+	}
+	// No routes at all: fall back to the run-level state, which is all a panel
+	// a controller has announced itself to but not yet touched anything with
+	// has to go on.
+	return len(cp.routes) == 0 && (cp.state == "working" || cp.state == "starting")
+}
+
 // render paints the whole panel into its pane. Called from the render loop.
 func (cp *ControlPanel) render() {
 	p := cp.paneRef()
@@ -1002,7 +1036,7 @@ func (cp *ControlPanel) render() {
 	cp.mu.Lock()
 	// Repaint on change; otherwise only tick while work is in flight, so an
 	// idle panel is as cheap as any other idle pane.
-	live := cp.state == "working" || cp.state == "starting"
+	live := cp.liveLocked()
 	if !cp.needsPaint && (!live || time.Since(cp.lastPaint) < time.Second) {
 		cp.mu.Unlock()
 		return
@@ -1212,7 +1246,16 @@ func applyRouteToState(s *ctrlFrameState, r ctrlRoute) {
 	s.target = r.pane
 	s.sent = r.sent
 	s.observed = r.observed
-	s.state = r.state
+	// The state is the ONE field a finished run keeps for itself. recordFinish
+	// says how the run ended by setting cp.state to finished/failed, and
+	// snapshotLocked applies this to every single-route run — the pilot path —
+	// so overwriting it with the route's last OBSERVED state painted a green
+	// AWAITING header badge directly above the red FAILED footer, on exactly the
+	// run whose outcome matters most. The session's last turn really did end
+	// fine; the verdict on the run is not the session's to give.
+	if !s.finished {
+		s.state = r.state
+	}
 	s.legacySteps = r.steplog
 	if r.steps > 0 {
 		s.steps = r.steps

@@ -20,6 +20,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // ── handshake ───────────────────────────────────────────────────────────────
@@ -697,10 +698,11 @@ type fakeMagmux struct {
 	ln   net.Listener
 	path string
 
-	mu      sync.Mutex
-	verbs   []string
-	msgs    []map[string]any
-	replies bool // answer `capabilities`, i.e. not a legacy magmux
+	mu       sync.Mutex
+	verbs    []string
+	msgs     []map[string]any
+	replies  bool // answer `capabilities`, i.e. not a legacy magmux
+	busyCaps int  // swallow this many `capabilities` probes, then behave normally
 }
 
 func startFakeMagmux(t *testing.T, replies bool) *fakeMagmux {
@@ -714,6 +716,29 @@ func startFakeMagmux(t *testing.T, replies bool) *fakeMagmux {
 	go f.accept()
 	t.Cleanup(func() { ln.Close() })
 	return f
+}
+
+// startBusyFakeMagmux is a CURRENT magmux that is merely wedged while the first
+// `probes` capability probes arrive — pollControllers re-scanning
+// ~/.claude/projects under treeMu.RLock — and answers everything after them.
+func startBusyFakeMagmux(t *testing.T, probes int) *fakeMagmux {
+	t.Helper()
+	f := startFakeMagmux(t, true)
+	f.mu.Lock()
+	f.busyCaps = probes
+	f.mu.Unlock()
+	return f
+}
+
+// shortProbes shrinks the capability-probe budgets so a test can watch both
+// verdicts being reached without paying real seconds of silence for them.
+// Nothing in this package runs in parallel, so the swap is safe.
+func shortProbes(t *testing.T) {
+	t.Helper()
+	probe, confirm := sockProbeTimeout, sockProbeConfirmTimeout
+	sockProbeTimeout = 150 * time.Millisecond
+	sockProbeConfirmTimeout = 400 * time.Millisecond
+	t.Cleanup(func() { sockProbeTimeout, sockProbeConfirmTimeout = probe, confirm })
 }
 
 func (f *fakeMagmux) accept() {
@@ -741,9 +766,16 @@ func (f *fakeMagmux) accept() {
 		f.verbs = append(f.verbs, verb)
 		f.msgs = append(f.msgs, msg)
 		replies := f.replies
+		wedged := f.busyCaps > 0 && verb == "capabilities"
+		if wedged {
+			f.busyCaps--
+		}
 		f.mu.Unlock()
 		if !replies {
 			continue // a legacy magmux answers nothing at all
+		}
+		if wedged {
+			continue // busy: this one probe goes unanswered
 		}
 		id, _ := msg["id"]
 		reply := func(result map[string]any) {
@@ -853,7 +885,7 @@ func TestSessionDrivesAFakeMagmux(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if sess.isLegacy() {
+	if sess.isLegacy(ctx) {
 		t.Fatal("a magmux that answered capabilities was marked legacy")
 	}
 	if got := sess.state.paneState(0); got != "awaiting_input" {
@@ -1235,6 +1267,7 @@ func TestAttachStaysSilentWithoutAClientName(t *testing.T) {
 }
 
 func TestLegacyMagmuxRefusesEverythingButSending(t *testing.T) {
+	shortProbes(t)
 	f := startFakeMagmux(t, false)
 	s := newMCPServer(io.Discard, io.Discard)
 	ctx := context.Background()
@@ -1243,7 +1276,8 @@ func TestLegacyMagmuxRefusesEverythingButSending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if !sess.isLegacy() {
+	// Two silences — the dial probe and a confirming one — and only then.
+	if !sess.isLegacy(ctx) {
 		t.Fatal("a magmux that answered nothing must be treated as legacy")
 	}
 
@@ -1280,6 +1314,89 @@ func TestLegacyMagmuxRefusesEverythingButSending(t *testing.T) {
 	sess.Close()
 }
 
+// TestBusyMagmuxIsNotWrittenOffAsLegacy is the counterweight to the test above.
+// Silence has two causes and only one of them is old software: a current magmux
+// wedged in a controller poll answers nothing either, and a single missed probe
+// used to refuse open_pane, close_pane and every read for the whole life of the
+// server — against a magmux that was perfectly current.
+func TestBusyMagmuxIsNotWrittenOffAsLegacy(t *testing.T) {
+	shortProbes(t)
+	f := startBusyFakeMagmux(t, 1)
+	s := newMCPServer(io.Discard, io.Discard)
+	ctx := context.Background()
+
+	sess, err := s.attach(ctx, "busy", f.path, 0)
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if sess.capsNote() != "unproven" {
+		t.Errorf("one missed probe settled the verdict at %q; the short dial budget "+
+			"decides nothing", sess.capsNote())
+	}
+
+	res, rerr := toolOpenPane(ctx, s, json.RawMessage(`{"cmd":"claude","session_id":"busy"}`))
+	if rerr != nil {
+		t.Fatalf("open_pane: %v", rerr)
+	}
+	if res["isError"] == true {
+		t.Fatalf("a busy magmux was written off as legacy:\n%s", readPaneText(t, res))
+	}
+	if sess.isLegacy(ctx) {
+		t.Error("the session answered a probe and is still marked legacy")
+	}
+	sess.Close()
+}
+
+// TestLegacyVerdictExpiresAndIsRechecked pins the other half: the verdict is a
+// guess made from an absence, so it must not outlive the absence. A magmux
+// wedged past BOTH probes is refused — and then re-probed, not condemned.
+func TestLegacyVerdictExpiresAndIsRechecked(t *testing.T) {
+	shortProbes(t)
+	recheck := legacyRecheckAfter
+	legacyRecheckAfter = 50 * time.Millisecond
+	t.Cleanup(func() { legacyRecheckAfter = recheck })
+
+	f := startBusyFakeMagmux(t, 2)
+	s := newMCPServer(io.Discard, io.Discard)
+	ctx := context.Background()
+
+	sess, err := s.attach(ctx, "wedged", f.path, 0)
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if !sess.isLegacy(ctx) {
+		t.Fatal("two silences in a row must produce the legacy verdict, or a genuinely " +
+			"old magmux is never detected")
+	}
+	time.Sleep(2 * legacyRecheckAfter)
+	if sess.isLegacy(ctx) {
+		t.Error("the legacy verdict was never re-tested: a magmux that was busy for a " +
+			"minute stays refused for the life of the server")
+	}
+	sess.Close()
+}
+
+// TestALateReplyProvesTheReplyProtocol covers the cheapest recovery there is:
+// a reply that arrived just after its waiter gave up is still proof that the
+// plumbing exists, and proof outranks any amount of silence.
+func TestALateReplyProvesTheReplyProtocol(t *testing.T) {
+	sess := &Session{ID: "late", state: newSessionState(), pending: map[string]chan mcpReply{},
+		closed: make(chan struct{}), inFlight: map[int]bool{}}
+	sess.capState.Store(capsSilent)
+	sess.probedAt = time.Now() // a fresh verdict: isLegacy answers without probing
+	ctx := context.Background()
+	if !sess.isLegacy(ctx) {
+		t.Fatal("setup: the session should start out on the silent verdict")
+	}
+
+	// Nobody is waiting on id 99 any more — the request timed out — and it must
+	// still count.
+	sess.ingest([]byte(`{"type":"reply","id":"99","ok":false,"code":"no_such_pane","error":"nope"}`))
+	if sess.isLegacy(ctx) {
+		t.Error("magmux replied and the session is still refused as legacy")
+	}
+}
+
 func TestSendAndWaitRefusesTwoConcurrentTurnsOnOnePane(t *testing.T) {
 	sess := &Session{ID: "x", state: newSessionState(), pending: map[string]chan mcpReply{},
 		closed: make(chan struct{}), inFlight: map[int]bool{}}
@@ -1312,6 +1429,77 @@ func TestAncestorPIDsIncludesOurselves(t *testing.T) {
 	}
 }
 
+// TestAncestryRetriesAPartialWalk is the memoisation bug: a walk that broke
+// after one step — one unreadable /proc/<pid>/stat, one transient sysctl
+// failure — used to be cached as the final answer for the life of the process.
+// The guard then knew only our own pid, our own PANE was not recognised as
+// ours, and a send_and_wait at it deadlocked on a turn the caller was inside.
+func TestAncestryRetriesAPartialWalk(t *testing.T) {
+	s := newMCPServer(io.Discard, io.Discard)
+	real := ppidLookup
+	t.Cleanup(func() { ppidLookup = real })
+
+	ppidLookup = func(int) (int, error) { return 0, errors.New("permission denied") }
+	anc, complete := s.ancestry()
+	if complete {
+		t.Error("a walk that could not read the first link reported itself complete")
+	}
+	if !anc[os.Getpid()] {
+		t.Errorf("even the partial walk must know our own pid: %v", anc)
+	}
+
+	// The condition clears. The next call must actually walk again.
+	ppidLookup = real
+	anc, complete = s.ancestry()
+	if !complete {
+		t.Fatalf("a readable ancestry did not complete: %v", anc)
+	}
+	if !anc[os.Getppid()] {
+		t.Fatalf("a walk that broke after one step was cached forever: %v", anc)
+	}
+
+	// And now it IS cached: a complete answer is the only kind worth keeping.
+	ppidLookup = func(int) (int, error) { return 0, errors.New("gone again") }
+	if again, ok := s.ancestry(); !ok || !again[os.Getppid()] {
+		t.Errorf("a complete walk was not memoised: complete=%v %v", ok, again)
+	}
+}
+
+// TestUnreadableAncestrySaysSoInThePaneListing is the "degrade loudly" half.
+// With no ancestry, no pane carries the YOUR OWN PANE mark — which downstream
+// reads as "none of these is yours". Presenting an unchecked list as a checked
+// one is what turns a missing warning into a deadlock.
+func TestUnreadableAncestrySaysSoInThePaneListing(t *testing.T) {
+	f := startFakeMagmux(t, true)
+	s := newMCPServer(io.Discard, io.Discard)
+	ctx := context.Background()
+	if _, err := s.attach(ctx, "warn", f.path, 0); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+
+	real := ppidLookup
+	t.Cleanup(func() { ppidLookup = real })
+	ppidLookup = func(int) (int, error) { return 0, errors.New("permission denied") }
+
+	res, rerr := toolListPanes(ctx, s, json.RawMessage(`{"session_id":"warn"}`))
+	if rerr != nil {
+		t.Fatalf("list_panes: %v", rerr)
+	}
+	text := readPaneText(t, res)
+	if !strings.Contains(text, "ancestry could not be read") {
+		t.Errorf("an unresolvable ancestry silently permitted a self-target:\n%s", text)
+	}
+
+	ppidLookup = real
+	res, rerr = toolListPanes(ctx, s, json.RawMessage(`{"session_id":"warn"}`))
+	if rerr != nil {
+		t.Fatalf("list_panes: %v", rerr)
+	}
+	if text := readPaneText(t, res); strings.Contains(text, "ancestry could not be read") {
+		t.Errorf("a healthy ancestry still warned:\n%s", text)
+	}
+}
+
 func TestRefuseUndrivableExplainsTheSelfDeadlock(t *testing.T) {
 	if why := refuseUndrivable(paneInfo{Index: 1, Self: true}); !strings.Contains(why, "deadlock") {
 		t.Errorf("a self pane must be refused with an explanation, got %q", why)
@@ -1324,6 +1512,49 @@ func TestRefuseUndrivableExplainsTheSelfDeadlock(t *testing.T) {
 	}
 	if why := refuseUndrivable(paneInfo{Index: 0, State: "awaiting_input"}); why != "" {
 		t.Errorf("an idle session pane must be drivable, got %q", why)
+	}
+}
+
+// ── truncation ──────────────────────────────────────────────────────────────
+
+// TestMCPTruncateKeepsRunesWhole: the cut lands wherever the text puts it, and
+// a byte cut through an em dash or an emoji becomes U+FFFD the moment
+// json.Marshal encodes the tool result — so the model reads back a mangled
+// quote of what the session actually said.
+func TestMCPTruncateKeepsRunesWhole(t *testing.T) {
+	cases := []struct {
+		name string
+		s    string
+		n    int
+	}{
+		// The shape read_pane caps at 300: an em dash straddling the cut.
+		{"em dash at the cap", strings.Repeat("a", 298) + "—done", 300},
+		{"emoji in a label", "build✅ing", 10},
+		{"multibyte command", strings.Repeat("é", 40) + " --flag", 40},
+	}
+	for _, tc := range cases {
+		got := mcpTruncate(tc.s, tc.n)
+		if !utf8.ValidString(got) {
+			t.Errorf("%s: cut a codepoint in half: %q", tc.name, got)
+		}
+		if strings.ContainsRune(got, utf8.RuneError) {
+			t.Errorf("%s: produced U+FFFD: %q", tc.name, got)
+		}
+		if n := utf8.RuneCountInString(got); n > tc.n {
+			t.Errorf("%s: %d characters, want at most %d", tc.name, n, tc.n)
+		}
+	}
+
+	if got := mcpTruncate("héllo", 3); got != "hé…" {
+		t.Errorf("mcpTruncate(\"héllo\", 3) = %q, want %q", got, "hé…")
+	}
+	if got := mcpTruncate("short", 40); got != "short" {
+		t.Errorf("a string within the budget was touched: %q", got)
+	}
+	// Wide runes must not be counted as several characters, or the pane table's
+	// padded columns (fmt measures %-10s in runes) come out ragged.
+	if got := mcpTruncate("日本語のコマンド", 4); utf8.RuneCountInString(got) != 4 {
+		t.Errorf("mcpTruncate cut by bytes, not characters: %q", got)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -832,8 +833,8 @@ func TestControllerSnapshotReachesAwaitingInput(t *testing.T) {
 // DA2 and DSR but no OSC query at all, so the question went into a void and the
 // application never got as far as its first frame.
 
-// queryPane returns a PTY-less pane whose writePTY output the caller can read,
-// plus that read end. A pipe rather than a real PTY because the assertion is on
+// queryPane returns a PTY-less pane whose replyLocked output the caller can
+// read, plus that read end. A pipe rather than a real PTY because the assertion is on
 // the exact bytes magmux sends back, and a PTY's line discipline is free to
 // rewrite them.
 func queryPane(t *testing.T) (*Pane, *os.File) {
@@ -1028,6 +1029,216 @@ func TestOSCColorQueryPrefersTheProbedBackground(t *testing.T) {
 	}
 }
 
+// TestTerminalRepliesReachASettledPane. magmux answering its own child is NOT
+// input, and routing the answers through writePTY conflated the two.
+//
+// writePTY refuses a pane that is dead or awaiting input in grid mode — that is
+// what lets `q` dismiss a finished grid — but awaiting-input is precisely the
+// state a long-lived TUI sits in. Claude Code re-queries OSC 11 on every
+// SIGWINCH, and magmux sends one to every pane each time `Ctrl-G p` reshapes
+// the layout. So a settled pane asked the question, got nothing back, and
+// blocked: the blank-pane hang answerColorQuery exists to prevent, arriving by
+// a second route. DA and DSR are on the same path, and a TUI blocks on those too.
+func TestTerminalRepliesReachASettledPane(t *testing.T) {
+	defer useTheme(themeDark)()
+
+	for _, c := range []struct{ name, query, want string }{
+		{"OSC 11 background", "\x1b]11;?\x07", "\x1b]11;rgb:1e1e/1e1e/2e2e\x07"},
+		{"DA1", "\x1b[c", "\x1b[?1;2c"},
+		{"DA2", "\x1b[>c", "\x1b[>1;10;0c"},
+		{"DSR cursor position", "\x1b[6n", "\x1b[1;1R"},
+		{"DSR status", "\x1b[5n", "\x1b[0n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p, r := queryPane(t)
+			p.gridMode = true
+			p.inputReady = true
+			p.tint = "success"
+			p.overlayText = "✓ DONE"
+			p.overlayStyle = "success"
+
+			p.vt.write([]byte(c.query))
+
+			if got := readReply(t, r); got != c.want {
+				t.Fatalf("a pane sitting at awaiting_input asked %q and was answered %q, want %q — "+
+					"the reply was suppressed as if it were a keystroke into a finished pane, "+
+					"and the child is now blocked on an answer that will never come",
+					c.query, got, c.want)
+			}
+		})
+	}
+}
+
+// TestTerminalReplyDoesNotClearCompletionState is the same conflation seen from
+// the other side. writePTY clears inputReady, tint, the overlay and
+// hadTextOutput under "user input resets idle state" — correct for a keystroke,
+// wrong for magmux answering its own child. A pane that had finished its turn
+// silently read as working again and lost its ✓ DONE chrome, for nothing more
+// than a background query it did not ask a human for.
+func TestTerminalReplyDoesNotClearCompletionState(t *testing.T) {
+	defer useTheme(themeDark)()
+
+	p, r := queryPane(t)
+	p.inputReady = true
+	p.tint = "success"
+	p.overlayText = "✓ DONE"
+	p.overlayStyle = "success"
+	p.hadTextOutput = true
+
+	p.vt.write([]byte("\x1b]11;?\x07"))
+	if got := readReply(t, r); got == "" {
+		t.Fatalf("the query was not answered at all")
+	}
+
+	if !p.inputReady {
+		t.Errorf("answering a colour query cleared inputReady; the pane now reads as working")
+	}
+	if p.tint != "success" || p.overlayText != "✓ DONE" || p.overlayStyle != "success" {
+		t.Errorf("answering a colour query erased the completion chrome: tint=%q overlay=%q/%q",
+			p.tint, p.overlayText, p.overlayStyle)
+	}
+	if !p.hadTextOutput {
+		t.Errorf("answering a colour query cleared hadTextOutput; the idle heuristic has been reset " +
+			"by magmux's own reply")
+	}
+}
+
+// TestWritePTYLocksTheFieldsItWrites is a -race test, and it is the only kind
+// that can fail here: writePTY tested p.dead/p.inputReady and then assigned
+// inputReady, tint, overlayText, overlayStyle and hadTextOutput with no lock at
+// all, from the INPUT goroutine, once per keystroke and once per forwarded
+// mouse event. The render goroutine reads every one of those under p.mu —
+// leafTint, allPanesDoneLocked, the grid counter, renderLocked itself. Without
+// -race it is a torn read nobody sees until a pane paints the wrong colour.
+func TestWritePTYLocksTheFieldsItWrites(t *testing.T) {
+	p := newControlPane(0, 0, 6, 40, "race")
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	p.ptmx = pw
+	// Drain: a full pipe buffer would turn a race test into a hang.
+	go func() { _, _ = io.Copy(io.Discard, pr) }()
+	defer func() { pw.Close(); pr.Close() }()
+
+	// The render goroutine's half of the conflict: these fields are p.mu's, and
+	// it always took the lock. Re-arming inputReady each pass is what keeps
+	// writePTY's reset block live for every one of the writes below.
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			p.mu.Lock()
+			p.inputReady = true
+			p.tint = "success"
+			p.overlayText = "✓ DONE"
+			p.overlayStyle = "success"
+			p.hadTextOutput = true
+			p.mu.Unlock()
+		}
+	}()
+
+	for i := 0; i < 500; i++ {
+		p.writePTY([]byte("x"))
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// ── clicking a split border ──────────────────────────────────────────────────
+
+// TestClickOnASplitBorderCannotPanicTheMultiplexer is the crash the whole
+// process dies of, and it takes every session inside magmux with it.
+//
+// findPaneAtLocked returns nil on a border, so the click does NOT move focus —
+// focus stays on the pane it was already on, one cell away. The left-click
+// branch then recorded the anchor as `row0-f.y` / `col0-f.x` with no clamp at
+// all, while the drag and release branches immediately below it clamp both. A
+// border above or to the left of the focused pane therefore starts a selection
+// at -1, and the very next frame indexes p.screen.cells with it.
+//
+// The two orientations panic at DIFFERENT lines — a vertical border gives
+// sx = -1 and dies in the column loop, a horizontal one gives sy = -1 and dies
+// on the row subscript before the column loop is ever reached — so both are
+// here.
+func TestClickOnASplitBorderCannotPanicTheMultiplexer(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		split SplitType
+	}{
+		{"vertical border, left of the focused pane", SplitHorizontal},
+		{"horizontal border, above the focused pane", SplitVertical},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := newTestMux(t, ctrlPanes(1)...)
+			id, err := m.OpenPane(OpenPaneRequest{
+				PaneConfig: PaneConfig{Control: true},
+				Target:     0,
+				Split:      c.split,
+				Focus:      true,
+			})
+			if err != nil {
+				t.Fatalf("OpenPane: %v", err)
+			}
+			np := m.paneByID(id)
+
+			// The border cell is the row or column immediately before the new
+			// pane — the one splitLeafLocked reserved for the divider.
+			row, col := np.y, np.x
+			if c.split == SplitHorizontal {
+				col = np.x - 1
+			} else {
+				row = np.y - 1
+			}
+			m.treeMu.RLock()
+			onBorder := m.findPaneAtLocked(row, col)
+			focused := m.focused
+			m.treeMu.RUnlock()
+			if onBorder != nil {
+				t.Fatalf("(%d,%d) is not a border: findPaneAtLocked returned pane %d", row, col, onBorder.id)
+			}
+			if focused != np {
+				t.Fatalf("setup: focus is on pane %v, not the new pane %d", focused, np.id)
+			}
+
+			// SGR mouse coordinates are 1-indexed.
+			if _, ok := m.parseSGRMouse([]byte(fmt.Sprintf("\x1b[<0;%d;%dM", col+1, row+1))); !ok {
+				t.Fatalf("the mouse press was not parsed")
+			}
+
+			m.treeMu.RLock()
+			sy, sx, active, pane := sel.sy, sel.sx, sel.active, sel.pane
+			m.treeMu.RUnlock()
+			if !active || pane != np {
+				t.Fatalf("the border click did not start a selection in the focused pane")
+			}
+			if sy < 0 || sx < 0 {
+				t.Fatalf("clicking the split border anchored the selection at row %d, col %d in the "+
+					"focused pane's own frame; the drag and release branches clamp and this one does not",
+					sy, sx)
+			}
+
+			// Belt and braces: the frame that follows must survive an out-of-range
+			// anchor however it got there, because the alternative is that magmux
+			// panics and takes every session in it down.
+			m.treeMu.Lock()
+			sel.sy, sel.sx, sel.ey, sel.ex = -1, -1, -1, -1
+			sel.active = true
+			sel.pane = np
+			m.markAllDirtyLocked()
+			_, _, _ = m.renderLocked()
+			m.treeMu.Unlock()
+		})
+	}
+}
+
 // TestOSCBackgroundQueryAnsweredEndToEnd is the bug in the shape the user hit
 // it: a real magmux, a real child in a real PTY, asking the real question.
 //
@@ -1154,7 +1365,21 @@ func decstbmPane(t *testing.T) *Pane {
 // TestDECSTBMDefaultsToTheWholePage states the parameter rule on its own. An
 // omitted top is line 1; an omitted (or zero) bottom is the LAST line, not
 // line 1 — that asymmetry is the whole bug.
+//
+// Every case starts from a NON-default region, and that is the point of the
+// test rather than a detail of it. A fresh pane already sits at [0,rows), so a
+// case that starts there cannot tell "the sequence reset the region" from "the
+// sequence was ignored and the default was still standing" — and being ignored
+// is exactly what a bare `CSI r` did: `bot` was read with p1, which turns an
+// absent parameter into 1, so `top >= bot` fired and DECSTBM was dropped on the
+// floor with the old region left in force. The test passed anyway, which is how
+// the bug shipped. A TUI that sets `CSI 2;20r` for a body under a fixed header
+// and then emits a bare `CSI r` to restore the page stayed pinned at rows 2-20
+// for the life of the pane.
 func TestDECSTBMDefaultsToTheWholePage(t *testing.T) {
+	// The region every case is dragged out of: a body under a fixed header,
+	// which is the shape real TUIs set and then reset.
+	const start = "\x1b[3;7r" // → [2,7)
 	cases := []struct {
 		name, seq        string
 		wantTop, wantBot int
@@ -1170,13 +1395,41 @@ func TestDECSTBMDefaultsToTheWholePage(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			p := decstbmPane(t)
+			p.vt.write([]byte(start))
+			if s := p.screen; s.scrollTop != 2 || s.scrollBot != 7 {
+				t.Fatalf("setup: %q left the region at [%d,%d), want [2,7)", start, s.scrollTop, s.scrollBot)
+			}
 			p.vt.write([]byte(c.seq))
 			s := p.screen
 			if s.scrollTop != c.wantTop || s.scrollBot != c.wantBot {
-				t.Fatalf("%q set the scroll region to [%d,%d), want [%d,%d) on a %d-row page",
-					c.seq, s.scrollTop, s.scrollBot, c.wantTop, c.wantBot, s.rows)
+				t.Fatalf("after %q, %q set the scroll region to [%d,%d), want [%d,%d) on a %d-row page",
+					start, c.seq, s.scrollTop, s.scrollBot, c.wantTop, c.wantBot, s.rows)
 			}
 		})
+	}
+}
+
+// TestBareDECSTBMRestoresThePageAfterAHeaderRegion is the same rule as a user
+// sees it, and the failure the vacuous version above could not show: a pane
+// pinned to a five-line body, told to go back to the whole page, must then use
+// the whole page. Before the fix the bare CSI r was ignored and the output
+// stayed trapped in rows 3-7.
+func TestBareDECSTBMRestoresThePageAfterAHeaderRegion(t *testing.T) {
+	p := decstbmPane(t)
+	p.vt.write([]byte("\x1b[3;7r")) // body under a two-line header
+	p.vt.write([]byte("\x1b[r"))    // and back to the whole page
+	p.vt.write([]byte("\x1b[H"))    // home, which origin mode is off so is row 0
+
+	// Nine lines onto a ten-row page: with the whole page as the region nothing
+	// scrolls at all and every line keeps its own row.
+	p.vt.write([]byte("l0\r\nl1\r\nl2\r\nl3\r\nl4\r\nl5\r\nl6\r\nl7\r\nl8"))
+
+	shot := p.capture(0, true)
+	want := "l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8"
+	if shot.Text != want {
+		t.Fatalf("after CSI 3;7r then a bare CSI r the pane reads:\n%q\nwant:\n%q\n"+
+			"(the bare CSI r was ignored and the region is still the header's body)",
+			shot.Text, want)
 	}
 }
 

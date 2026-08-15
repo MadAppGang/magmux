@@ -613,3 +613,126 @@ func paneStates(t *testing.T, v any) map[string]string {
 	}
 	return out
 }
+
+// ── focus ───────────────────────────────────────────────────────────────────
+
+// TestFocusRefusesAHiddenPane is the "parked keyboard" guard.
+//
+// The panel is hidden by default and buildPaneResults publishes its id to every
+// client as state:"panel", hidden:true — so a socket client can read the id off
+// `list` and focus it. A hidden pane is not in the tree and is never painted,
+// and the panel has no PTY, so every later keystroke would be swallowed with
+// nothing on screen to explain where it went. That is the exact state
+// hidePanelLocked repairs and focusNext / resolveSplitTargetLocked skip; `focus`
+// is the one door left open into it.
+//
+// The refusal is against HIDDEN, not against the panel: a panel that is on
+// screen is a legitimate focus target (inputLoop routes keys to
+// consumeControlKey, which scrolls it), and Ctrl-G o cycles onto it already.
+func TestFocusRefusesAHiddenPane(t *testing.T) {
+	m := newTestMux(t, ctrlPanes(2)...)
+	panel := m.paneByID(1)
+
+	// Focus works while the pane is on screen — this is the control case, and it
+	// is what makes the failure below about hidden rather than about isControl.
+	if _, err := m.sockFocus(sockMsg{Type: "focus", Pane: 1.0}); err != nil {
+		t.Fatalf("focus refused a visible pane: %v", err)
+	}
+
+	m.treeMu.Lock()
+	m.hidePanelLocked(panel)
+	m.treeMu.Unlock()
+
+	m.treeMu.RLock()
+	before := m.focused
+	m.treeMu.RUnlock()
+	if before == panel {
+		t.Fatal("hiding the pane left focus on it, so this test cannot tell a refusal from a no-op")
+	}
+
+	_, err := m.sockFocus(sockMsg{Type: "focus", Pane: 1.0})
+	if err == nil {
+		t.Fatal("focus accepted a hidden pane: every keystroke now goes to a pane that is not in the tree, is never painted and has no PTY")
+	}
+	if got := verbErrCode(err); got != sockCodePaneHidden {
+		t.Errorf("focus on a hidden pane replied code %q, want %q (err: %v)",
+			got, sockCodePaneHidden, err)
+	}
+
+	m.treeMu.RLock()
+	after := m.focused
+	m.treeMu.RUnlock()
+	if after == panel {
+		t.Fatal("the refusal still moved focus onto the hidden pane")
+	}
+	if after != before {
+		t.Errorf("a refused focus moved the keyboard anyway: %v -> %v", before, after)
+	}
+}
+
+// ── routes ──────────────────────────────────────────────────────────────────
+
+// TestBadPaneIDsOpenNoRoute — a request magmux refuses must not leave a route
+// behind.
+//
+// recordRequest opens a route for any pane >= 0, so recording before
+// paneForMsg validates manufactures a permanent route to a pane that does not
+// exist. Two consequences, and the second is the one that bites: 32 of them
+// exhaust ctrlMaxRoutes so real panes stop getting table rows, and ONE of them
+// is enough to make targetPane see two routes where there is one — after which
+// a pilot that had always sent pane-less instructions is refused with "send
+// needs a pane" for the rest of the run, because somebody typo'd a pane id once.
+func TestBadPaneIDsOpenNoRoute(t *testing.T) {
+	m := newTestMux(t, ctrlPanes(2)...)
+
+	// One real route, the way a controller opens one: by touching a pane.
+	if _, err := m.sockCapture(sockMsg{Type: "capture", Pane: 0.0}); err != nil {
+		t.Fatalf("capture of a live pane failed: %v", err)
+	}
+
+	// Now the typos. Every one of these is refused, so none of them is a pane
+	// this controller has touched.
+	if _, err := m.sockCapture(sockMsg{Type: "capture", Pane: 99.0}); err == nil {
+		t.Fatal("capture of pane 99 succeeded")
+	}
+	if _, err := m.sockTranscript(sockMsg{Type: "transcript", Pane: 98.0}); err == nil {
+		t.Fatal("transcript of pane 98 succeeded")
+	}
+	if _, err := m.sockClosePane(sockMsg{Type: "close_pane", Pane: 97.0}); err == nil {
+		t.Fatal("close_pane of pane 97 succeeded")
+	}
+
+	m.control.mu.Lock()
+	order := append([]int(nil), m.control.routeOrder...)
+	m.control.mu.Unlock()
+	if len(order) != 1 || order[0] != 0 {
+		t.Errorf("routes after three refused requests = %v, want [0]: a refused request "+
+			"names no pane the controller has touched", order)
+	}
+
+	// The user-visible consequence, asserted directly: a pilot driving one
+	// session must still be able to send without naming it.
+	pane, err := m.control.targetPane()
+	if err != nil {
+		t.Fatalf("a pane-less send was refused after a typo'd pane id: %v", err)
+	}
+	if pane != 0 {
+		t.Errorf("targetPane() = %d, want 0", pane)
+	}
+
+	// The mistake is still visible in the panel — it is a controller request
+	// that arrived on the socket, so it belongs in the stream. What it must not
+	// have is a route.
+	m.control.mu.Lock()
+	defer m.control.mu.Unlock()
+	refused := 0
+	for _, sig := range m.control.signals {
+		if sig.ok != nil && !*sig.ok && sig.code == sockCodeNoSuchPane {
+			refused++
+		}
+	}
+	if refused != 3 {
+		t.Errorf("%d refusals reached the stream, want 3: a request the controller got "+
+			"wrong is exactly what the panel exists to show", refused)
+	}
+}
