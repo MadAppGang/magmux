@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -56,6 +58,52 @@ func magmuxBinForTest(t *testing.T) string {
 		t.Fatalf("build magmux: %v\n%s", err, out)
 	}
 	return bin
+}
+
+// TestParsePaneIndexRejectsGarbage guards the fix for a silent mis-target:
+// parsePaneIndex used fmt.Sscanf and dropped its error, so any unparseable
+// `pane` left the index at its zero value and the message was applied to
+// PANE 0 — a real session, chosen by accident, with nothing logged.
+//
+// The second half is the part that actually matters to a caller: the sentinel
+// is worth nothing unless the dispatch path drops it, so a tint aimed at
+// "api" must leave pane 0 alone.
+func TestParsePaneIndexRejectsGarbage(t *testing.T) {
+	m := &Magmux{}
+	cases := []struct {
+		in   any
+		want int
+		why  string
+	}{
+		{"abc", paneInvalid, "a label is not an index"},
+		{"", paneInvalid, "an empty string was given, so it is not 'unspecified'"},
+		{"1x", paneInvalid, "Sscanf would have taken the leading 1"},
+		{"  ", paneInvalid, "whitespace is not a number"},
+		{"-", paneInvalid, "a bare sign is not a number"},
+		{"*", paneAll, "the documented fan-out"},
+		{"3", 3, "a numeric string is a valid index"},
+		{" 4 ", 4, "surrounding whitespace is tolerated"},
+		{float64(3), 3, "JSON numbers decode as float64"},
+		{nil, paneUnspecified, "an absent field means 'the pane I announced'"},
+	}
+	for _, c := range cases {
+		if got := m.parsePaneIndex(c.in); got != c.want {
+			t.Errorf("parsePaneIndex(%#v) = %d, want %d (%s)", c.in, got, c.want, c.why)
+		}
+	}
+
+	m = newTestMux(t, PaneConfig{Control: true}, PaneConfig{Control: true})
+	m.dispatchSocketMsg(sockMsg{Type: "tint", Pane: "api", Color: "red"})
+	for i, p := range m.livePanes() {
+		if p.tint != "" {
+			t.Fatalf("tint for pane %q landed on pane %d; an unparseable pane must be dropped", "api", i)
+		}
+	}
+	m.dispatchSocketMsg(sockMsg{Type: "tint", Pane: float64(1), Color: "red"})
+	if m.paneByID(1).tint != "red" || m.paneByID(0).tint != "" {
+		t.Fatalf("tint for pane 1 gave tints %q / %q; want \"\" / \"red\"",
+			m.paneByID(0).tint, m.paneByID(1).tint)
+	}
 }
 
 // TestAutoExitNonTUIPane is a regression test for issue #1:
@@ -371,6 +419,304 @@ func TestSocketResultsDeliveredAtAnyConnectTime(t *testing.T) {
 	}
 }
 
+// TestSocketReaderAcceptsLargeLine is the regression guard for the socket
+// reader's missing scanner.Buffer.
+//
+// bufio.Scanner's default 64KB token limit does not skip an oversized line: it
+// makes Scan return false, which ends handleSocketConn and closes the
+// connection. So one long message cost a client everything — no further verbs
+// dispatched, no further broadcasts, no error on either side. The line here is
+// 256KB (over the old limit, well under the 4MB one) and the connection has to
+// survive it: the `send` written afterwards must still reach the pane's PTY,
+// and the stream must still run to `results` rather than EOF on the spot.
+func TestSocketReaderAcceptsLargeLine(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("PTY/socket test requires darwin or linux")
+	}
+
+	binPath := magmuxBinForTest(t)
+
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Fatalf("openPTY: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	// Without a window size every pane screen is zero rows and the exit
+	// event's lastLine is empty whatever the pane printed.
+	setWinSize(master, 24, 100)
+
+	// Deliberately NOT -w, for the same reason TestSocketIDFlagBindsNamedSocket
+	// is not: `exit` is a live broadcast from waitForChild's own goroutine and,
+	// unlike `results`, is never replayed to a connection. Under -w that
+	// goroutine races the teardown -w triggers — the read loop sets `dead`, the
+	// render loop closes m.quit, and the socket server can broadcast results
+	// and close every subscriber before cmd.Wait has returned — so the event
+	// this test reads its answer out of is simply gone, roughly one run in
+	// twenty-five. Quitting by hand once the event has landed removes the race
+	// without weakening the assertion: the send still has to have reached the
+	// pane's PTY, and the stream still has to run to `results`.
+	cmd := exec.Command(binPath, "-e", `head -n 1 | sed s/^/GOT:/; sleep 1`)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start magmux: %v", err)
+	}
+	killed := false
+	defer func() {
+		if !killed {
+			_ = cmd.Process.Signal(syscall.SIGKILL)
+			_, _ = cmd.Process.Wait()
+		}
+	}()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := master.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	sockPath := fmt.Sprintf("/tmp/magmux-%d.sock", cmd.Process.Pid)
+	var conn net.Conn
+	for i := 0; i < 40; i++ {
+		conn, err = net.Dial("unix", sockPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatalf("could not connect to magmux socket %s: %v", sockPath, err)
+	}
+	defer conn.Close()
+
+	write := func(v any) error {
+		b, _ := json.Marshal(v)
+		_, err := conn.Write(append(b, '\n'))
+		return err
+	}
+
+	// The oversized line. A valid, harmless message — the size is the point.
+	big := strings.Repeat("x", 256*1024)
+	if err := write(map[string]any{"type": "status", "text": big}); err != nil {
+		// magmux closes the connection the moment the scanner overflows, so
+		// without the fix the write breaks part-way through this very line.
+		t.Fatalf("writing the 256KB line: %v — the reader dropped the client mid-line "+
+			"instead of skipping the message", err)
+	}
+
+	// Give the pane a moment to reach its `read`, then prove the connection is
+	// still being served by driving it.
+	time.Sleep(400 * time.Millisecond)
+	const payload = "after-big-line"
+	if err := write(map[string]any{"type": "send", "pane": 0, "text": payload}); err != nil {
+		t.Fatalf("the connection was already gone after the 256KB line (%v): "+
+			"an oversized line must skip a message, not drop the client", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+
+	var (
+		echoed     bool
+		gotResults bool
+		lastLines  []string
+		allLines   []string
+		quitSent   bool
+	)
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		allLines = append(allLines, scanner.Text())
+		var ev map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			continue
+		}
+		switch ev["type"] {
+		case "exit":
+			s, _ := ev["lastLine"].(string)
+			lastLines = append(lastLines, s)
+			if strings.Contains(s, "GOT:"+payload) {
+				echoed = true
+			}
+			if !quitSent {
+				// magmux's own quit chord, so the run still ends through the
+				// normal teardown that broadcasts results.
+				quitSent = true
+				if _, err := master.Write([]byte{0x07, 'q'}); err != nil {
+					t.Fatalf("write quit chord to the PTY: %v", err)
+				}
+			}
+		case "results":
+			gotResults = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("socket read error before EOF: %v", err)
+	}
+
+	if len(lastLines) == 0 {
+		t.Fatalf("no exit event reached this subscriber, so the pane's output could not be read at all; whole stream was:\n%s",
+			strings.Join(allLines, "\n"))
+	}
+	if !echoed {
+		t.Errorf("the send after a 256KB line never reached the pane: want an exit lastLine containing %q, got %q "+
+			"(the oversized line dropped the whole connection)", "GOT:"+payload, lastLines)
+	}
+	if !gotResults {
+		t.Error("no results event: the connection died on the oversized line instead of skipping past it")
+	}
+
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("magmux exited with error: %v", err)
+	}
+	killed = true
+}
+
+// TestSocketIDFlagBindsNamedSocket covers --id: the socket path becomes
+// /tmp/magmux-<name>.sock, which is what lets a caller know where to dial
+// before magmux has started rather than having to find its pid. The pid
+// default is not exercised here because every other socket test in the package
+// depends on it byte-for-byte.
+//
+// The child's own MAGMUX_SOCK is the assertion that matters — a named socket
+// that panes cannot see would be a half-implemented flag.
+func TestSocketIDFlagBindsNamedSocket(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("PTY/socket test requires darwin or linux")
+	}
+
+	binPath := magmuxBinForTest(t)
+
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Fatalf("openPTY: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	setWinSize(master, 24, 100)
+
+	name := fmt.Sprintf("test%d", time.Now().UnixNano())
+	sockPath := "/tmp/magmux-" + name + ".sock"
+	defer os.Remove(sockPath)
+
+	// Deliberately NOT -w. `exit` is a live broadcast: unlike `results` it is
+	// never replayed to a connection that arrives late, and it is produced by
+	// waitForChild on its own goroutine. Under -w that goroutine races the
+	// teardown that -w triggers — the pane's read loop sets `dead`, the render
+	// loop sees it and closes m.quit, and the socket server can broadcast
+	// results and close every subscriber before cmd.Wait has even returned. The
+	// event is then simply gone and the test fails against a magmux that
+	// worked. Quitting by hand once the event has arrived removes the race
+	// entirely.
+	cmd := exec.Command(binPath, "--id", name, "-e", `printenv MAGMUX_SOCK; sleep 1`)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start magmux: %v", err)
+	}
+	killed := false
+	defer func() {
+		if !killed {
+			_ = cmd.Process.Signal(syscall.SIGKILL)
+			_, _ = cmd.Process.Wait()
+		}
+	}()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := master.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	var conn net.Conn
+	for i := 0; i < 40; i++ {
+		conn, err = net.Dial("unix", sockPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatalf("could not connect to the named socket %s: %v", sockPath, err)
+	}
+	defer conn.Close()
+
+	// The pid path must not also have been bound: --id replaces it, it does
+	// not add to it.
+	pidPath := fmt.Sprintf("/tmp/magmux-%d.sock", cmd.Process.Pid)
+	if _, err := os.Stat(pidPath); err == nil {
+		t.Errorf("%s exists as well as %s; --id must replace the pid socket, not add one", pidPath, sockPath)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	var (
+		childSock  string
+		gotResults bool
+		exits      []string // every exit lastLine, for the failure message
+		allLines   []string
+		quitSent   bool
+	)
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		allLines = append(allLines, scanner.Text())
+		var ev map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			continue
+		}
+		switch ev["type"] {
+		case "exit":
+			s, _ := ev["lastLine"].(string)
+			exits = append(exits, fmt.Sprintf("pane %v exit %v lastLine=%q", ev["pane"], ev["exitCode"], s))
+			if strings.Contains(s, "magmux-") {
+				childSock = strings.TrimSpace(s)
+			}
+			if !quitSent {
+				// magmux's own quit chord, so the run ends through the normal
+				// teardown that broadcasts results and unlinks the socket.
+				quitSent = true
+				if _, err := master.Write([]byte{0x07, 'q'}); err != nil {
+					t.Fatalf("write quit chord to the PTY: %v", err)
+				}
+			}
+		case "results":
+			gotResults = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("socket read error before EOF: %v", err)
+	}
+
+	if len(exits) == 0 {
+		t.Fatalf("no exit event reached this subscriber; whole stream was:\n%s", strings.Join(allLines, "\n"))
+	}
+	if childSock != sockPath {
+		// The exit events are printed because the two ways this fails look
+		// identical otherwise: the child genuinely saw an empty MAGMUX_SOCK,
+		// or its output had not been parsed off the PTY when it exited.
+		t.Errorf("child saw MAGMUX_SOCK=%q, want %q; exit events were %v", childSock, sockPath, exits)
+	}
+	if !gotResults {
+		t.Fatal("no results event — magmux did not shut down cleanly")
+	}
+
+	// Wait for the process so the teardown that unlinks the socket has
+	// actually finished before we look for the file.
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("magmux exited with error: %v", err)
+	}
+	killed = true
+	if _, err := os.Stat(sockPath); err == nil {
+		t.Errorf("%s survived shutdown; the named socket must be unlinked like the pid one", sockPath)
+	}
+}
+
 // TestControllerSnapshotReachesAwaitingInput is the regression test for
 // issue #2: a pane with an attached controller broadcast exactly one
 // snapshot — state "starting" — and never another, even once the child was
@@ -474,5 +820,537 @@ func TestControllerSnapshotReachesAwaitingInput(t *testing.T) {
 	}
 	if !sawAwaitingInput {
 		t.Fatalf("live snapshot never reached awaiting_input (regression: issue #2); states seen: %v", states)
+	}
+}
+
+// ── OSC colour queries ────────────────────────────────────────────────────────
+//
+// The bug these cover: Claude Code rendered as a completely blank pane inside
+// magmux and rendered perfectly in tmux. It is not a drawing bug. Theme-aware
+// TUIs ask the terminal what colour its background is (OSC 11) before choosing
+// a light or a dark theme, and they BLOCK on the answer. magmux answered DA1,
+// DA2 and DSR but no OSC query at all, so the question went into a void and the
+// application never got as far as its first frame.
+
+// queryPane returns a PTY-less pane whose writePTY output the caller can read,
+// plus that read end. A pipe rather than a real PTY because the assertion is on
+// the exact bytes magmux sends back, and a PTY's line discipline is free to
+// rewrite them.
+func queryPane(t *testing.T) (*Pane, *os.File) {
+	t.Helper()
+	p := newControlPane(0, 0, 6, 40, "query")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	p.ptmx = w
+	t.Cleanup(func() { r.Close(); w.Close() })
+	return p, r
+}
+
+// readReply returns whatever the pane wrote back, or "" if it wrote nothing
+// within the deadline. "Nothing" is an expected outcome — a colour SET must not
+// be answered — so this must not be fatal.
+func readReply(t *testing.T, r *os.File) string {
+	t.Helper()
+	return readReplyWithin(t, r, 2*time.Second)
+}
+
+// readReplyWithin is readReply with the wait named, so the cases that expect
+// silence do not each pay the generous deadline the answered cases get. The
+// parser answers inside vt.write, synchronously, so anything it was going to
+// send is already in the pipe by the time this is called.
+func readReplyWithin(t *testing.T, r *os.File, d time.Duration) string {
+	t.Helper()
+	if err := r.SetReadDeadline(time.Now().Add(d)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	buf := make([]byte, 256)
+	n, err := r.Read(buf)
+	if n == 0 {
+		if err != nil && !os.IsTimeout(err) {
+			t.Fatalf("read reply: %v", err)
+		}
+		return ""
+	}
+	return string(buf[:n])
+}
+
+// TestOSCBackgroundQueryIsAnswered is the bug stated as an assertion: a child
+// that asks what colour the terminal is gets an answer, terminated the way it
+// asked.
+func TestOSCBackgroundQueryIsAnswered(t *testing.T) {
+	defer useTheme(themeDark)()
+
+	cases := []struct{ name, query, want string }{
+		{"background, BEL", "\x1b]11;?\x07", "\x1b]11;rgb:1e1e/1e1e/2e2e\x07"},
+		{"background, ST", "\x1b]11;?\x1b\\", "\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\"},
+		{"foreground, BEL", "\x1b]10;?\x07", "\x1b]10;rgb:cdcd/d6d6/f4f4\x07"},
+		{"foreground, ST", "\x1b]10;?\x1b\\", "\x1b]10;rgb:cdcd/d6d6/f4f4\x1b\\"},
+		// Cursor colour: xterm's default cursor is the foreground, and it is the
+		// only answer certain to be visible against the background just reported.
+		{"cursor, BEL", "\x1b]12;?\x07", "\x1b]12;rgb:cdcd/d6d6/f4f4\x07"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, r := queryPane(t)
+			p.vt.write([]byte(c.query))
+			got := readReply(t, r)
+			if got == "" {
+				t.Fatalf("query %q got no reply at all — this is the bug: a theme-aware "+
+					"TUI blocks here and never draws its first frame", c.query)
+			}
+			if got != c.want {
+				t.Fatalf("query %q\n got %q\nwant %q", c.query, got, c.want)
+			}
+		})
+	}
+}
+
+// TestOSCColorReplyEchoesTheQueryTerminator states the terminator rule on its
+// own, because getting it wrong is silent: the application unblocks, and then
+// finds a stray BEL or a stray ESC \ in its input.
+func TestOSCColorReplyEchoesTheQueryTerminator(t *testing.T) {
+	defer useTheme(themeDark)()
+
+	for _, term := range []string{"\x07", "\x1b\\"} {
+		p, r := queryPane(t)
+		p.vt.write([]byte("\x1b]11;?" + term))
+		got := readReply(t, r)
+		if !strings.HasSuffix(got, term) {
+			t.Errorf("a query terminated with %q was answered %q; the reply must end the "+
+				"same way the question did", term, got)
+		}
+		// And exactly once: a BEL reply must not also carry an ST.
+		if strings.Count(got, "\x07")+strings.Count(got, "\x1b\\") != 1 {
+			t.Errorf("reply %q carries more than one terminator", got)
+		}
+	}
+}
+
+// TestOSCColorSetIsNotAnswered guards the other half of the contract. "?" is
+// the whole difference between a question and a statement: `OSC 11;rgb:...` is
+// a child SETTING the background, and replying to it puts bytes into the input
+// of a program that is not reading any.
+func TestOSCColorSetIsNotAnswered(t *testing.T) {
+	defer useTheme(themeDark)()
+
+	for _, set := range []string{
+		"\x1b]11;rgb:1111/2222/3333\x07",
+		"\x1b]11;#ff0000\x07",
+		"\x1b]10;#000000\x1b\\",
+		"\x1b]12;red\x07",
+		"\x1b]4;1;?\x07", // a palette-entry query, which magmux does not serve
+		"\x1b]110;?\x07", // reset-foreground, not a query for 10
+		"\x1b]11;\x07",   // truncated: no argument at all
+		"\x1b]11;??\x07", // not a well-formed query
+		"\x1b]11\x07",    // no argument separator
+	} {
+		p, r := queryPane(t)
+		p.vt.write([]byte(set))
+		if got := readReplyWithin(t, r, 200*time.Millisecond); got != "" {
+			t.Errorf("%q was answered %q; only the \"?\" query form gets a reply", set, got)
+		}
+	}
+}
+
+// TestOSCColorQuerySurvivesFragmentation covers the two ways a query reaches
+// the parser in pieces, since a PTY read boundary falls anywhere: split across
+// writes, and preceded by a query that was never terminated.
+func TestOSCColorQuerySurvivesFragmentation(t *testing.T) {
+	defer useTheme(themeDark)()
+	const want = "\x1b]11;rgb:1e1e/1e1e/2e2e\x07"
+
+	t.Run("split across writes", func(t *testing.T) {
+		p, r := queryPane(t)
+		for _, frag := range []string{"\x1b", "]1", "1;", "?", "\x07"} {
+			p.vt.write([]byte(frag))
+		}
+		if got := readReply(t, r); got != want {
+			t.Fatalf("fragmented query got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("after an abandoned query", func(t *testing.T) {
+		p, r := queryPane(t)
+		// An OSC that never terminates, cancelled by CAN: the parser must not be
+		// left in the OSC state, and must still answer what comes next.
+		p.vt.write([]byte("\x1b]11;\x18hello" + "\x1b]11;?\x07"))
+		if got := readReply(t, r); got != want {
+			t.Fatalf("query after an abandoned one got %q — a malformed query wedged the parser", got)
+		}
+	})
+}
+
+// TestOSCColorQueryTracksTheTheme is what makes the answer worth giving. The
+// point of replying is that the child picks a readable theme, so the reported
+// background must be on the same side of the light/dark line as the palette
+// magmux paints its own chrome with.
+func TestOSCColorQueryTracksTheTheme(t *testing.T) {
+	for _, kind := range []themeKind{themeDark, themeLight} {
+		t.Run(kind.String(), func(t *testing.T) {
+			defer useTheme(kind)()
+
+			p, r := queryPane(t)
+			p.vt.write([]byte("\x1b]11;?\x07"))
+			reply := readReply(t, r)
+			body := strings.TrimSuffix(strings.TrimPrefix(reply, "\x1b]11;"), "\x07")
+			c, ok := parseXColor(body)
+			if !ok {
+				t.Fatalf("reply %q is not a colour a terminal client could parse", reply)
+			}
+			// Round-trips: what we sent is exactly the palette's own background.
+			if c != pal.assumedBack {
+				t.Errorf("reported background %+v, want the active palette's %+v", c, pal.assumedBack)
+			}
+			if got, _, _ := classifyOSC11(body); got != kind {
+				t.Errorf("with --theme %s the reported background classifies as %s; a child "+
+					"would pick the opposite theme to the one magmux is drawing", kind, got)
+			}
+		})
+	}
+}
+
+// TestOSCColorQueryPrefersTheProbedBackground: when the startup probe managed
+// to read the real terminal's background, that is what children are told. The
+// palette's assumed background is the fallback, not the answer.
+func TestOSCColorQueryPrefersTheProbedBackground(t *testing.T) {
+	defer useTheme(themeDark)()
+
+	measured := rgb{0x2B, 0x30, 0x3B}
+	setDetectedBackground(measured)
+
+	p, r := queryPane(t)
+	p.vt.write([]byte("\x1b]11;?\x07"))
+	want := "\x1b]11;" + xColorString(measured) + "\x07"
+	if got := readReply(t, r); got != want {
+		t.Fatalf("got %q, want %q — a measured background beats the palette's assumption", got, want)
+	}
+}
+
+// TestOSCBackgroundQueryAnsweredEndToEnd is the bug in the shape the user hit
+// it: a real magmux, a real child in a real PTY, asking the real question.
+//
+// The child puts its tty in raw mode with VMIN=0/VTIME set, so the read is
+// bounded whichever way this goes — pre-fix it reads nothing and prints an
+// empty answer rather than hanging until the test deadline.
+func TestOSCBackgroundQueryAnsweredEndToEnd(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("PTY test requires darwin or linux")
+	}
+
+	binPath := magmuxBinForTest(t)
+
+	// tr strips ESC and BEL so the answer can be printed back as plain text:
+	// echoing the raw reply would be re-parsed as an OSC sequence by magmux and
+	// would never appear on screen.
+	script := filepath.Join(t.TempDir(), "probe.sh")
+	body := "stty raw -echo min 0 time 10\n" +
+		"printf '\\033]11;?\\007'\n" +
+		"reply=$(head -c 64 | tr -d '\\033\\007')\n" +
+		"stty sane\n" +
+		"printf 'PROBE[%s]\\n' \"$reply\"\n" +
+		"sleep 1\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write probe script: %v", err)
+	}
+
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Fatalf("openPTY: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	// Without a size the pane is 0 rows, nothing is ever rendered, and every
+	// assertion below passes vacuously.
+	setWinSize(master, 24, 100)
+
+	// --theme dark fixes the expected answer: no probe of the outer terminal
+	// runs, so the palette's own background is what gets reported.
+	cmd := exec.Command(binPath, "--theme", "dark", "-e", "sh "+script, "-w")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start magmux: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	}()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := master.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	sockPath := fmt.Sprintf("/tmp/magmux-%d.sock", cmd.Process.Pid)
+	var conn net.Conn
+	for i := 0; i < 60; i++ {
+		conn, err = net.Dial("unix", sockPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatalf("could not connect to magmux socket %s: %v", sockPath, err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+
+	var probeLines []string
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		var ev map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			continue
+		}
+		if ev["type"] != "exit" {
+			continue
+		}
+		if s, _ := ev["lastLine"].(string); strings.Contains(s, "PROBE[") {
+			probeLines = append(probeLines, s)
+		}
+	}
+	if len(probeLines) == 0 {
+		t.Fatal("the probe pane produced no PROBE[...] line; the child never got as far as printing")
+	}
+	// ESC was stripped by tr, so a served reply reads as "]11;rgb:...".
+	const want = "]11;rgb:1e1e/1e1e/2e2e"
+	if !strings.Contains(probeLines[0], want) {
+		t.Fatalf("child saw %q, want it to contain %q — an unanswered OSC 11 query is "+
+			"exactly why Claude Code rendered as a blank pane", probeLines[0], want)
+	}
+}
+
+// ── DECSTBM (CSI r) ───────────────────────────────────────────────────────────
+//
+// The bug these cover, and it is THE blank-pane bug: Claude Code's very first
+// escape sequence is a bare `CSI r` — "reset the scrolling region to the whole
+// page". magmux read the omitted bottom parameter with p1, which defaults an
+// omitted parameter to 1, and so set the scrolling region to rows 1..1. The
+// guard meant to catch that (`if bot == 0 { bot = s.rows }`) could never fire,
+// because p1 had already turned the absent 0 into a 1.
+//
+// From there every LF hit `curY == scrollBot-1`, scrolled a one-line region,
+// and blanked it. The application drew its whole UI onto row 0, one line at a
+// time, each line erasing the last. Nothing was ever unanswered and nothing
+// ever hung — magmux was simply told the page was one line tall by its own
+// parameter defaulting, and drew exactly that.
+
+// decstbmPane is a pane with a screen tall enough for a scroll region to be a
+// meaningful thing, and no PTY: these assertions are on cells, not on bytes
+// sent back to a child.
+func decstbmPane(t *testing.T) *Pane {
+	t.Helper()
+	return newControlPane(0, 0, 10, 20, "decstbm")
+}
+
+// TestDECSTBMDefaultsToTheWholePage states the parameter rule on its own. An
+// omitted top is line 1; an omitted (or zero) bottom is the LAST line, not
+// line 1 — that asymmetry is the whole bug.
+func TestDECSTBMDefaultsToTheWholePage(t *testing.T) {
+	cases := []struct {
+		name, seq        string
+		wantTop, wantBot int
+	}{
+		{"bare CSI r — what Claude Code sends first", "\x1b[r", 0, 10},
+		{"explicit zeros", "\x1b[0;0r", 0, 10},
+		{"omitted bottom", "\x1b[1;r", 0, 10},
+		{"omitted top", "\x1b[;10r", 0, 10},
+		{"omitted top, zero bottom", "\x1b[;0r", 0, 10},
+		{"a real region", "\x1b[2;8r", 1, 8},
+		{"bottom past the page is clamped", "\x1b[1;99r", 0, 10},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := decstbmPane(t)
+			p.vt.write([]byte(c.seq))
+			s := p.screen
+			if s.scrollTop != c.wantTop || s.scrollBot != c.wantBot {
+				t.Fatalf("%q set the scroll region to [%d,%d), want [%d,%d) on a %d-row page",
+					c.seq, s.scrollTop, s.scrollBot, c.wantTop, c.wantBot, s.rows)
+			}
+		})
+	}
+}
+
+// TestDECSTBMRejectsAnInvertedOrDegenerateRegion is the other half: a
+// scrolling region must be at least two lines, and a bottom above the top is
+// nonsense. Neither may be honoured, because both reintroduce the one-line
+// region that blanked the screen — and neither may wedge the parser.
+func TestDECSTBMRejectsAnInvertedOrDegenerateRegion(t *testing.T) {
+	for _, seq := range []string{
+		"\x1b[5;5r",  // one line tall
+		"\x1b[8;2r",  // inverted
+		"\x1b[99;2r", // top past the page
+		"\x1b[3;3r",
+	} {
+		p := decstbmPane(t)
+		p.vt.write([]byte("\x1b[2;9r")) // a valid region first, to prove it survives
+		p.vt.write([]byte(seq))
+		s := p.screen
+		if s.scrollBot-s.scrollTop < 2 {
+			t.Errorf("%q left a %d-line scroll region [%d,%d) — a region that short means "+
+				"every newline scrolls in place and the screen goes blank",
+				seq, s.scrollBot-s.scrollTop, s.scrollTop, s.scrollBot)
+		}
+		if s.scrollTop != 1 || s.scrollBot != 9 {
+			t.Errorf("%q was honoured (region now [%d,%d)); an invalid DECSTBM must leave "+
+				"the previous region [1,9) alone", seq, s.scrollTop, s.scrollBot)
+		}
+	}
+}
+
+// TestOutputAfterBareDECSTBMFillsThePage is the bug as a user sees it, and the
+// one that fails loudest before the fix: three printed lines end up on three
+// rows, not stacked on top of each other on row 0.
+func TestOutputAfterBareDECSTBMFillsThePage(t *testing.T) {
+	p := decstbmPane(t)
+	p.vt.write([]byte("\x1b[r"))
+	p.vt.write([]byte("alpha\r\nbravo\r\ncharlie"))
+
+	shot := p.capture(0, true)
+	want := "alpha\nbravo\ncharlie"
+	if shot.Text != want {
+		t.Fatalf("after a bare CSI r the pane reads:\n%q\nwant:\n%q\n"+
+			"(all three lines landing on one row is the blank-Claude-Code bug: the "+
+			"scroll region was set to a single line and every LF erased the last)",
+			shot.Text, want)
+	}
+	if shot.CurY != 2 {
+		t.Fatalf("cursor is on row %d after two newlines, want row 2 — the cursor never "+
+			"leaving row 0 is what pins every frame on top of the previous one", shot.CurY)
+	}
+}
+
+// TestClaudeCodeOpeningSequenceRendersEndToEnd runs the real prologue Claude
+// Code emits — the exact escape sequences captured from a live session, in
+// order — through a real magmux process over a PTY, and asks magmux itself what
+// the pane looks like. Before the fix `text` came back holding one line.
+func TestClaudeCodeOpeningSequenceRendersEndToEnd(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("PTY test requires darwin or linux")
+	}
+
+	binPath := magmuxBinForTest(t)
+
+	// The prologue, verbatim: DECSTBM reset, cursor show/hide, bracketed paste,
+	// focus events, mode 2031, keyboard-protocol push/pop, then three lines of
+	// UI. Only the first sequence matters; the rest are here so the test breaks
+	// if any of them start eating the page too.
+	script := filepath.Join(t.TempDir(), "prologue.sh")
+	body := "printf '\\033[r\\033[?25h\\033[?25l\\033[?2004h\\033[?1004h\\033[?2031h\\033[<u\\033[>1u'\n" +
+		"printf 'ROW-ONE\\r\\nROW-TWO\\r\\nROW-THREE\\r\\n'\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write prologue script: %v", err)
+	}
+
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Fatalf("openPTY: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	// Without a size the pane is 0 rows and every assertion below is vacuous.
+	setWinSize(master, 24, 100)
+
+	sockID := fmt.Sprintf("decstbm-%d", os.Getpid())
+	sockPath := "/tmp/magmux-" + sockID + ".sock"
+	t.Cleanup(func() { os.Remove(sockPath) })
+
+	cmd := exec.Command(binPath, "--id", sockID, "--theme", "dark", "-e", "sh "+script)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start magmux: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	}()
+
+	// magmux's own rendering has to be drained or it blocks on a full PTY, and
+	// it is also the only place a startup error would appear — so keep it.
+	var screenMu sync.Mutex
+	var screen []byte
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := master.Read(buf)
+			if n > 0 {
+				screenMu.Lock()
+				screen = append(screen, buf[:n]...)
+				screenMu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	var text string
+	var lastErr error
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.Dial("unix", sockPath)
+		if err != nil {
+			lastErr = err
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		// `id` is what makes a request answerable — without it the verb runs and
+		// the reply is never sent, and the read below would sit until the
+		// deadline having proved nothing.
+		_, _ = conn.Write([]byte(`{"type":"capture","pane":"0","id":1}` + "\n"))
+		scanner := bufio.NewScanner(conn)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+		for scanner.Scan() {
+			var ev struct {
+				Type   string `json:"type"`
+				Result struct {
+					Text string `json:"text"`
+				} `json:"result"`
+			}
+			if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+				continue
+			}
+			if ev.Type == "reply" {
+				text = ev.Result.Text
+				break // the connection stays open; nothing further is coming
+			}
+		}
+		lastErr = scanner.Err()
+		conn.Close()
+		if strings.Contains(text, "ROW-THREE") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if text == "" {
+		screenMu.Lock()
+		out := string(screen)
+		screenMu.Unlock()
+		t.Fatalf("the pane captured completely blank — this IS the reported bug, verbatim "+
+			"(last socket error: %v). magmux wrote:\n%q", lastErr, out)
+	}
+
+	for _, want := range []string{"ROW-ONE", "ROW-TWO", "ROW-THREE"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("pane capture is missing %q; it reads:\n%q\n"+
+				"Every line overwriting the one before it on row 0 is the blank pane: "+
+				"the bare CSI r that opens Claude Code's output set the scroll region "+
+				"to a single line", want, text)
+		}
+	}
+	if lines := strings.Split(text, "\n"); len(lines) < 3 {
+		t.Fatalf("pane capture has %d line(s), want at least 3:\n%q", len(lines), text)
 	}
 }

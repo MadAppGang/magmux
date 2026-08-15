@@ -128,21 +128,42 @@ func (p *Pane) pasteWrap(text string) []byte {
 	return []byte(text)
 }
 
-// sendToPane delivers a pilot instruction: optional text, then optional named
-// keys, then optionally Enter. Runs on its own goroutine because of the
-// inter-write delay — the socket reader must not block on a slow pane.
-func (m *Magmux) sendToPane(idx int, text string, keys []string, enter bool, label string) {
-	if idx < 0 || idx >= len(m.allPanes) {
-		return
+// sendToPane delivers a driver instruction: optional text, then optional named
+// keys, then optionally Enter. The writes run on their own goroutine because of
+// the inter-write delay — the socket reader must not block on a slow pane.
+//
+// done, if non-nil, is called on that delivery goroutine once every write has
+// been attempted: nil on success, a *sockErr otherwise. It is the only way a
+// caller can learn that the bytes never reached the PTY, a failure that until
+// now lived and died inside this goroutine. Note what it does and does not
+// claim: the bytes were written, not that the TUI on the far end accepted them
+// — an app that is not ready for a paste can still drop it, which is what
+// pilotSendDelay exists to make unlikely.
+//
+// Synchronous validation errors (a bad index, the control pane) are returned
+// directly and done is NOT called, so a caller waiting on a reply gets exactly
+// one answer by exactly one route.
+//
+// Caller must NOT hold p.mu.
+func (m *Magmux) sendToPane(idx int, text string, keys []string, enter bool, label string, done func(error)) error {
+	// Resolved through the identity table, never by raw index: after a
+	// close_pane the ids are sparse, and a bounds check alone would happily
+	// type an instruction into a pane that is no longer on screen.
+	p := m.paneByID(idx)
+	if p == nil {
+		return sockErrf(sockCodeNoSuchPane, "no pane %d (it may have been closed)", idx)
 	}
-	p := m.allPanes[idx]
 	if p.isControl {
-		return // the panel is not a session; nothing to type into
+		// the panel is not a session; nothing to type into
+		return sockErrf(sockCodePaneIsControl, "pane %d is the control panel and has no session to type into", idx)
 	}
 
 	// Log before delivery so the panel shows the instruction even if the
 	// pane rejects it — a send that vanished is exactly what you want to see.
-	m.control.recordSend(idx, label, text)
+	// The seq is how magmux's own ack finds this OUT row again; the ack is a
+	// continuation of the request, never a row of its own, and never closes a
+	// turn.
+	seq := m.control.recordSend(idx, label, text)
 	ev := map[string]any{
 		"type":  "control",
 		"dir":   "out",
@@ -165,8 +186,29 @@ func (m *Magmux) sendToPane(idx int, text string, keys []string, enter bool, lab
 	}
 
 	go func() {
+		// A rejected write means the pane cannot take input at all — its child
+		// exited or its PTY is closed — so the instruction is gone and there is
+		// no point pressing on. A bad key name is the caller's mistake in one
+		// keystroke: the rest is still delivered, as it always was, and the
+		// first such error is what the reply reports.
+		dead := func(what string) error {
+			return sockErrf(sockCodePaneDead,
+				"pane %d rejected the %s: its child has exited or its PTY is closed", idx, what)
+		}
+		var firstErr error
+		finish := func(err error) {
+			// The panel learns the outcome whether or not anyone asked for a
+			// reply: a fire-and-forget send that never reached the PTY is
+			// exactly the failure an operator needs to see.
+			m.control.recordAck(seq, err == nil, verbErrCode(err), ackText(text, keys, enter, err))
+			if done != nil {
+				done(err)
+			}
+		}
+
 		if text != "" {
 			if !p.injectPTY(p.pasteWrap(text)) {
+				finish(dead("text"))
 				return
 			}
 		}
@@ -176,17 +218,49 @@ func (m *Magmux) sendToPane(idx int, text string, keys []string, enter bool, lab
 				if dbgFile != nil {
 					fmt.Fprintf(dbgFile, "[pilot] unknown key %q\n", k)
 				}
+				if firstErr == nil {
+					firstErr = sockErrf(sockCodeBadRequest, "unknown key %q", k)
+				}
 				continue
 			}
 			time.Sleep(20 * time.Millisecond)
-			p.injectPTY(b)
+			if !p.injectPTY(b) && firstErr == nil {
+				firstErr = dead("key " + k)
+			}
 		}
 		if enter {
 			// Let the TUI settle on the text before submitting it.
 			time.Sleep(pilotSendDelay)
-			p.injectPTY([]byte("\r"))
+			if !p.injectPTY([]byte("\r")) && firstErr == nil {
+				firstErr = dead("enter")
+			}
 		}
+		finish(firstErr)
 	}()
+	return nil
+}
+
+// ackText summarises what magmux did with a send, for the ⇦ continuation on
+// the panel's OUT row. It describes the delivery, not the session's reaction:
+// "the bytes reached the PTY" is all an ack can honestly claim.
+func ackText(text string, keys []string, enter bool, err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	var parts []string
+	if n := len(text); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d bytes", n))
+	}
+	if n := len(keys); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d keys", n))
+	}
+	if enter {
+		parts = append(parts, "enter")
+	}
+	if len(parts) == 0 {
+		return "nothing to send"
+	}
+	return strings.Join(parts, " + ")
 }
 
 // consumeControlKey handles a keystroke aimed at the control panel, which has
@@ -200,7 +274,13 @@ func (m *Magmux) consumeControlKey(buf []byte) int {
 	if len(buf) == 0 {
 		return 0
 	}
-	page := maxInt(1, m.focused.h-6)
+	f := m.focusedPane()
+	if f == nil {
+		return 0
+	}
+	m.treeMu.RLock()
+	page := maxInt(1, f.h-6)
+	m.treeMu.RUnlock()
 	switch buf[0] {
 	case 'k':
 		m.control.scrollBy(1)
@@ -216,6 +296,25 @@ func (m *Magmux) consumeControlKey(buf []byte) int {
 		return 1
 	case ' ':
 		m.control.scrollBy(-page)
+		return 1
+	case '[':
+		m.control.cycleFilter(-1)
+		return 1
+	case ']':
+		m.control.cycleFilter(1)
+		return 1
+	}
+	// Digits filter the panel to one PANE INDEX — deliberately the pane's own
+	// number and not the Nth route, because a second numbering beside the ids
+	// every other verb uses would be a bug factory. They cost nothing to claim:
+	// this handler only runs when the focused pane isControl, and that pane has
+	// no PTY, so a digit is silently dropped today.
+	if buf[0] >= '0' && buf[0] <= '9' {
+		if buf[0] == '0' {
+			m.control.setFilter(-1)
+		} else {
+			m.control.setFilter(int(buf[0] - '0'))
+		}
 		return 1
 	}
 	if buf[0] != 0x1b || len(buf) < 3 || buf[1] != '[' {
@@ -252,18 +351,47 @@ func (m *Magmux) consumeControlKey(buf []byte) int {
 // dispatchPilotMsg handles the socket verbs a pilot uses to announce itself
 // and to close out a run. Kept separate from dispatchSocketMsg's display
 // verbs because these describe the *session*, not a pane's appearance.
-func (m *Magmux) dispatchPilotMsg(msg sockMsg) {
+func (m *Magmux) dispatchPilotMsg(msg sockMsg) error {
 	switch msg.Event {
 	case "start", "":
+		// A named pane and an absent one mean genuinely different things, and
+		// collapsing the second into pane 0 was a bug.
+		//
+		// NAMED (`"pane":0`, the pi pilot's shape) is a run start against that
+		// pane: the route opens here, and that pane is what every later
+		// pane-less `send` is delivered to. A pane that was *given* and is not
+		// an index ("*", "api") is refused rather than rounded down — silently
+		// retargeting the announced pane mis-routes the entire run.
+		//
+		// ABSENT identifies the CONTROLLER, not a route: MCP announces its
+		// `client` once per attached session, before it has touched anything.
+		// A route is created the first time the controller touches a pane, and
+		// an identity announcement touches none — so mapping absent to 0 put a
+		// pane nothing had driven into the ledger at 0/0, and made a controller
+		// that then drove panes 1 and 2 look as though an instruction to pane 0
+		// had been dropped. recordStart takes paneUnspecified verbatim and
+		// writes header state only.
 		pane := m.parsePaneIndex(msg.Pane)
-		if pane < 0 {
-			pane = 0
+		if pane != paneUnspecified && pane < 0 {
+			return sockErrf(sockCodeBadRequest, "pane is not an index")
 		}
-		m.control.recordStart(pane, msg.Goal, msg.Model, msg.Steps)
-		m.broadcastEvent(map[string]any{
+		// `client` is the ONE field MCP adds to this protocol: an identity for
+		// the header ("claude-code/2.1"). Everything else is the same event the
+		// pi pilot has always sent, which is what keeps the promise that
+		// anything speaking these verbs fills the panel in.
+		m.control.recordStart(pane, msg.Goal, msg.Model, msg.Client, msg.Steps)
+		ev := map[string]any{
 			"type": "control", "dir": "note", "event": "start",
-			"pane": pane, "goal": msg.Goal, "model": msg.Model, "steps": msg.Steps,
-		})
+			"goal": msg.Goal, "model": msg.Model, "steps": msg.Steps,
+		}
+		if pane != paneUnspecified {
+			ev["pane"] = pane // omitted, not -3: the event named no route
+		}
+		if msg.Client != "" {
+			ev["client"] = msg.Client // omitted rather than empty for a pilot
+		}
+		m.broadcastEvent(ev)
+		return nil
 	case "finish", "fail":
 		failed := msg.Event == "fail"
 		m.control.recordFinish(msg.Summary, failed)
@@ -271,17 +399,22 @@ func (m *Magmux) dispatchPilotMsg(msg sockMsg) {
 		// only on pilot finish: a run that ends by the session going idle is
 		// not the same as the pilot declaring the task over.
 		if m.autoCloseAfter > 0 {
+			m.treeMu.Lock()
 			m.closeAt = time.Now().Add(m.autoCloseAfter)
+			m.treeMu.Unlock()
 		}
 		m.broadcastEvent(map[string]any{
 			"type": "control", "dir": "note", "event": msg.Event,
 			"summary": msg.Summary, "failed": failed,
 		})
+		return nil
 	case "note":
 		note := msg.Label
 		if msg.Text != "" {
 			note = strings.TrimSpace(note + " " + msg.Text)
 		}
 		m.control.setNote(note, false)
+		return nil
 	}
+	return sockErrf(sockCodeBadRequest, "unknown pilot event %q", msg.Event)
 }

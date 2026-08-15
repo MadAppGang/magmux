@@ -53,6 +53,28 @@ vars:
   # read-only: the obvious first run should not edit anything.
   GOAL: '{{.GOAL | default "Summarize what this repository does and how its main components fit together, in under 10 lines. Do not change any files."}}'
 
+  # ── MCP self-hosting demo ─────────────────────────────────────────────────
+  # Scratch cwd for `mcp:demo`. The host session runs here; the pane it opens
+  # runs one level down in worker/. Two directories rather than one because the
+  # artifact is the whole point: with the work happening somewhere the host
+  # session never cd'd into, "the second pane really did it" stays legible.
+  # They are named up front rather than left to the agent so this file can
+  # print the ground truth afterwards without guessing where to look.
+  MCP_DIR: '{{.GRID_DIR}}/mcp'
+  MCP_WORK: '{{.GRID_DIR}}/mcp/worker'
+  # The --mcp-config file, written fresh each run and pointing at the build
+  # under test. It lives in the scratch dir so the wipe cleans it up too.
+  MCP_CONFIG: '{{.GRID_DIR}}/mcp/mcp.json'
+  # Model for the host session. Empty (the default) means whatever `claude`
+  # would pick on its own; the demo is a two-step tool sequence, so this is a
+  # knob for trying a cheaper model rather than a requirement.
+  #   MCP_MODEL=opus task mcp:demo
+  MCP_MODEL: '{{if .MCP_MODEL}}--model {{.MCP_MODEL}} {{end}}'
+  # Seconds to wait before closing the window once every pane is done. Same
+  # bargain as PILOT_CLOSE_AFTER: empty means it stays up until you press q.
+  #   MCP_CLOSE_AFTER=20 task mcp:demo
+  MCP_CLOSE_AFTER: '{{if .MCP_CLOSE_AFTER}}-x {{.MCP_CLOSE_AFTER}}{{end}}'
+
 tasks:
   default:
     desc: List available tasks
@@ -244,11 +266,91 @@ tasks:
         echo
       - '{{.MAGMUX}} -c -e "cat"'
 
+  # ── MCP self-hosting demo (a session splits its own multiplexer) ──────────
+  # The flagship flow, and the reason `magmux mcp` exists. One Claude Code
+  # session starts in a one-pane window; it reaches magmux through the MCP
+  # server in this very binary, opens a SECOND pane running another Claude Code
+  # session, and drives that one to produce a file. Nothing is configured to
+  # make the attachment happen: magmux exports MAGMUX_SOCK before any child
+  # starts, Claude Code hands its environment to the MCP servers it spawns, so
+  # `magmux mcp` finds its own host session and the human watches all of it.
+  #
+  # NOT YET RUN END TO END — it spends real model budget and needs a TTY, so
+  # treat the task below as written-but-unverified rather than proven.
+  # `task test:mcp` (UI case 4) is the automated cousin, and it asserts the
+  # same artifact.
+
+  mcp:demo:
+    desc: "Watch a Claude Code session split its own magmux and drive a second session"
+    deps: [build]
+    cmds:
+      # Wipe rather than clean named files: the driven session decides how it
+      # gets there, so only the final artifact path is ours to predict.
+      - rm -rf {{.MCP_DIR}} && mkdir -p {{.MCP_WORK}}
+      # The config points at the freshly built binary, not at whatever
+      # `claude mcp add` left in the user's config, and --strict-mcp-config
+      # below drops every other server so the run tests this one.
+      - |
+        cat > {{.MCP_CONFIG}} <<'JSON'
+        {"mcpServers":{"magmux":{"command":"{{.MAGMUX}}","args":["mcp"]}}}
+        JSON
+      # Tell the viewer what to look for while the screen is still ours: the
+      # ground-truth echo below only runs once magmux has exited, which is far
+      # too late to be guidance.
+      - |
+        echo
+        echo "what to watch:"
+        echo "  the screen opens as ONE full-screen Claude Code session"
+        echo "  a second pane appears on its own when it calls open_pane"
+        echo "  Ctrl-G p shows the routing panel — every instruction sent, every"
+        echo "    turn magmux observed — and Ctrl-G p again hides it"
+        echo "  the status line carries a digest of the same thing meanwhile"
+        echo
+      # One bare pane, the way magmux opens by default — no -c, because the
+      # session splitting its own window is the thing to watch and a screen
+      # that is already divided gives it away. `claude [prompt]` seeds an
+      # INTERACTIVE session with that prompt, which is what the demo wants:
+      # the human can read along, interrupt, and take the keyboard.
+      #
+      # The whole -e line goes to $SHELL -l -c, so the goal is single-quoted
+      # for that shell and contains no $, backtick or double quote of its own.
+      #
+      # The goal names worker/ RELATIVELY, never as {{.MCP_WORK}}: a prompt
+      # carrying this machine's repo layout is unreadable to anyone else, and
+      # the transcript of the demo is half the artifact. It resolves because
+      # `cd {{.MCP_DIR}}` above makes MCP_DIR the cwd of magmux itself, and
+      # open_pane is served inside magmux (sockOpenPane) — both its stat of the
+      # directory and the exec.Cmd.Dir it hands the child resolve against that
+      # cwd. Pane 0 inherits the same cwd, so "your own working directory" is
+      # the same directory either way, and the agent is free to expand it.
+      - |
+        cd {{.MCP_DIR}} && {{.MAGMUX}} {{.MCP_CLOSE_AFTER}} \
+          -e "claude {{.MCP_MODEL}}--mcp-config {{.MCP_CONFIG}} --strict-mcp-config \
+              --dangerously-skip-permissions \
+              'You are running inside magmux, a terminal multiplexer, and the magmux MCP tools are already attached to the window you are in - a human is watching every pane. Do not do this work yourself and do not use your own shell or file tools for it. Call list_panes to see where you are. Then use open_pane to start a second Claude Code session, running claude --dangerously-skip-permissions in the worker subdirectory of your own working directory, labelled worker - it has to be able to write files without stopping to ask. Then use send_and_wait to tell that session, in plain language, to create squares.txt in its own working directory holding the squares of 1 through 5, one per line and nothing else. When it reports back, confirm the file really exists with those contents by asking that same session to show you what it wrote, and use read_pane if a turn comes back with nothing to say. Say DONE once you have seen the contents, and leave both panes open.'"
+      # The panel can be read only as far as you trust what each agent says it
+      # did. The file is the part neither of them can print into existence.
+      - |
+        echo
+        echo "on disk in worker/ (neither agent can fake this):"
+        ls {{.MCP_WORK}} 2>/dev/null | sed 's/^/  /'
+        echo "squares.txt — expect 1 4 9 16 25:"
+        cat {{.MCP_WORK}}/squares.txt 2>/dev/null | sed 's/^/  /' || echo "  (not created — the run failed)"
+
   test:pilot:
     desc: "UI case 3 — full e2e: pilot guides a real session, asserts the artifact on disk"
     deps: [build, pilot:deps]
     cmds:
       - bun test/ui/case3.ts
+
+  test:mcp:
+    desc: "UI case 4 — full e2e: a Claude Code agent drives a live session over `magmux mcp`"
+    # No pilot:deps — case 4 uses no pi.dev SDK. Both agents are Claude Code and
+    # the driver reaches magmux through the MCP server in this very binary, so
+    # `build` is the only prerequisite.
+    deps: [build]
+    cmds:
+      - bun test/ui/case4.ts
 
   # ── Team tests (multi-pane via claudish) ──────────────────────────────────
   # Each team target launches claudish in a different mode. claudish itself
