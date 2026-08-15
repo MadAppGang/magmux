@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -64,15 +65,50 @@ func approxStatusWidth(s string) int {
 			w += 3 // " │ " divider
 		}
 		w += utf8.RuneCountInString(txt)
-		// Pills get +2 for padding spaces around text
 		if len(parts) == 2 {
 			code := strings.TrimSpace(parts[0])
-			if code == "P" || code == "Pr" || code == "Py" {
-				w += 2
+			switch code {
+			case "P", "Pr", "Py":
+				w += 2 // the pill's padding spaces
+			case "*":
+				w += 2 // renderStatusBar writes "* " in front of the label
 			}
 		}
 	}
 	return w
+}
+
+// fitNote cuts a plain-text status-bar segment to w painted columns, marking
+// the cut with an ellipsis. Returns "" when there is no room at all.
+//
+// Deliberately NOT control.go's truncANSI, which is the panel's: that one wraps
+// its ellipsis in SGR and closes with the panel's own ground state, and the bar
+// has a different one (barBase), so the panel's colour would leak into every
+// segment after it. approxStatusWidth counts runes, so the escape bytes would
+// be counted as columns on top of that.
+func fitNote(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	width := 0
+	for _, r := range s {
+		width += runeWidth(r)
+	}
+	if width <= w {
+		return s
+	}
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		cw := runeWidth(r)
+		if n+cw > w-1 { // leave the last column for the ellipsis
+			break
+		}
+		b.WriteRune(r)
+		n += cw
+	}
+	b.WriteRune('…')
+	return b.String()
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -83,6 +119,37 @@ const (
 	maxOSC          = 256
 	commandKey      = 'g' // Ctrl-G prefix
 )
+
+// scrollbackLimit is how many evicted rows one PRIMARY screen keeps, and it is
+// the only bound on magmux's history: rows past it are dropped oldest-first and
+// are gone for good.
+//
+// It is a variable rather than the constant above because the memory is real
+// and per-pane. A row costs cols×sizeof(Cell) — about 20 bytes a cell — so a
+// 200-column pane that has scrolled 1000 lines holds roughly 4 MB, and eight of
+// them hold thirty. The ring fills LAZILY (pushScrollback allocates one row per
+// eviction until it is full and recycles from then on), so a pane that never
+// scrolls costs nothing at all; the number below is the ceiling, not the
+// footprint. MAGMUX_SCROLLBACK=0 turns the whole thing off.
+var scrollbackLimit = envScrollback()
+
+func envScrollback() int {
+	v := os.Getenv("MAGMUX_SCROLLBACK")
+	if v == "" {
+		return scrollbackLines
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 0 {
+		fmt.Fprintf(os.Stderr, "magmux: ignoring MAGMUX_SCROLLBACK=%q (want a non-negative integer)\n", v)
+		return scrollbackLines
+	}
+	// A ceiling on the ceiling: a typo with an extra zero should not be able to
+	// commit a gigabyte per pane before the first line is printed.
+	if n > 100000 {
+		n = 100000
+	}
+	return n
+}
 
 // ── Debug logging ─────────────────────────────────────────────────────────────
 var dbgFile *os.File
@@ -148,6 +215,42 @@ type Screen struct {
 	insert     bool
 	xenl       bool // cursor past last column flag
 	altScreen  *Screen
+
+	// ── scrollback ──────────────────────────────────────────────────────────
+	//
+	// A bounded ring of rows that have scrolled off the TOP of this screen, and
+	// a separate allocation from `cells` on purpose. The old shape was one
+	// `rows+scrollbackLines` grid whose tail was never written and never read —
+	// megabytes of blank cells per pane that scrollUp walked past on its way to
+	// blanking the evicted row. A ring says what it is, fills lazily, and drops
+	// the oldest row when it is full, which the tail could not express at all.
+	//
+	// sb[sbHead] is the next slot to be written, so the OLDEST kept row is
+	// sb[(sbHead-sbLen+sbCap)%sbCap]; sbRow indexes it from oldest and is the
+	// only thing that should do that arithmetic.
+	//
+	// sbCap is 0 on an ALTERNATE screen, and that is the load-bearing part of
+	// the feature: a real terminal does not record the alt screen into history,
+	// which is why quitting vim does not leave its buffer in your scrollback.
+	// The alt screen is a whole separate *Screen (newAltScreen), so switching to
+	// it and back cannot touch the primary's ring — see the 1049/47/1047 cases
+	// in doCSI.
+	//
+	// Rows in the ring keep the width they had when they were evicted. Nothing
+	// reflows them (see resize), and nothing paints them from `cells`-width
+	// assumptions: viewRow hands back a row of whatever length it is, and both
+	// readers — rowsText and renderPane — bound their walk by len(row).
+	//
+	// Guarded by the owning Pane's mu, like every other field here.
+	sb     [][]Cell
+	sbHead int
+	sbLen  int
+	sbCap  int
+	// sbOff is how many rows the VIEWPORT has been scrolled back: 0 is live,
+	// and it is also the scroll-mode flag — a pane is in scroll mode exactly
+	// when this is non-zero, so there is no second piece of state that can
+	// disagree with what is painted. Bounded by sbLen.
+	sbOff int
 }
 
 func newScreen(rows, cols int) *Screen {
@@ -167,8 +270,22 @@ func newScreen(rows, cols int) *Screen {
 		bg:        defaultColor,
 		scrollBot: rows,
 		autoWrap:  true,
+		sbCap:     scrollbackLimit,
 	}
-	s.cells = makeGrid(rows+scrollbackLines, cols)
+	// Exactly the viewport, and nothing behind it. History lives in the ring
+	// above, which allocates as it fills.
+	s.cells = makeGrid(rows, cols)
+	return s
+}
+
+// newAltScreen builds the alternate screen for a pane. It is an ordinary Screen
+// with its scrollback capacity set to zero, which is the one difference that
+// matters: alt-screen content must never enter history. Every DEC 1049/47/1047
+// site goes through here so that rule cannot be honoured on one of them and
+// forgotten on another.
+func newAltScreen(rows, cols int) *Screen {
+	s := newScreen(rows, cols)
+	s.sbCap = 0
 	return s
 }
 
@@ -196,10 +313,9 @@ func (s *Screen) resize(rows, cols int) {
 	if oldRows > 0 {
 		oldCols = len(old[0])
 	}
-	totalRows := rows + scrollbackLines
-	s.cells = makeGrid(totalRows, cols)
+	s.cells = makeGrid(rows, cols)
 	// Copy what fits
-	copyRows := min(oldRows, totalRows)
+	copyRows := min(oldRows, rows)
 	for i := 0; i < copyRows; i++ {
 		copyCols := min(oldCols, cols)
 		for j := 0; j < copyCols; j++ {
@@ -208,6 +324,20 @@ func (s *Screen) resize(rows, cols int) {
 	}
 	s.rows = rows
 	s.cols = cols
+	// The scrollback SURVIVES a resize, at the width each row had when it was
+	// evicted, and nothing reflows. Two reasons, and the first is the practical
+	// one: a resize happens every time the human reveals the control panel or
+	// nudges their window, and destroying every line of history at that moment
+	// would make the feature untrustworthy. The second is that reflowing is a
+	// guess — magmux does not record which rows were soft-wrapped continuations
+	// of one logical line, so re-wrapping 200-column history into 80 columns
+	// would invent line breaks the child never wrote. Handing the row back at
+	// its original width is at least the truth about what was printed.
+	//
+	// The only thing a narrower screen changes is the viewport clamp below.
+	if s.sbOff > s.sbLen {
+		s.sbOff = s.sbLen
+	}
 	if s.scrollBot > rows || s.scrollBot == 0 {
 		s.scrollBot = rows
 	}
@@ -227,6 +357,15 @@ func (s *Screen) clearLine(row, from, to int) {
 	}
 }
 
+// scrollUp shifts [top,bot) up by one and blanks the new bottom row.
+//
+// This is the hottest path in the VT parser — every newline at the bottom of a
+// screen lands here — so it must not allocate per line. It does not: the row
+// evicted from the top and the row that becomes the new bottom are SWAPPED, as
+// they always were. The only change is where the evicted row goes. When the
+// scroll is the whole screen it goes into the scrollback ring, and the ring
+// hands back a row to recycle in its place; otherwise it is recycled directly,
+// byte for byte as before.
 func (s *Screen) scrollUp(top, bot int) {
 	if top >= bot || top < 0 || bot > len(s.cells) {
 		return
@@ -234,11 +373,101 @@ func (s *Screen) scrollUp(top, bot int) {
 	// Shift rows up by 1 within [top, bot)
 	save := s.cells[top]
 	copy(s.cells[top:bot-1], s.cells[top+1:bot])
+	// Only a FULL-SCREEN scroll writes history, which is what every terminal
+	// does: a child that set a scrolling region (a pager's header, a TUI's
+	// status line, DECSTBM in general) is animating part of its own frame, and
+	// recording those rows would fill the ring with fragments of a redraw
+	// rather than with output that ever "scrolled off".
+	if s.sbCap > 0 && top == 0 && bot == s.rows {
+		save = s.pushScrollback(save)
+	}
 	// Clear the bottom row
 	for j := range save {
 		save[j] = Cell{Ch: ' ', Fg: defaultColor, Bg: defaultColor}
 	}
 	s.cells[bot-1] = save
+}
+
+// pushScrollback files `row` as the newest scrollback line and returns a row the
+// caller may reuse as the new bottom of the viewport.
+//
+// The swap is what keeps scrollUp allocation-free in steady state: once the ring
+// is full, the row being dropped is handed straight back. While it is still
+// filling there is nothing to hand back, so one row is allocated per eviction —
+// at most sbCap times for the life of the pane.
+//
+// Caller holds the owning pane's mu.
+func (s *Screen) pushScrollback(row []Cell) []Cell {
+	if s.sb == nil {
+		s.sb = make([][]Cell, s.sbCap)
+	}
+	var reuse []Cell
+	if s.sbLen == s.sbCap {
+		reuse = s.sb[s.sbHead] // the oldest line, about to be overwritten
+	} else {
+		s.sbLen++
+	}
+	s.sb[s.sbHead] = row
+	s.sbHead++
+	if s.sbHead == s.sbCap {
+		s.sbHead = 0
+	}
+	// A recycled row is only reusable at the CURRENT width: renderPane walks the
+	// viewport by s.cols without a length check, so a row left over from a wider
+	// or narrower screen has to be replaced rather than trimmed.
+	if len(reuse) != s.cols {
+		reuse = make([]Cell, s.cols)
+	}
+	// Keep a scrolled-back viewport parked on the same content while output
+	// keeps arriving, exactly as tmux's copy-mode does. It stops at sbLen
+	// because past that the line being looked at is the one just dropped.
+	if s.sbOff > 0 && s.sbOff < s.sbLen {
+		s.sbOff++
+	}
+	return reuse
+}
+
+// sbRow returns the i-th OLDEST scrollback row, or nil when i is out of range.
+// It is the only place the ring's index arithmetic lives.
+//
+// Caller holds the owning pane's mu.
+func (s *Screen) sbRow(i int) []Cell {
+	if i < 0 || i >= s.sbLen {
+		return nil
+	}
+	return s.sb[(s.sbHead-s.sbLen+i+s.sbCap)%s.sbCap]
+}
+
+// viewRow returns the cells shown at viewport row `i` when the pane is scrolled
+// back `off` rows: off == 0 is the live screen, and larger values reach further
+// into history. Rows above the oldest kept line come back nil, which every
+// caller renders as blank.
+//
+// Scrollback and viewport are one document here — history rows sit directly on
+// top of cells[0] — so this is the single mapping the renderer, capture and the
+// scroll keys all share. A second one would drift the moment the ring wrapped.
+//
+// Caller holds the owning pane's mu.
+func (s *Screen) viewRow(off, i int) []Cell {
+	d := i - off
+	if d >= 0 {
+		if d < len(s.cells) {
+			return s.cells[d]
+		}
+		return nil
+	}
+	return s.sbRow(s.sbLen + d)
+}
+
+// scrollBackBy moves the viewport `delta` rows further into history (negative
+// moves back toward live) and returns the offset it settled on. Clamped to
+// [0, sbLen], so "further back than there is history" parks at the top rather
+// than failing.
+//
+// Caller holds the owning pane's mu.
+func (s *Screen) scrollBackBy(delta int) int {
+	s.sbOff = clamp(s.sbOff+delta, 0, s.sbLen)
+	return s.sbOff
 }
 
 func (s *Screen) scrollDown(top, bot int) {
@@ -276,6 +505,7 @@ type VTParser struct {
 	args     [maxParams]int
 	nosc     int
 	oscbuf   [maxOSC]rune
+	oscTerm  rune    // how the OSC being dispatched ended: BEL (0x07) or ST (0x1b)
 	node     *Pane   // back-reference to pane
 	partial  [4]byte // buffered incomplete UTF-8 bytes from previous read
 	npartial int     // number of valid bytes in partial
@@ -345,6 +575,7 @@ func (vt *VTParser) handleChar(w rune) {
 		if vt.state == stOSCString {
 			// ESC in OSC string — next char should be '\' (ST)
 			// Terminate the OSC now (the '\' will be consumed by stEscape)
+			vt.oscTerm = 0x1b
 			vt.handleOSC()
 			vt.state = stEscape
 			return
@@ -450,6 +681,9 @@ func (vt *VTParser) handleChar(w rune) {
 
 	case stOSCString:
 		if w == 0x07 || w == '\\' { // BEL or ST
+			// Which one matters: a reply must end the way the query did, or the
+			// leftover terminator lands in the child's input as garbage.
+			vt.oscTerm = w
 			vt.handleOSC()
 			vt.state = stGround
 		} else if w >= 0x20 && vt.nosc < maxOSC {
@@ -508,11 +742,68 @@ func isNotificationOSC9(osc string) bool {
 	return true
 }
 
+// colorQueryCode returns the OSC code of a colour QUERY — "10" (foreground),
+// "11" (background) or "12" (cursor) followed by a bare "?" — and whether the
+// body was one at all.
+//
+// The "?" is the whole distinction and it is not cosmetic: `OSC 11;#ff0000` is
+// a child SETTING the background, and answering that would put bytes into the
+// input of a program that is not reading any. Only a question gets an answer.
+func colorQueryCode(osc string) (string, bool) {
+	code, arg, ok := strings.Cut(osc, ";")
+	if !ok || strings.TrimSpace(arg) != "?" {
+		return "", false
+	}
+	switch code {
+	case "10", "11", "12":
+		return code, true
+	}
+	return "", false
+}
+
+// answerColorQuery tells the child what colour the terminal is.
+//
+// magmux IS the terminal to its children, and this is the one question it used
+// to leave hanging: theme-aware TUIs (Claude Code among them) query OSC 11 at
+// startup, block on the reply, and draw nothing at all until it arrives — which
+// is why Claude Code rendered as a blank pane in magmux and rendered fine in
+// tmux. The colours come from theme.go: the terminal's real background when the
+// startup probe read one, the active palette's assumed background otherwise. A
+// plausible answer that matches magmux's own chrome is a small inaccuracy; no
+// answer is a blank screen.
+//
+// The reply goes out through replyLocked on the parser's own goroutine, exactly
+// as the DA and DSR replies below do, and under the same p.mu they hold. NOT
+// through writePTY: that is the human-input path, which refuses a settled pane
+// in grid mode and clears its completion state — see replyLocked for what each
+// of those cost.
+func (vt *VTParser) answerColorQuery(code string) {
+	c, ok := terminalColor(code)
+	if !ok {
+		return
+	}
+	// Echo the requester's terminator. xterm answers BEL to a BEL-terminated
+	// query and ST to an ST-terminated one; getting it wrong leaves a stray
+	// BEL or a stray ESC \ in the application's input stream.
+	end := "\x1b\\"
+	if vt.oscTerm == 0x07 {
+		end = "\x07"
+	}
+	resp := "\x1b]" + code + ";" + xColorString(c) + end
+	if dbgFile != nil {
+		fmt.Fprintf(dbgFile, "[OSC] colour query %s → %q\n", code, resp)
+	}
+	vt.node.replyLocked([]byte(resp))
+}
+
 // handleOSC processes completed OSC sequences.
 // Detects notification sequences that signal "waiting for input":
 //   - OSC 9;...  — iTerm2-style notification
 //   - OSC 777;notify;... — rxvt-style notification
 //   - OSC 633;B  — VS Code shell integration "prompt started"
+//
+// And answers the colour queries a child blocks on:
+//   - OSC 10;? / 11;? / 12;? — foreground / background / cursor colour
 func (vt *VTParser) handleOSC() {
 	if vt.nosc == 0 {
 		if dbgFile != nil {
@@ -525,6 +816,11 @@ func (vt *VTParser) handleOSC() {
 
 	if dbgFile != nil {
 		fmt.Fprintf(dbgFile, "[OSC:end] %q\n", osc)
+	}
+
+	if code, ok := colorQueryCode(osc); ok {
+		vt.answerColorQuery(code)
+		return
 	}
 
 	switch {
@@ -680,6 +976,40 @@ func (vt *VTParser) doEscape(w rune) {
 	}
 }
 
+// setAltScreen moves a pane on or off the alternate screen. It is the single
+// implementation behind DEC 47, 1047 and 1049, which differ only in what else
+// they save and had drifted into three copies of the same six lines.
+//
+// Everything here is anchored on node.primaryScreen rather than on the CURRENT
+// screen, and that is the fix as much as the deduplication. doCSI resolves
+// `s := vt.node.screen`, so on the way OUT `s` is the ALTERNATE screen — whose
+// own .altScreen is nil — and the old `else if s.altScreen != nil` guard was
+// therefore never true. A pane that entered the alt screen never came back: the
+// shell's prompt after `:q` was painted into vim's buffer, on top of vim's last
+// frame. Symmetrically, a second 1049h while already on the alt screen used to
+// hang a THIRD screen off the alt one and switch to that.
+//
+// It was invisible for as long as magmux's main tenant was Claude Code, which
+// enters the alt screen at startup and leaves it by exiting. It stops being
+// invisible the moment a pane has scrollback worth returning to.
+func (vt *VTParser) setAltScreen(on bool) {
+	p := vt.node
+	if p.primaryScreen == nil {
+		p.primaryScreen = p.screen
+	}
+	prim := p.primaryScreen
+	if on {
+		if prim.altScreen == nil {
+			prim.altScreen = newAltScreen(prim.rows, prim.cols)
+		}
+		p.screen = prim.altScreen
+		p.altMode = true
+		return
+	}
+	p.screen = prim
+	p.altMode = false
+}
+
 func (vt *VTParser) doCSI(w rune) {
 	s := vt.node.screen
 
@@ -704,40 +1034,14 @@ func (vt *VTParser) doCSI(w rune) {
 				case 12: // Cursor blink (cosmetic, ignore)
 				case 25: // DECTCEM - cursor visibility (ignore for now)
 				case 47: // Alt screen (legacy)
-					if set {
-						if s.altScreen == nil {
-							s.altScreen = newScreen(s.rows, s.cols)
-						}
-						vt.node.screen = s.altScreen
-						vt.node.altMode = true
-					} else if s.altScreen != nil {
-						vt.node.screen = vt.node.primaryScreen
-						vt.node.altMode = false
-					}
+					vt.setAltScreen(set)
 				case 1000, 1002, 1003, 1006: // Mouse tracking — consumed by magmux
 				case 1004: // Focus events
 					vt.node.focusEvents = set
 				case 1047: // Alt screen (variant 2)
-					if set {
-						if s.altScreen == nil {
-							s.altScreen = newScreen(s.rows, s.cols)
-						}
-						vt.node.screen = s.altScreen
-						vt.node.altMode = true
-					} else if s.altScreen != nil {
-						vt.node.screen = vt.node.primaryScreen
-						vt.node.altMode = false
-					}
+					vt.setAltScreen(set)
 				case 1049: // Alt screen buffer + cursor save
-					vt.node.altMode = set
-					if set {
-						if s.altScreen == nil {
-							s.altScreen = newScreen(s.rows, s.cols)
-						}
-						vt.node.screen = s.altScreen
-					} else if s.altScreen != nil {
-						vt.node.screen = vt.node.primaryScreen
-					}
+					vt.setAltScreen(set)
 				case 2004: // Bracketed paste mode
 					wasPaste := vt.node.bracketPaste
 					vt.node.bracketPaste = set
@@ -776,7 +1080,7 @@ func (vt *VTParser) doCSI(w rune) {
 	if vt.inter == '>' {
 		switch w {
 		case 'c': // DA2
-			vt.node.writePTY([]byte("\x1b[>1;10;0c"))
+			vt.node.replyLocked([]byte("\x1b[>1;10;0c"))
 		case 'm', 'n': // MODSET/MODOFF — xterm key modification modes, ignore
 		case 'u': // Push keyboard enhancement (Kitty protocol), ignore
 		case 'q': // xterm query, ignore
@@ -899,17 +1203,50 @@ func (vt *VTParser) doCSI(w rune) {
 		s.curY = clamp(vt.p1(0)-1, 0, s.rows-1)
 		s.xenl = false
 	case 'r': // DECSTBM - set scrolling region
-		top := vt.p1(0) - 1
-		bot := vt.p1(1)
+		// The two parameters do NOT share a default, and conflating them is what
+		// made Claude Code render as a blank pane. An omitted top is line 1; an
+		// omitted bottom is the LAST line of the page. Reading the bottom with p1
+		// — which turns an absent parameter into 1 — made the bare `CSI r` that
+		// opens Claude Code's output mean "the scrolling region is row 1 to row
+		// 1". Every subsequent LF then scrolled that one-line region and blanked
+		// it, so the application painted its entire UI onto row 0, one line at a
+		// time, each line erasing the one before. The `bot == 0` guard below was
+		// written to catch exactly this and could never fire, because p1 had
+		// already rewritten the 0 as a 1.
+		//
+		// p0 keeps the absent/zero distinction intact, and 0 is also the explicit
+		// "use the default" value DEC assigns, so both spellings land here.
+		//
+		// The bottom parameter MUST be read with p0 and the guard below must stay
+		// reachable. This comment once described that fix while the line under it
+		// still said p1, so `bot` could never be 0, `top >= bot` fired instead,
+		// and a bare `CSI r` was IGNORED — leaving whatever region was already in
+		// force. TestDECSTBMDefaultsToTheWholePage now starts every case from a
+		// non-default region so it can tell "reset" from "ignored"; the version
+		// that started at the default could not, which is how this shipped.
+		top := vt.p1(0)
+		bot := vt.p0(1)
 		if bot == 0 || bot > s.rows {
 			bot = s.rows
 		}
-		if top < bot {
-			s.scrollTop = top
-			s.scrollBot = bot
+		// A scrolling region must be at least two lines: a one-line region has
+		// nowhere to scroll to, so every newline inside it erases the screen —
+		// the failure above, reached by a different route. An inverted or
+		// degenerate region is ignored outright (as xterm ignores it), leaving
+		// the previous region and the cursor untouched.
+		if top >= bot {
+			break
 		}
+		s.scrollTop = top - 1
+		s.scrollBot = bot
+		// DECSTBM homes the cursor, and only when it was accepted. In origin
+		// mode home is the top of the new region, not the top of the page.
 		s.curX = 0
 		s.curY = 0
+		if s.originMode {
+			s.curY = s.scrollTop
+		}
+		s.xenl = false
 	case 's': // SCP - save cursor position
 		s.savedY = s.curY
 		s.savedX = s.curX
@@ -937,9 +1274,9 @@ func (vt *VTParser) doCSI(w rune) {
 				fmt.Fprintf(dbgFile, "DSR: curY=%d curX=%d altMode=%v rows=%d cols=%d\n",
 					cur.curY, cur.curX, vt.node.altMode, cur.rows, cur.cols)
 			}
-			vt.node.writePTY([]byte(resp))
+			vt.node.replyLocked([]byte(resp))
 		} else if vt.p0(0) == 5 { // Device status - report OK
-			vt.node.writePTY([]byte("\x1b[0n"))
+			vt.node.replyLocked([]byte("\x1b[0n"))
 		}
 	case 'Z': // CBT - cursor backward tabulation
 		n := vt.p1(0)
@@ -956,7 +1293,7 @@ func (vt *VTParser) doCSI(w rune) {
 			vt.doPrint(vt.node.lastChar)
 		}
 	case 'c': // DA - primary device attributes
-		vt.node.writePTY([]byte("\x1b[?1;2c"))
+		vt.node.replyLocked([]byte("\x1b[?1;2c"))
 	case 'g': // TBC - tab clear
 		// Ignore for now (would need tab stop tracking)
 	case 'h': // SM - set mode
@@ -971,10 +1308,10 @@ func (vt *VTParser) doCSI(w rune) {
 		switch vt.p0(0) {
 		case 18: // Report terminal size in characters
 			resp := fmt.Sprintf("\x1b[8;%d;%dt", vt.node.h, vt.node.w)
-			vt.node.writePTY([]byte(resp))
+			vt.node.replyLocked([]byte(resp))
 		case 14: // Report window size in pixels (fake it)
 			resp := fmt.Sprintf("\x1b[4;%d;%dt", vt.node.h*16, vt.node.w*8)
-			vt.node.writePTY([]byte(resp))
+			vt.node.replyLocked([]byte(resp))
 		}
 	}
 }
@@ -1179,6 +1516,23 @@ const (
 )
 
 type Pane struct {
+	// id is this pane's permanent index into Magmux.allPanes. It is stamped
+	// once, before the pane is published, and never changes — close_pane
+	// tombstones the slot rather than compacting the slice, because the socket
+	// protocol's only addressing mode is an integer and a renumbering would
+	// silently redirect a `send` into a different session. Immutable after
+	// publication, so it may be read without treeMu.
+	id int
+	// closed marks a pane detached from the layout by close_pane. Its allPanes
+	// slot is retained forever so later ids never shift. Guarded by treeMu:
+	// every "for every pane" loop must skip it, or tint/overlay/keystrokes
+	// land in a pane nobody can see.
+	closed bool
+	// label is the short name open_pane was given, for clients that address
+	// panes by name. Immutable after publication.
+	label string
+	// Structural fields — guarded by treeMu, NOT by mu. Everything below
+	// screen is content state and stays under mu exactly as before.
 	splitType     SplitType
 	y, x, h, w    int // position and size in host terminal
 	ratio         float64
@@ -1202,7 +1556,12 @@ type Pane struct {
 	useG1         bool // SO (shift out) active — use G1 instead of G0
 	lastChar      rune // last printed character (for REP command)
 	// Grid mode fields
-	gridMode     bool      // pane is in grid mode (don't delete on exit)
+	gridMode bool // pane is in grid mode (don't delete on exit)
+	// reaped is set by waitForChild once cmd.Wait has returned, i.e. once the
+	// child's pid has been collected and is free for the OS to reuse. The
+	// force-kill path in reapPane checks it before signalling the process
+	// GROUP, so a delayed SIGKILL can never land on a stranger. Guarded by mu.
+	reaped       bool
 	exitCode     int       // exit code of child process
 	startedAt    time.Time // when the child process was started (for exec duration)
 	tint         string    // "green", "red", "" — border/indicator color
@@ -1232,6 +1591,20 @@ type Pane struct {
 	// a pane owns a process (read loops, child waits, done-counting) must
 	// skip it.
 	isControl bool
+	// hidden is the THIRD pane state, and it is neither `dead` nor `closed`:
+	// the pane is alive and keeps every byte of its history, it is simply not
+	// spliced into the layout tree and therefore occupies no columns. Only the
+	// control panel is ever hidden (Ctrl-G p), and it starts that way unless -c
+	// asked for it.
+	//
+	// A hidden pane is still in m.allPanes, still holds its id, and is still
+	// reported by buildPaneResults — so `results` keeps saying state:"panel"
+	// whether the panel is on screen or not. What it must be excluded from is
+	// anything that reads GEOMETRY or paints: its y/x/h/w are whatever they
+	// were when it was taken out, so largestLiveLeafLocked would happily pick
+	// it as a split target and the dirty sweep would repaint a pane that is not
+	// on screen. Guarded by treeMu — it is structural state, like `parent`.
+	hidden bool
 	// Interactive tool controller (e.g. ClaudeCodeController). Optional.
 	controller     ToolController
 	controllerSnap Snapshot
@@ -1240,7 +1613,7 @@ type Pane struct {
 	mux *Magmux
 }
 
-func newPane(y, x, h, w int, command string, args ...string) (*Pane, error) {
+func newPane(y, x, h, w int, cfg PaneConfig) (*Pane, error) {
 	p := &Pane{
 		y:         y,
 		x:         x,
@@ -1249,12 +1622,13 @@ func newPane(y, x, h, w int, command string, args ...string) (*Pane, error) {
 		ratio:     0.5,
 		charsetG0: 'B', // ASCII
 		charsetG1: 'B',
+		label:     cfg.Label,
 	}
 	p.screen = newScreen(h, w)
 	p.primaryScreen = p.screen
 	p.vt.node = p
 
-	if err := p.spawnPTY(command, args...); err != nil {
+	if err := p.spawnPTY(cfg); err != nil {
 		return nil, fmt.Errorf("spawn PTY: %w", err)
 	}
 	return p, nil
@@ -1264,13 +1638,14 @@ func newPane(y, x, h, w int, command string, args ...string) (*Pane, error) {
 // Screen and a VT parser, because that is how it is painted: ControlPanel
 // writes ANSI into the parser exactly as a child process would, so the pane
 // renders, scrolls, and selects through the ordinary pane path.
-func newControlPane(y, x, h, w int) *Pane {
+func newControlPane(y, x, h, w int, label string) *Pane {
 	p := &Pane{
 		y: y, x: x, h: h, w: w,
 		ratio:     0.5,
 		charsetG0: 'B',
 		charsetG1: 'B',
 		isControl: true,
+		label:     label,
 	}
 	p.screen = newScreen(h, w)
 	p.primaryScreen = p.screen
@@ -1279,15 +1654,17 @@ func newControlPane(y, x, h, w int) *Pane {
 }
 
 // newPaneFor builds either a normal child-process pane or the control pane,
-// depending on the config.
+// depending on the config. It is the single pane constructor: every layout
+// builder and OpenPane goes through it, so a field added to PaneConfig cannot
+// be honoured on one path and silently dropped on another.
 func newPaneFor(y, x, h, w int, cfg PaneConfig) (*Pane, error) {
 	if cfg.Control {
-		return newControlPane(y, x, h, w), nil
+		return newControlPane(y, x, h, w, cfg.Label), nil
 	}
-	return newPane(y, x, h, w, cfg.Cmd, cfg.Args...)
+	return newPane(y, x, h, w, cfg)
 }
 
-func (p *Pane) spawnPTY(command string, args ...string) error {
+func (p *Pane) spawnPTY(cfg PaneConfig) error {
 	ptmx, pts, err := openPTY()
 	if err != nil {
 		return err
@@ -1296,7 +1673,8 @@ func (p *Pane) spawnPTY(command string, args ...string) error {
 	// Set initial size
 	setWinSize(ptmx, p.h, p.w)
 
-	cmd := exec.Command(command, args...)
+	cmd := exec.Command(cfg.Cmd, cfg.Args...)
+	cmd.Dir = cfg.Dir
 	cmd.Stdin = pts
 	cmd.Stdout = pts
 	cmd.Stderr = pts
@@ -1313,6 +1691,10 @@ func (p *Pane) spawnPTY(command string, args ...string) error {
 	if sockPath := os.Getenv("MAGMUX_SOCK"); sockPath != "" {
 		env = append(env, "MAGMUX_SOCK="+sockPath)
 	}
+	// Caller-supplied entries go last so they win over everything above,
+	// including MAGMUX_SOCK — a pane deliberately pointed at another magmux is
+	// a legitimate thing to ask for.
+	env = append(env, cfg.Env...)
 	cmd.Env = env
 
 	if err := cmd.Start(); err != nil {
@@ -1432,12 +1814,30 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh %dm", h, m)
 }
 
+// writePTY forwards HUMAN input to the pane's child.
+//
+// Every field it touches belongs to p.mu — the render goroutine reads
+// inputReady, tint, overlayText, overlayStyle and hadTextOutput under that lock
+// in leafTint, allPanesDoneLocked, the grid counter and renderLocked — and this
+// runs on the INPUT goroutine, once per keystroke (typeToFocused) and once per
+// forwarded mouse event (parseSGRMouse). It used to test and assign all of them
+// with no lock at all. injectPTY is the correct twin and this now matches it,
+// down to releasing p.mu before the write: a child that has stopped reading can
+// block a PTY write for as long as it likes, and treeMu -> p.mu means a stalled
+// keystroke would stall the next frame behind it.
+//
+// Caller must NOT hold p.mu.
 func (p *Pane) writePTY(data []byte) {
+	p.mu.Lock()
 	if p.ptmx == nil {
+		p.mu.Unlock()
 		return
 	}
-	// In grid mode, don't forward input to dead or completed panes
+	// In grid mode, don't forward input to dead or completed panes: this is what
+	// lets `q` dismiss a finished grid. It is also why magmux's own replies to a
+	// child's queries must NOT come through here — see replyLocked.
 	if p.gridMode && (p.dead || p.inputReady) {
+		p.mu.Unlock()
 		return
 	}
 	// User input resets idle state — pane is no longer "done"
@@ -1447,9 +1847,41 @@ func (p *Pane) writePTY(data []byte) {
 		p.overlayText = ""
 		p.overlayStyle = ""
 		p.hadTextOutput = false // require new output before re-detecting idle
+		p.dirty = true          // the completion chrome just went; repaint it away
 		if dbgFile != nil {
 			fmt.Fprintf(dbgFile, "[input] user keystroke → inputReady reset\n")
 		}
+	}
+	ptmx := p.ptmx
+	p.mu.Unlock()
+
+	ptmx.Write(data)
+}
+
+// replyLocked writes magmux's own answer to a child's query straight to the PTY.
+//
+// This is magmux being the TERMINAL, not a human being at a keyboard, and the
+// two must not share a path. Routing replies through writePTY broke both halves
+// of that:
+//
+//  1. writePTY refuses a pane that is dead or awaiting input in grid mode. But
+//     awaiting-input is exactly where a long-lived TUI sits, and Claude Code
+//     re-queries OSC 11 on every SIGWINCH — which magmux sends to every pane
+//     each time `Ctrl-G p` reshapes the layout. The question went into a void
+//     and the child blocked: the blank-pane hang answerColorQuery exists to
+//     prevent, reached by a second route. DA and DSR block a TUI just as hard.
+//  2. writePTY clears inputReady, the tint, the overlay and hadTextOutput under
+//     "user input resets idle state". A reply is not input, so a settled pane
+//     silently read as working again and lost its ✓ DONE chrome.
+//
+// Caller HOLDS p.mu. Every caller is the VT parser, which runs inside
+// readLoop's p.mu, so this cannot take the lock and cannot hand it back — the
+// write goes out under it, exactly as it always has. That is safe for what it
+// carries: a reply is a few dozen bytes and the child is by definition blocked
+// reading them.
+func (p *Pane) replyLocked(data []byte) {
+	if p.ptmx == nil {
+		return
 	}
 	p.ptmx.Write(data)
 }
@@ -1481,9 +1913,20 @@ func (p *Pane) resize(y, x, h, w int) {
 	p.w = w
 	if p.splitType == SplitNone {
 		p.mu.Lock()
-		p.screen.resize(h, w)
-		if p.screen.altScreen != nil {
-			p.screen.altScreen.resize(h, w)
+		// Both screens, reached through the PRIMARY. `p.screen` is whichever one
+		// the child is currently on, and its .altScreen is nil when that is the
+		// alt screen — so resizing through it left the primary at the old size
+		// for the whole life of a full-screen app, and the shell came back to a
+		// screen the wrong shape. Same root cause as setAltScreen's.
+		prim := p.primaryScreen
+		if prim == nil {
+			prim = p.screen
+		}
+		if prim != nil {
+			prim.resize(h, w)
+			if prim.altScreen != nil {
+				prim.altScreen.resize(h, w)
+			}
 		}
 		p.mu.Unlock()
 		if p.ptmx != nil {
@@ -1494,17 +1937,30 @@ func (p *Pane) resize(y, x, h, w int) {
 	}
 }
 
+// reshapeChildren reflows a split node's two children.
+//
+// The clamps are not defensive noise. w2 = p.w - w1 - 1 has no natural floor:
+// three splits deep on an 80-column terminal, or one SIGWINCH shrinking a tree
+// that was legal when it was built, yields zero or NEGATIVE dimensions. The
+// zero-size guards downstream handle zero; negative reaches Screen.resize with
+// a negative row count and every geometry assumption below it. Clamping here
+// rather than in OpenPane is deliberate — OpenPane only covers the moment of
+// creation, and the terminal can shrink at any time afterwards.
+//
+// Caller holds treeMu.Lock (geometry is structural state).
 func (p *Pane) reshapeChildren() {
 	if p.splitType == SplitHorizontal {
-		w1 := int(float64(p.w) * p.ratio)
-		w2 := p.w - w1 - 1 // -1 for border
-		p.child1.resize(p.y, p.x, p.h, w1)
-		p.child2.resize(p.y, p.x+w1+1, p.h, w2)
+		w1 := clamp(int(float64(p.w)*p.ratio), 0, maxInt(0, p.w-1))
+		w2 := maxInt(0, p.w-w1-1) // -1 for border
+		h := maxInt(0, p.h)
+		p.child1.resize(p.y, p.x, h, w1)
+		p.child2.resize(p.y, p.x+w1+1, h, w2)
 	} else if p.splitType == SplitVertical {
-		h1 := int(float64(p.h) * p.ratio)
-		h2 := p.h - h1 - 1 // -1 for border
-		p.child1.resize(p.y, p.x, h1, p.w)
-		p.child2.resize(p.y+h1+1, p.x, h2, p.w)
+		h1 := clamp(int(float64(p.h)*p.ratio), 0, maxInt(0, p.h-1))
+		h2 := maxInt(0, p.h-h1-1) // -1 for border
+		w := maxInt(0, p.w)
+		p.child1.resize(p.y, p.x, h1, w)
+		p.child2.resize(p.y+h1+1, p.x, h2, w)
 	}
 }
 
@@ -1624,7 +2080,14 @@ func (r *Renderer) setAttr(fg, bg Color, attr Attr) {
 	r.prevAttr = attr
 }
 
+// renderPane paints one node of the layout tree. Caller holds treeMu.RLock.
+//
+// The nil guard is load-bearing: closing the last pane leaves an empty tree
+// with no m.root at all, and every render pass would dereference it.
 func (r *Renderer) renderPane(p *Pane) {
+	if p == nil {
+		return
+	}
 	if p.splitType != SplitNone {
 		r.renderPane(p.child1)
 		r.renderBorder(p)
@@ -1634,31 +2097,45 @@ func (r *Renderer) renderPane(p *Pane) {
 
 	p.mu.Lock()
 	s := p.screen
-	tint := p.tint
-	// Tint wash: blend a subtle color into the background of every cell
-	var tintBg Color
-	var hasTint bool
-	switch tint {
-	case "green":
-		tintBg = Color{R: 12, G: 24, B: 12, True: true} // subtle dark green wash
-		hasTint = true
-	case "red":
-		tintBg = Color{R: 24, G: 12, B: 12, True: true} // subtle dark red wash
-		hasTint = true
-	}
+	// The pane's cells are reproduced verbatim: fg, bg and attributes exactly
+	// as the child wrote them.
+	//
+	// There used to be a completion "tint wash" here — a background colour
+	// substituted into every cell whose background was default, to mark a pane
+	// as finished. It cannot work, in either direction, and the reason is
+	// structural: magmux replaces the BACKGROUND under text whose FOREGROUND it
+	// does not know and cannot recolour. Claude Code writes light foregrounds
+	// because it assumes a dark terminal; a near-black wash therefore kept them
+	// legible but turned a finished pane on a light terminal into a black box,
+	// and a pale wash (the previous fix) turned it into a blank green rectangle
+	// with the session's own output invisible on top of it. There is no third
+	// colour that is safe, because the foreground is the child's to choose.
+	//
+	// Completion is marked with the two surfaces magmux owns outright instead:
+	// the pane BORDER (borderColorForPane) and the centred overlay badge, which
+	// sets its own foreground and background together.
+	//
+	// The rows come from viewRow rather than straight out of cells, which is
+	// what makes a scrolled-back pane paint history in place. At off == 0 that
+	// is cells[row] and the walk below is what it always was; further back the
+	// row may be a scrollback line, and a scrollback line keeps the width it had
+	// when it was evicted — so the walk is bounded by len(row) and pads the rest
+	// with blanks. Padding rather than stopping early matters: the renderer
+	// never clears, so a short row that simply stopped writing would leave the
+	// previous frame's characters standing to its right.
+	off := s.sbOff
 	for row := 0; row < s.rows && row < p.h; row++ {
+		cells := s.viewRow(off, row)
 		r.moveTo(p.y+row, p.x)
 		for col := 0; col < s.cols && col < p.w; col++ {
-			c := s.cells[row][col]
+			c := Cell{Ch: ' ', Fg: defaultColor, Bg: defaultColor}
+			if col < len(cells) {
+				c = cells[col]
+			}
 			if c.Cont {
 				continue
 			}
-			bg := c.Bg
-			if hasTint && (bg.Index == -1 || (!bg.True && bg.Index == 0)) {
-				// Replace default/black background with tint wash
-				bg = tintBg
-			}
-			r.setAttr(c.Fg, bg, c.Attr)
+			r.setAttr(c.Fg, c.Bg, c.Attr)
 			if c.Ch == 0 || c.Ch == ' ' {
 				r.buf.WriteByte(' ')
 			} else {
@@ -1666,9 +2143,23 @@ func (r *Renderer) renderPane(p *Pane) {
 			}
 		}
 	}
+	scrollBadge := ""
+	if off > 0 {
+		scrollBadge = scrollBadgeText(off, s.sbLen)
+	}
 	overlayText := p.overlayText
 	overlayStyle := p.overlayStyle
 	p.mu.Unlock()
+
+	// The scroll badge is painted over the pane's own top-right corner, and it
+	// is the only thing on screen that says a pane is not showing live output.
+	// It has to be here rather than on the status bar: the bar is optional
+	// (--no-status / Ctrl-G s) and there is one of it for N panes, whereas a
+	// scrolled pane is a per-pane state a human needs pointed at directly. It
+	// carries the way out for the same reason a modal dialog carries a Cancel.
+	if scrollBadge != "" {
+		r.renderScrollBadge(p, scrollBadge)
+	}
 
 	// Render overlay if present
 	if overlayText != "" {
@@ -1679,43 +2170,111 @@ func (r *Renderer) renderPane(p *Pane) {
 	}
 }
 
-// borderColorForPane returns the border color based on child tint settings.
-func borderColorForPane(p *Pane) Color {
-	// Check if any leaf pane under each child has a tint
-	tint1 := leafTint(p.child1)
-	tint2 := leafTint(p.child2)
-	// Use the more "severe" tint for border color
-	tint := tint1
-	if tint == "" {
-		tint = tint2
+// scrollBadgeText is what a scrolled-back pane says about itself: how far back
+// it is, how far back it CAN go, and the key that puts it live again. The
+// denominator is not decoration — without it "40 lines back" gives a reader no
+// way to tell a nearly-full ring from a nearly-empty one, which is the same
+// question `capture` answers with its scrollback count.
+func scrollBadgeText(off, have int) string {
+	return fmt.Sprintf(" SCROLL %d/%d · q live ", off, have)
+}
+
+// renderScrollBadge paints the badge into the pane's top-right corner. It is
+// truncated from the LEFT on a narrow pane so the exit key is the last thing to
+// go, and skipped entirely when the pane is too narrow to hold it without
+// covering more than it explains.
+func (r *Renderer) renderScrollBadge(p *Pane, text string) {
+	w := utf8.RuneCountInString(text)
+	if p.w < 12 || p.h < 1 {
+		return
 	}
-	switch tint {
-	case "green":
-		return Color{Index: 2} // green
+	if w > p.w {
+		runes := []rune(text)
+		runes = runes[len(runes)-p.w:]
+		text = string(runes)
+		w = p.w
+	}
+	r.moveTo(p.y, p.x+p.w-w)
+	// Ink on the warn colour: the badge sets both halves of its own contrast,
+	// like the overlay badge and unlike the tint wash that had to be removed.
+	r.setAttr(toColor(pal.ink), toColor(pal.warn), AttrBold)
+	r.buf.WriteString(text)
+	r.setAttr(defaultColor, defaultColor, 0)
+}
+
+// borderColorForPane returns the split's rule colour from the tints under it.
+//
+// The border is one of the two things magmux fully controls on a session pane
+// (the other is the overlay badge), and since the interior wash was removed it
+// is the ambient half of how a finished pane announces itself: a green rule
+// around a done pane, red around a failed one, amber around one that is blocked
+// on a permission prompt. It is a foreground on the terminal's own background,
+// so it is legible on any terminal — which is exactly what the wash was not.
+func borderColorForPane(p *Pane) Color {
+	// The loudest tint under either child wins. The old code took child1's and
+	// only fell back to child2's when it was empty, which is not what its own
+	// comment claimed: a green pane on the left hid a failure on the right.
+	switch worseTint(leafTint(p.child1), leafTint(p.child2)) {
 	case "red":
-		return Color{Index: 1} // red
+		return toColor(pal.fail)
+	case "yellow":
+		return toColor(pal.warn)
+	case "green":
+		return toColor(pal.success)
 	default:
-		return Color{Index: 8} // gray
+		// The palette's rule colour, not ANSI 8. Index 8 is "bright black",
+		// which a light terminal renders as a pale grey — and renderBorder
+		// then draws it dim, on the terminal's own light background. The
+		// splits simply disappeared. pal.border is theme-picked and holds
+		// 3:1 against its background by test.
+		return toColor(pal.border)
 	}
 }
 
-// leafTint returns the tint of the first leaf pane found (depth-first).
+// tintSeverity orders the tints so a split can show the one that needs a human.
+func tintSeverity(t string) int {
+	switch t {
+	case "red":
+		return 3
+	case "yellow":
+		return 2
+	case "green":
+		return 1
+	}
+	return 0
+}
+
+// worseTint returns whichever of two tints is more severe.
+func worseTint(a, b string) string {
+	if tintSeverity(b) > tintSeverity(a) {
+		return b
+	}
+	return a
+}
+
+// leafTint returns the most severe tint of any leaf pane under p.
+// Caller holds treeMu.RLock; tint is content state, so the leaf read takes
+// p.mu — the `tint` verb writes it from a socket goroutine.
 func leafTint(p *Pane) string {
 	if p == nil {
 		return ""
 	}
 	if p.splitType == SplitNone {
-		return p.tint
-	}
-	if t := leafTint(p.child1); t != "" {
+		p.mu.Lock()
+		t := p.tint
+		p.mu.Unlock()
 		return t
 	}
-	return leafTint(p.child2)
+	return worseTint(leafTint(p.child1), leafTint(p.child2))
 }
 
 func (r *Renderer) renderBorder(p *Pane) {
 	bc := borderColorForPane(p)
-	r.setAttr(bc, defaultColor, AttrDim)
+	// Never dim. Every border colour is now a palette truecolor picked at the
+	// contrast it should be drawn at, and dimming is what made the old indexed
+	// ANSI 8 vanish on a light terminal. A tinted border is a completion
+	// marker; halving its contrast defeats the point of having one.
+	r.setAttr(bc, defaultColor, 0)
 	if p.splitType == SplitHorizontal {
 		bx := p.child1.x + p.child1.w
 		for row := 0; row < p.h; row++ {
@@ -1731,9 +2290,49 @@ func (r *Renderer) renderBorder(p *Pane) {
 	}
 }
 
+// overlayAccent is the palette colour that carries an overlay's meaning: the
+// border, and the header line inside it.
+//
+// The overlay is the completion marker — the pane interior is the child's and
+// must not be recoloured (see renderPane) — so this is one of the few colours
+// magmux states outright, and it is a palette token for the same reason the
+// border and the status bar are: an index means whatever the user's terminal
+// decided it means, and 46-on-22 meant "dark theme" on every terminal.
+//
+// "info" is amber rather than blue: its only user is the permission overlay,
+// whose pane border is already tinted amber (borderColorForPane), and a box in
+// a different colour from the rule around it says two things at once.
+func overlayAccent(style string) rgb {
+	switch style {
+	case "success":
+		return pal.success
+	case "error":
+		return pal.fail
+	case "info":
+		return pal.warn
+	default:
+		return pal.text
+	}
+}
+
 // renderOverlay draws a centered popup window on a pane with a rounded border
 // and a drop shadow. The overlayText may contain \n for multi-line content;
 // the first line is rendered as a bold header.
+//
+// Every cell it paints sets BOTH a foreground and a background. That is not
+// tidiness — it is the whole reason the overlay, and not a background wash, is
+// the completion marker: it sits on top of a child's output whose colours
+// magmux does not know, and a cell that sets only one half inherits the other
+// from whatever the child last left in force. So: the box interior is pal.bar,
+// the surface magmux already owns and paints the status bar with, and every
+// glyph on it is a palette foreground measured against it.
+//
+// Hierarchy without SGR 2: the header is bold in the state colour, the detail
+// lines are plain body text. The old code said "dim white" (SGR 2 on 37) over
+// a dark green fill — 4.38:1 before the terminal's own idea of dim halved it
+// again, and unreadable on a light terminal. De-emphasis is a colour here,
+// because a colour is a value the palette can state and a test can measure;
+// dim is a hint the terminal renders however it likes.
 func (r *Renderer) renderOverlay(p *Pane) {
 	if p.overlayText == "" {
 		return
@@ -1773,27 +2372,19 @@ func (r *Renderer) renderOverlay(p *Pane) {
 		by = p.y
 	}
 
-	// Style selection
-	var bgCode, borderFg string
-	switch p.overlayStyle {
-	case "success":
-		bgCode = "\x1b[48;5;22m"   // dark green background
-		borderFg = "\x1b[38;5;46m" // bright green border
-	case "error":
-		bgCode = "\x1b[48;5;52m"    // dark red background
-		borderFg = "\x1b[38;5;203m" // bright red border
-	case "info":
-		bgCode = "\x1b[48;5;17m"   // dark blue background
-		borderFg = "\x1b[38;5;75m" // bright blue border
-	default:
-		bgCode = "\x1b[48;5;236m"   // dark gray background
-		borderFg = "\x1b[38;5;250m" // light gray border
-	}
+	// Style selection — the box surface is the palette's, the border and header
+	// carry the state.
+	bgCode := bg(pal.bar)
+	borderFg := fg(overlayAccent(p.overlayStyle))
+	bodyFg := fg(pal.text)
 	reset := "\x1b[0m"
 
-	// Drop shadow: dim cells 1 row below and 1 col right of the box.
-	// Uses 256-color index 236 on whatever text is underneath.
-	shadowCode := "\x1b[48;5;235m\x1b[38;5;238m"
+	// Drop shadow: cells 1 row below and 1 col right of the box, filled with
+	// the palette's shadow. Foreground AND background, both pal.shadow: the
+	// cell paints a space, so making the two agree means it is a solid block
+	// whatever the terminal does with the glyph, and it can never inherit a
+	// foreground from the child underneath.
+	shadowCode := bg(pal.shadow) + fg(pal.shadow)
 	// Right-side shadow column (skip the very top row so it looks like light from top-left)
 	for row := 0; row < boxH; row++ {
 		ry := by + row + 1
@@ -1859,11 +2450,14 @@ func (r *Renderer) renderOverlay(p *Pane) {
 		r.buf.WriteString(bgCode)
 		r.buf.WriteString(borderFg)
 		r.buf.WriteString("\u2502") // left │
-		// Content: first line bold bright white, subsequent dim
+		// Content: the header carries the state colour and bold; the detail
+		// lines are body text. Never dim — see the function comment.
 		if i == 0 {
-			r.buf.WriteString("\x1b[1;97m")
+			r.buf.WriteString("\x1b[1m")
+			r.buf.WriteString(borderFg)
 		} else {
-			r.buf.WriteString("\x1b[22;2;37m")
+			r.buf.WriteString("\x1b[22m")
+			r.buf.WriteString(bodyFg)
 		}
 		r.buf.WriteString(" ")
 		r.buf.WriteString(padded)
@@ -1907,20 +2501,21 @@ func (r *Renderer) renderOverlayPill(p *Pane, text string) {
 		return
 	}
 
-	var bgCode string
-	switch p.overlayStyle {
-	case "success":
-		bgCode = "\x1b[1;37;48;5;22m"
-	case "error":
-		bgCode = "\x1b[1;37;48;5;52m"
-	case "info":
-		bgCode = "\x1b[37;48;5;17m"
-	default:
-		bgCode = "\x1b[1;37;48;5;236m"
+	// Too small for a box, so the pill is the badge idiom instead: filled with
+	// the state colour, written in ink. That pair is the one magmux already
+	// imposes everywhere else (badge(), the status bar's pills) and the one
+	// TestPaletteContrast measures ink against, so the fallback inherits the
+	// same guarantee as the full overlay rather than inventing colours at the
+	// size where legibility matters most.
+	fill := overlayAccent(p.overlayStyle)
+	if p.overlayStyle != "success" && p.overlayStyle != "error" && p.overlayStyle != "info" {
+		fill = pal.subtle // "text on text" is not a pill
 	}
 
 	r.moveTo(cy, cx)
-	r.buf.WriteString(bgCode)
+	r.buf.WriteString(bg(fill))
+	r.buf.WriteString(fg(pal.ink))
+	r.buf.WriteString("\x1b[1m")
 	r.buf.WriteString(text)
 	r.buf.WriteString("\x1b[0m")
 	r.prevFg = Color{Index: -2}
@@ -1945,6 +2540,18 @@ func (r *Renderer) renderSelection(p *Pane) {
 	}
 	r.buf.WriteString("m")
 
+	// Both ends of both axes, and the lower ends are not theoretical: a click on
+	// a split border leaves the anchor one cell outside the focused pane, and an
+	// unbounded subscript here is a panic that kills the whole multiplexer. The
+	// clamp in the click branch of parseSGRMouse is the first line of defence;
+	// this is the second, because sel is package-level state that several paths
+	// write and only one of them reads it back.
+	if sy < 0 {
+		sy = 0
+	}
+	if sx < 0 {
+		sx = 0
+	}
 	for row := sy; row <= ey && row < p.h; row++ {
 		cs := 0
 		ce := p.w - 1
@@ -1956,7 +2563,15 @@ func (r *Renderer) renderSelection(p *Pane) {
 		}
 		r.moveTo(p.y+row, p.x+cs)
 		p.mu.Lock()
-		for c := cs; c <= ce && c < p.screen.cols; c++ {
+		// `row < p.h` above is a PANE bound, not a screen bound, and the two part
+		// company whenever geometry has changed and the screen has not been
+		// resized yet. The old cells grid was rows+1000 tall so an overrun landed
+		// in the dead tail; now it would be out of range.
+		if row < 0 || row >= len(p.screen.cells) {
+			p.mu.Unlock()
+			continue
+		}
+		for c := cs; c >= 0 && c <= ce && c < p.screen.cols; c++ {
 			ch := p.screen.cells[row][c].Ch
 			if ch == 0 || ch == ' ' {
 				r.buf.WriteByte(' ')
@@ -1972,19 +2587,34 @@ func (r *Renderer) renderSelection(p *Pane) {
 	r.prevBg = defaultColor
 }
 
-// renderStatusBar paints the bottom status line in a Claude-Code-inspired
-// style: dark background, bold-cyan labels, colored segments separated by
-// thin dim vertical bars. Segments use the "CODE:text" format; consult
-// the switch below for the full palette.
+// barBase is the status bar's ground state: no attributes, the bar's own
+// background, body foreground. It is the bar's equivalent of the panel's
+// sgrBase, and exists for the same reason — a bare "\x1b[0m" drops the bar's
+// background as well as its colour, and "\x1b[39m" drops the foreground to the
+// terminal's default, which on the bar's own background is a colour nobody
+// chose. Every segment ends by returning here.
+func barBase() string { return sgrReset + bg(pal.bar) + fg(pal.text) }
+
+// renderStatusBar paints the bottom status line: the bar's own background,
+// accent labels, coloured segments separated by thin vertical rules. Segments
+// use the "CODE:text" format; consult the switch below for the full mapping.
+//
+// This is the one full-width surface magmux fills with a colour of its own, and
+// it is the exception that proves FIX 1's rule: a status bar that separates
+// itself from the pane above is a convention worth keeping, but the background
+// has to belong to the active theme (pal.bar) and every foreground written on
+// it is held to its contrast against THAT — see TestPaletteContrast. It used to
+// be hardcoded 256-colour (48;5;236 under 38;5;51 cyan, 220 yellow, …), which
+// stayed a dark slab with saturated text on a light terminal.
 func (r *Renderer) renderStatusBar(row, cols int, text string) {
-	const (
-		bg      = "\x1b[48;5;236m" // dark gray background for the whole bar
-		reset   = "\x1b[39m\x1b[48;5;236m"
-		divider = "\x1b[38;5;240m│\x1b[0m" + "\x1b[48;5;236m"
+	var (
+		barBg   = bg(pal.bar)
+		reset   = barBase()
+		divider = fg(pal.border) + "│" + reset
 	)
 
 	r.moveTo(row, 0)
-	r.buf.WriteString(bg)
+	r.buf.WriteString(barBg)
 	r.prevBg = Color{Index: -2}
 
 	// Initial padding
@@ -2011,44 +2641,50 @@ func (r *Renderer) renderStatusBar(row, cols int, text string) {
 			txt = strings.TrimSpace(parts[1])
 		}
 
+		// pill is a saturated chip: palette ink on a state colour, both halves
+		// set, so it is legible whatever the terminal is — the same contract
+		// the panel's badge() has.
+		pill := func(c rgb) {
+			r.buf.WriteString(bg(c) + fg(pal.ink) + sgrBold + " " + txt + " " + reset)
+			col += utf8.RuneCountInString(txt) + 2
+		}
+		// label writes a coloured run and returns to the bar's ground state.
+		label := func(c rgb, bold bool, s string) {
+			if bold {
+				r.buf.WriteString(sgrBold)
+			}
+			r.buf.WriteString(fg(c) + s + reset)
+			col += utf8.RuneCountInString(s)
+		}
+
 		switch code {
-		case "*": // Cyan bold asterisk + label (used for "* Opus" style)
-			r.buf.WriteString("\x1b[1;38;5;51m*\x1b[0m" + bg + "\x1b[1;38;5;51m " + txt + reset)
-			col += 2 + utf8.RuneCountInString(txt)
-		case "C": // Cyan bold label
-			r.buf.WriteString("\x1b[1;38;5;51m" + txt + reset)
-			col += utf8.RuneCountInString(txt)
-		case "P": // Green pill (bold bright white on dark green)
-			r.buf.WriteString("\x1b[48;5;22m\x1b[1;97m " + txt + " \x1b[0m" + bg)
-			col += utf8.RuneCountInString(txt) + 2
-		case "Pr": // Red pill
-			r.buf.WriteString("\x1b[48;5;52m\x1b[1;97m " + txt + " \x1b[0m" + bg)
-			col += utf8.RuneCountInString(txt) + 2
-		case "Py": // Yellow pill
-			r.buf.WriteString("\x1b[48;5;94m\x1b[1;97m " + txt + " \x1b[0m" + bg)
-			col += utf8.RuneCountInString(txt) + 2
-		case "$", "Y": // Yellow bold (money / warnings)
-			r.buf.WriteString("\x1b[1;38;5;220m" + txt + reset)
-			col += utf8.RuneCountInString(txt)
-		case "M": // Magenta bold
-			r.buf.WriteString("\x1b[1;38;5;213m" + txt + reset)
-			col += utf8.RuneCountInString(txt)
-		case "G": // Green bold
-			r.buf.WriteString("\x1b[1;38;5;82m" + txt + reset)
-			col += utf8.RuneCountInString(txt)
-		case "R": // Red bold
-			r.buf.WriteString("\x1b[1;38;5;203m" + txt + reset)
-			col += utf8.RuneCountInString(txt)
-		case "W": // White
-			r.buf.WriteString("\x1b[1;97m" + txt + reset)
-			col += utf8.RuneCountInString(txt)
-		case "D": // Dim gray (help text)
-			r.buf.WriteString("\x1b[2;38;5;245m" + txt + "\x1b[22;39m" + bg)
-			col += utf8.RuneCountInString(txt)
+		case "*": // Accent bold asterisk + label (used for "* Opus" style)
+			label(pal.accent, true, "* "+txt)
+		case "C": // Accent bold label
+			label(pal.accent, true, txt)
+		case "P": // Success pill
+			pill(pal.success)
+		case "Pr": // Failure pill
+			pill(pal.fail)
+		case "Py": // Warning pill
+			pill(pal.warn)
+		case "$", "Y": // Warning bold (money / running counts)
+			label(pal.warn, true, txt)
+		case "M": // Secondary data (elapsed time)
+			label(pal.debug, true, txt)
+		case "G": // Success bold
+			label(pal.success, true, txt)
+		case "R": // Failure bold
+			label(pal.fail, true, txt)
+		case "W": // Body text, emphasised
+			label(pal.text, true, txt)
+		case "D": // Help text — recedes, but is not dimmed on top of that:
+			// pal.subtle is already picked to sit at the chrome bar against
+			// pal.bar, and SGR 2 on top of it puts it back under.
+			label(pal.subtle, false, txt)
 		default:
 			// Unknown code — render as plain text
-			r.buf.WriteString("\x1b[38;5;250m" + txt + reset)
-			col += utf8.RuneCountInString(txt)
+			label(pal.text, false, txt)
 		}
 	}
 
@@ -2063,26 +2699,82 @@ func (r *Renderer) renderStatusBar(row, cols int, text string) {
 	r.prevAttr = 0
 }
 
-func (r *Renderer) flush() {
-	os.Stdout.WriteString(r.buf.String())
+// frame returns the painted bytes. It does NOT write them: the renderer runs
+// under treeMu.RLock and the terminal write must not (see render()). The string
+// stays valid across the next reset() — strings.Builder.Reset drops its buffer
+// rather than reusing it — and only the render goroutine ever touches r.buf.
+func (r *Renderer) frame() string {
+	return r.buf.String()
 }
 
 // ── Multiplexer ───────────────────────────────────────────────────────────────
 
 type Magmux struct {
-	root          *Pane
-	focused       *Pane
-	allPanes      []*Pane // leaf panes only
-	rows, cols    int
-	statusText    string
-	renderer      Renderer
+	// treeMu guards the LAYOUT: m.root, m.allPanes (its header, its elements,
+	// and each element's id/closed/label), m.focused, m.statusText, m.rows,
+	// m.cols, m.closeAt, the package-level `sel`, and the structural fields of
+	// every Pane (splitType, y, x, h, w, ratio, child1, child2, parent).
+	// Content fields (screen, dirty, dead, tint, inputReady, …) stay under
+	// Pane.mu exactly as before.
+	//
+	// Lock order:
+	//
+	//	treeMu -> p.mu -> sockClientsMu
+	//	treeMu -> cp.mu
+	//	treeMu -> claimedMu
+	//
+	// Three rules:
+	//
+	//  1. Never hold treeMu across blocking I/O — ptmx.Write, conn.Write,
+	//     cmd.Start, os.Stdout.Write, controller.Poll, exec of pbcopy. Resolve
+	//     the pointer under RLock, release, then do the I/O. There is no
+	//     exception: render() paints into a buffer and writes it after the
+	//     unlock, and pollControllers snapshots the pane list under RLock and
+	//     polls with the lock released.
+	//  2. sync.RWMutex is NOT reentrant. A second RLock on one goroutine
+	//     deadlocks if a writer is queued between them, and the failure mode is
+	//     a silent hang rather than a race report. Every function reachable
+	//     from a site that already holds treeMu has a …Locked twin —
+	//     allPanesDoneLocked above all, because renderLocked holds RLock
+	//     throughout.
+	//  3. Never acquire treeMu while holding p.mu, cp.mu, sockClientsMu or
+	//     claimedMu.
+	//
+	// One deliberate exception to the usual reader/writer split: render()
+	// WRITES m.statusText while holding only RLock. That is safe because
+	// render is the single render-loop goroutine and every other writer of
+	// statusText (the `status` verb, updateAgentStatusBar) takes the full
+	// Lock, which excludes it. Anything else that wants to write under RLock
+	// has to make the same argument or it is a race.
+	treeMu sync.RWMutex
+	// closing is set by cleanup() under treeMu.Lock BEFORE it calls wg.Wait().
+	// OpenPane checks it under the same lock, because an open_pane arriving
+	// during teardown would otherwise panic with "WaitGroup misuse: Add called
+	// concurrently with Wait".
+	closing    bool
+	root       *Pane
+	focused    *Pane
+	allPanes   []*Pane // leaf panes only; append-only, index == Pane.id
+	rows, cols int
+	statusText string
+	renderer   Renderer
+	// out is where a painted frame goes. Nil means os.Stdout, which is what
+	// every real run uses; it exists so a test can substitute a writer it
+	// controls — both to keep thousands of ANSI frames out of the test log and
+	// to PROVE the frame is written with treeMu released (a writer that blocks
+	// for 200ms must not delay a treeMu.Lock by anything like 200ms).
+	//
+	// Written once before renderLoop starts and never again, so it needs no
+	// lock; treat it as immutable from the moment the render loop exists.
+	out           io.Writer
 	rawState      *term.State
 	quit          chan struct{}
 	quitOnce      sync.Once
 	wg            sync.WaitGroup
 	gridMode      bool       // -g flag was used
 	autoExit      bool       // -w flag: quit automatically when all panes done
-	sockPath      string     // /tmp/magmux-{pid}.sock
+	sockPath      string     // /tmp/magmux-{pid}.sock, or {name} with --id
+	sockID        string     // --id NAME: bind a named socket instead of the pid one
 	sockClients   []net.Conn // currently-connected socket subscribers (for push events)
 	sockClientsMu sync.Mutex
 	// finalEvents holds the marshaled shutdown payloads (results, then
@@ -2097,16 +2789,40 @@ type Magmux struct {
 	// final results/shutdown broadcast, subscribers flushed and closed,
 	// listener removed. main waits on it before exiting, because that
 	// teardown is what delivers `results`; exiting first drops it entirely.
-	sockDone      chan struct{}
-	sockDoneOnce  sync.Once
-	lastDoneCount int       // track status bar updates to avoid redundant rewrites
-	startedAt     time.Time // when magmux started (for status bar timer)
-	completedAt   time.Time // when all panes reached "done" (freezes timer)
-	lastTimerTick int       // elapsed seconds at last forced status redraw
+	sockDone     chan struct{}
+	sockDoneOnce sync.Once
+	// layoutReady is closed once the layout EXISTS: buildGrid/buildLayout have
+	// run, read loops are running and controllers are attached. The socket
+	// binds long before that (MAGMUX_SOCK has to be in the environment of the
+	// very first child), so without this a client that connects inside that
+	// window is served against an empty m.allPanes — and the first thing
+	// handleSocketConn writes is the connect-time aggregate snapshot, which
+	// every subscriber seeds its entire pane map from precisely because magmux
+	// only pushes per-pane snapshots on CHANGE. An empty aggregate therefore
+	// does not merely arrive early, it strands that client forever waiting for
+	// state it will never be told again. Verbs served in the window were just
+	// as wrong, and reported it as `no_such_pane`, which reads as "your index
+	// is bad" rather than "there is no layout yet".
+	//
+	// Nil means "no wait": the in-process tests build their layout
+	// synchronously before anything can look at it.
+	layoutReady     chan struct{}
+	layoutReadyOnce sync.Once
+	lastDoneCount   int       // track status bar updates to avoid redundant rewrites
+	startedAt       time.Time // when magmux started (for status bar timer)
+	completedAt     time.Time // when all panes reached "done" (freezes timer)
+	lastTimerTick   int       // elapsed seconds at last forced status redraw
 	// Interactive tool controllers
 	controllerFactories []ControllerFactory
-	lastControllerPoll  time.Time
-	ctx                 context.Context
+	// pollMu serialises pollControllers and guards lastControllerPoll. It is
+	// its OWN lock rather than treeMu because the poll must not hold treeMu:
+	// ClaudeCodeController.Poll walks ~/.claude/projects on every tick until it
+	// finds a transcript. pollControllers takes treeMu.RLock inside pollMu to
+	// snapshot the pane list, so nothing may ever take pollMu while holding
+	// treeMu.
+	pollMu             sync.Mutex
+	lastControllerPoll time.Time
+	ctx                context.Context
 	// claimedSessions maps controller-managed session file paths to the
 	// pane that owns them. Used so sibling controllers don't both pick the
 	// same JSONL file when running in the same project directory.
@@ -2122,7 +2838,96 @@ type Magmux struct {
 	// worse than one that lingers.
 	autoCloseAfter time.Duration
 	closeAt        time.Time // when the armed countdown fires; zero if not armed
+	// themePref is --theme ("", "auto", "light" or "dark"). Empty falls back
+	// to MAGMUX_THEME, which falls back to auto-detection. See theme.go.
+	themePref string
+	// pendingInput is input that arrived DURING startup and has not been
+	// handled yet — bytes the OSC 11 theme probe read off stdin that were not
+	// part of the terminal's reply.
+	//
+	// The probe is the only reader of stdin that runs before inputLoop's own
+	// goroutine, and it cannot tell the terminal to answer without also
+	// draining whatever the user typed in the meantime. Dropping those bytes
+	// would mean magmux eats keystrokes at startup — including the ones the
+	// PTY-driven tests send — so they are parked here and replayed into the
+	// input loop ahead of everything read later, in order.
+	//
+	// Written in init(), read once by inputLoop, and the two cannot overlap:
+	// init() returns before any goroutine exists. No lock, deliberately.
+	pendingInput []byte
+	// stdin is where keystrokes come from. Nil means os.Stdin, which is every
+	// real run; a test points it at a pipe so it can drive inputLoop without
+	// swapping a package-level variable out from under the goroutine that is
+	// blocked reading it.
+	stdin *os.File
+	// themeAskedAt is when the OSC 11 background query was written to the
+	// terminal, or the zero time if it never was (--theme/MAGMUX_THEME said
+	// which palette to use, or stdin is not a tty). It opens the window in
+	// which inputLoop swallows a late reply; see themeReplyWindow.
+	//
+	// Same discipline as pendingInput: written in init(), read by inputLoop on
+	// the same goroutine, and nothing else touches it.
+	themeAskedAt time.Time
+
+	// ── chrome (Ctrl-G p / Ctrl-G s) ────────────────────────────────────────
+	//
+	// Both of these are stated as NEGATIVES so the zero value is today's
+	// behaviour: a Magmux built by a test literal still gets its status row and
+	// still reserves it in buildGrid/buildLayout. Guarded by treeMu — the
+	// status row is layout, and so is where the panel sits.
+
+	// hideStatus removes the bottom status row and gives it to the layout
+	// (--no-status, Ctrl-G s).
+	hideStatus bool
+
+	// panel is the control-panel pane, on screen or hidden. Nil when this
+	// magmux has none (every test literal, and any future mode that opts out).
+	// A pointer rather than "the first isControl pane in allPanes", because the
+	// PTY-less pane is also what the unit tests build their fake sessions from
+	// and a search would find one of those instead.
+	panel *Pane
+
+	// panelAnchor / panelSplit / panelRatio / panelFirst remember where the
+	// panel was when it was hidden, so showing it puts it BACK rather than
+	// somewhere plausible.
+	//
+	// The anchor is the sibling node that inherited the panel's space, because
+	// that is exactly what removeLeafLocked leaves behind: it collapses the
+	// parent into the sibling and hands the sibling the parent's exact
+	// geometry. Splitting that same node again with the same type and ratio, on
+	// the same side, is the inverse operation and restores the tree byte for
+	// byte. It is a POINTER and not an id because the sibling is usually an
+	// internal node, which has no id; showPanelLocked therefore re-verifies it
+	// is still reachable from m.root before using it and falls back to the root
+	// if an agent closed it in the meantime.
+	//
+	// panelFirst is stated as the negative for the usual reason: the zero value
+	// has to be the right answer for a panel that has never been hidden, and
+	// every layout builder puts the panel LAST — child2, the right-hand column.
+	panelAnchor *Pane
+	panelSplit  SplitType
+	panelRatio  float64
+	panelFirst  bool // the panel was child1 (the left-hand / upper column)
+
+	// chromeNote is a transient refusal shown in the status bar — "no room for
+	// the panel" on a terminal too narrow to split. It is deliberately NOT part
+	// of m.statusText: it belongs to the keystroke that caused it, not to the
+	// run, and it expires on its own.
+	chromeNote   string
+	chromeNoteAt time.Time
+
+	// chordArmed is set for exactly as long as Ctrl-G has been pressed and
+	// magmux is waiting for the second key. The status row shows the chord's
+	// own second keys for that beat, which is the only way a prefix key can
+	// teach itself on a terminal that otherwise shows nothing. Written by
+	// inputLoop under treeMu.Lock, read by renderLocked under RLock.
+	chordArmed bool
 }
+
+// chromeNoteTTL is how long a refusal stays in the status bar. It clears on
+// the next repaint after that; an idle magmux paints nothing, which is the
+// whole rendering model, so the note can outstay this on a still screen.
+const chromeNoteTTL = 4 * time.Second
 
 // claimSession atomically attempts to mark `path` as owned by `p`. Returns
 // true if the claim succeeded (path was free). Used by controllers that
@@ -2150,6 +2955,422 @@ func (m *Magmux) isSessionClaimed(path string, p *Pane) bool {
 		return true
 	}
 	return false
+}
+
+// releaseSessions drops every transcript claim held by p.
+//
+// claimedSessions was never cleaned, which was harmless while panes only ever
+// appeared. Once a pane can be closed it is not: a later pane in the same
+// project can never claim that transcript, so its controller sits in `starting`
+// silently and forever with nothing logged anywhere.
+//
+// Caller must NOT hold claimedMu.
+func (m *Magmux) releaseSessions(p *Pane) {
+	if p == nil {
+		return
+	}
+	m.claimedMu.Lock()
+	for path, owner := range m.claimedSessions {
+		if owner == p {
+			delete(m.claimedSessions, path)
+		}
+	}
+	m.claimedMu.Unlock()
+}
+
+// ── Pane identity ────────────────────────────────────────────────────────────
+//
+// m.allPanes is an append-only slot table and a pane's id IS its index. Nothing
+// ever renumbers: close_pane tombstones the slot instead of compacting, because
+// the socket protocol's only addressing mode is an integer, so compacting would
+// make `send` to pane 1 quietly hit a different session with no error anywhere.
+//
+// The two resolvers below are the ONLY way to turn an int into a *Pane. Any
+// surviving raw subscript of allPanes writes tint, overlay or keystrokes into
+// a detached pane — no error, no repaint, no log — which is why the rule is
+// enforced by grepping for a subscript of allPanes and expecting no hit
+// outside paneByIDLocked.
+
+// paneByIDLocked returns the live pane with this id, or nil if the id is
+// negative, out of range, or tombstoned. Caller holds at least treeMu.RLock.
+func (m *Magmux) paneByIDLocked(id int) *Pane {
+	if id < 0 || id >= len(m.allPanes) {
+		return nil
+	}
+	p := m.allPanes[id]
+	if p == nil || p.closed {
+		return nil
+	}
+	return p
+}
+
+// livePanesLocked appends every live (non-tombstoned) pane to dst and returns
+// it. Pass a nil dst for a fresh slice, or a reused one to avoid allocating in
+// the render path. Caller holds at least treeMu.RLock.
+func (m *Magmux) livePanesLocked(dst []*Pane) []*Pane {
+	dst = dst[:0]
+	for _, p := range m.allPanes {
+		if p == nil || p.closed {
+			continue
+		}
+		dst = append(dst, p)
+	}
+	return dst
+}
+
+// statusRowsLocked is how many rows the bottom status bar takes off the
+// layout: 1 normally, 0 when it is hidden (--no-status / Ctrl-G s). Every
+// place that used to write a bare `statusH := 1` goes through it, so showing
+// and hiding the bar is one number rather than three that can drift apart.
+//
+// Caller holds at least treeMu.RLock.
+func (m *Magmux) statusRowsLocked() int {
+	if m.hideStatus {
+		return 0
+	}
+	return 1
+}
+
+// reflowLocked resizes the whole tree to the current terminal minus the status
+// row. It is the SIGWINCH path, reused verbatim by the two chrome toggles:
+// showing or hiding either the panel or the status bar is a reflow and nothing
+// more, and a second copy of this arithmetic is how the two would drift.
+//
+// Caller holds treeMu.Lock.
+func (m *Magmux) reflowLocked() {
+	if m.root == nil {
+		return
+	}
+	m.root.resize(0, 0, maxInt(0, m.rows-m.statusRowsLocked()), maxInt(0, m.cols))
+}
+
+// panelLocked returns the control-panel pane whether it is on screen or
+// hidden, or nil if this magmux has none or an agent closed it.
+// Caller holds at least treeMu.RLock.
+func (m *Magmux) panelLocked() *Pane {
+	if m.panel == nil || m.panel.closed {
+		return nil
+	}
+	return m.panel
+}
+
+// panelHiddenLocked reports whether the panel exists and is currently out of
+// the tree. Caller holds at least treeMu.RLock.
+func (m *Magmux) panelHiddenLocked() bool {
+	p := m.panelLocked()
+	return p != nil && p.hidden
+}
+
+// nodeInTreeLocked reports whether n is still reachable from m.root. The panel
+// anchor is a raw pointer to a node that may since have been collapsed away by
+// a close_pane, and splicing onto a detached node would attach the panel to a
+// subtree nothing paints — invisible and undismissable, the same failure
+// OpenPane re-verifies against.
+//
+// Caller holds at least treeMu.RLock.
+func (m *Magmux) nodeInTreeLocked(n *Pane) bool {
+	if n == nil {
+		return false
+	}
+	var walk func(*Pane) bool
+	walk = func(p *Pane) bool {
+		if p == nil {
+			return false
+		}
+		if p == n {
+			return true
+		}
+		return walk(p.child1) || walk(p.child2)
+	}
+	return walk(m.root)
+}
+
+// markAllDirtyLocked forces a full repaint. Geometry changed under every pane,
+// and the dirty-flag model means a frame is only painted when some pane says
+// its CONTENT changed — so without this a reflow can sit unpainted until the
+// next keystroke. Caller holds at least treeMu.RLock.
+func (m *Magmux) markAllDirtyLocked() {
+	for _, p := range m.livePanesLocked(nil) {
+		if p.hidden {
+			continue
+		}
+		p.mu.Lock()
+		p.dirty = true
+		p.mu.Unlock()
+	}
+}
+
+// noteChromeLocked parks a transient message for the status bar.
+// Caller holds treeMu.Lock.
+func (m *Magmux) noteChromeLocked(s string) {
+	m.chromeNote = s
+	m.chromeNoteAt = time.Now()
+}
+
+// armChord arms or disarms the Ctrl-G menu on the status row. It marks the
+// screen dirty because an idle magmux paints nothing at all, so the menu would
+// otherwise never appear — and would never leave. Caller must NOT hold treeMu.
+func (m *Magmux) armChord(on bool) {
+	m.treeMu.Lock()
+	defer m.treeMu.Unlock()
+	if m.chordArmed == on {
+		return
+	}
+	m.chordArmed = on
+	m.markAllDirtyLocked()
+}
+
+// ── scroll mode ──────────────────────────────────────────────────────────────
+//
+// A focused SESSION pane can be scrolled back through its own history. The
+// mechanism has to satisfy one hard constraint: arrows, PageUp/PageDown and the
+// wheel must keep reaching the child, because a full-screen TUI needs every one
+// of them. So scrolling is a MODE, entered from the Ctrl-G prefix that already
+// exists (Ctrl-G [, tmux's copy-mode binding), and it is entered by an action
+// rather than by a toggle — Ctrl-G [ scrolls back one page and you are in it.
+//
+// The mode has no flag of its own. A pane is in scroll mode exactly when
+// screen.sbOff > 0, which is also exactly the condition that paints the badge
+// and the condition the renderer composes history under. One piece of state
+// cannot disagree with itself: scrolling back to live IS leaving.
+//
+// While the mode is on, keys are consumed by consumeScrollKey and none of them
+// reach the child. That is deliberate and it is why entry is deliberate too: a
+// user who has not pressed Ctrl-G [ can never lose a keystroke to this.
+
+// scrollFocusedBy moves the focused pane's viewport by delta rows (positive =
+// further back) and returns whether anything could be scrolled. It refuses on
+// the control panel, which has its own scrolling, and on a pane with no history
+// — an alternate-screen pane being the case that matters, since it records none.
+//
+// Caller must NOT hold treeMu.
+func (m *Magmux) scrollFocusedBy(delta int) bool {
+	m.treeMu.Lock()
+	f := m.focused
+	if f == nil || f.isControl || f.screen == nil {
+		if f != nil && f.isControl {
+			m.noteChromeLocked("the panel scrolls with k/j/g/G")
+		}
+		m.treeMu.Unlock()
+		return false
+	}
+	f.mu.Lock()
+	s := f.screen
+	ok := s.sbLen > 0 || s.sbOff > 0
+	if ok {
+		s.scrollBackBy(delta)
+		f.dirty = true
+	}
+	alt := f.altMode
+	f.mu.Unlock()
+	if !ok {
+		if alt {
+			// The single most useful thing magmux can say here. Claude Code, vim
+			// and htop all live on the alternate screen, and "nothing happened"
+			// would read as a broken key rather than as a property of the app.
+			m.noteChromeLocked("no scrollback: this pane is on the alternate screen")
+		} else {
+			m.noteChromeLocked("nothing has scrolled off this pane yet")
+		}
+	}
+	m.markAllDirtyLocked()
+	m.treeMu.Unlock()
+	return ok
+}
+
+// scrollFocusedTo parks the focused pane at an absolute offset: 0 is live and
+// anything past the oldest kept line clamps to it.
+//
+// Caller must NOT hold treeMu.
+func (m *Magmux) scrollFocusedTo(off int) {
+	m.treeMu.Lock()
+	if f := m.focused; f != nil && !f.isControl && f.screen != nil {
+		f.mu.Lock()
+		f.screen.sbOff = clamp(off, 0, f.screen.sbLen)
+		f.dirty = true
+		f.mu.Unlock()
+	}
+	m.markAllDirtyLocked()
+	m.treeMu.Unlock()
+}
+
+// focusedScrollOff is how far back the focused pane is, and therefore whether
+// the next keystroke belongs to scroll mode. Zero when nothing is focused.
+//
+// Caller must NOT hold treeMu.
+func (m *Magmux) focusedScrollOff() int {
+	m.treeMu.RLock()
+	f := m.focused
+	m.treeMu.RUnlock()
+	if f == nil || f.screen == nil {
+		return 0
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.screen.sbOff
+}
+
+// scrollPageLocked is how much one page key moves: a screenful less two rows of
+// overlap, so a reader can see where they were. Caller holds at least
+// treeMu.RLock.
+func scrollPage(h int) int { return maxInt(1, h-2) }
+
+// consumeScrollKey handles a keystroke while the focused pane is scrolled back.
+// Returns how many bytes it consumed, or 0 to let the normal path have them.
+//
+// Nothing here reaches the child. The keys are the ones the control panel
+// already uses (k/j/g/G, arrows, PgUp/PgDn) so there is one set to learn, plus
+// q/Enter/Esc to return to live — the three keys a human tries when they want
+// out of something.
+//
+// Caller must NOT hold treeMu.
+func (m *Magmux) consumeScrollKey(buf []byte) int {
+	if len(buf) == 0 {
+		return 0
+	}
+	m.treeMu.RLock()
+	page := 20
+	if f := m.focused; f != nil {
+		page = scrollPage(f.h)
+	}
+	m.treeMu.RUnlock()
+
+	switch buf[0] {
+	case 'k':
+		m.scrollFocusedBy(1)
+		return 1
+	case 'j':
+		m.scrollFocusedBy(-1)
+		return 1
+	case 'g':
+		m.scrollFocusedTo(1 << 30) // clamped to the oldest line kept
+		return 1
+	case 'G':
+		m.scrollFocusedTo(0)
+		return 1
+	case ' ':
+		m.scrollFocusedBy(-page)
+		return 1
+	case 'b':
+		m.scrollFocusedBy(page)
+		return 1
+	case 'q', '\r', '\n':
+		m.scrollFocusedTo(0)
+		return 1
+	}
+	if buf[0] != 0x1b {
+		// Any other printable key is swallowed rather than typed. A pane showing
+		// history is not showing the prompt the keystroke was aimed at, and
+		// letting it through would put text into a session the user cannot see.
+		return 1
+	}
+	// ESC. A lone one is the user pressing Escape — the finished grid already
+	// reads it that way — and anything that is not a CSI cannot be a key this
+	// mode knows.
+	if len(buf) == 1 || (buf[1] != '[' && buf[1] != 'O') {
+		m.scrollFocusedTo(0)
+		return 1
+	}
+	if buf[1] != '[' || len(buf) < 3 {
+		return 0 // incomplete; wait for the rest rather than guessing
+	}
+	switch buf[2] {
+	case 'A': // up
+		m.scrollFocusedBy(1)
+		return 3
+	case 'B': // down
+		m.scrollFocusedBy(-1)
+		return 3
+	case 'H': // home
+		m.scrollFocusedTo(1 << 30)
+		return 3
+	case 'F': // end
+		m.scrollFocusedTo(0)
+		return 3
+	case '5': // PgUp: ESC [ 5 ~
+		if len(buf) < 4 {
+			return 0
+		}
+		if buf[3] == '~' {
+			m.scrollFocusedBy(page)
+			return 4
+		}
+	case '6': // PgDn: ESC [ 6 ~
+		if len(buf) < 4 {
+			return 0
+		}
+		if buf[3] == '~' {
+			m.scrollFocusedBy(-page)
+			return 4
+		}
+	case '<': // an SGR mouse report — the wheel still works in scroll mode
+		return 0
+	}
+	// An unrecognised CSI: consume it whole so a function key cannot leak into
+	// a session that is not showing its own prompt.
+	end := 2
+	for end < len(buf) {
+		if buf[end] >= 0x40 && buf[end] <= 0x7e {
+			return end + 1
+		}
+		end++
+	}
+	return 0
+}
+
+// noteRowLocked puts a live refusal note in front of the status row's own text.
+//
+// The note rides in FRONT of the run's summary rather than being written into
+// it: it belongs to the keystroke that caused it. If the two together would
+// overrun, the keystroke wins — the run's summary is back on the next frame,
+// the refusal is not.
+//
+// Caller holds at least treeMu.RLock. Split out of renderLocked so the width
+// can be measured by a test; renderStatusBar pads its segments and never
+// truncates them, so nothing downstream will catch an overrun.
+func (m *Magmux) noteRowLocked(text string) string {
+	n := m.chromeNoteLocked()
+	if n == "" {
+		return text
+	}
+	// The note itself was the one thing on this row nobody measured, and the two
+	// that exist are both longer than the terminals that produce them:
+	// panelTooNarrow is 41 runes and splitFits refuses at exactly the widths it
+	// cannot fit, and the alternate-screen note is 50 and fires on Ctrl-G [
+	// against any Claude Code or vim pane. renderStatusBar pads its segments and
+	// never truncates them, so an unbounded note wraps onto the pane above and
+	// corrupts the session's output. The budget is m.cols minus the bar's own
+	// leading pad, which is the only column renderStatusBar spends before this.
+	note := "R: " + fitNote(n, m.cols-1)
+	if text != "" && approxStatusWidth(note+"\t"+text) <= m.cols {
+		note += "\t" + text
+	}
+	return note
+}
+
+// chromeNoteLocked returns the live refusal message, or "" once it has expired.
+// Caller holds at least treeMu.RLock.
+func (m *Magmux) chromeNoteLocked() string {
+	if m.chromeNote == "" || time.Since(m.chromeNoteAt) > chromeNoteTTL {
+		return ""
+	}
+	return m.chromeNote
+}
+
+// paneByID is the locking twin of paneByIDLocked, for callers that hold nothing.
+// Caller must NOT hold treeMu.
+func (m *Magmux) paneByID(id int) *Pane {
+	m.treeMu.RLock()
+	defer m.treeMu.RUnlock()
+	return m.paneByIDLocked(id)
+}
+
+// livePanes is the locking twin of livePanesLocked.
+// Caller must NOT hold treeMu.
+func (m *Magmux) livePanes() []*Pane {
+	m.treeMu.RLock()
+	defer m.treeMu.RUnlock()
+	return m.livePanesLocked(nil)
 }
 
 func (m *Magmux) init() error {
@@ -2188,7 +3409,53 @@ func (m *Magmux) init() error {
 	// Alternate screen + hide cursor + enable SGR mouse tracking
 	os.Stdout.WriteString("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1002h\x1b[?1006h")
 
+	// Pick the palette. Runs here and nowhere else: after MakeRaw (so the
+	// terminal will not echo the query, and the reply arrives byte-for-byte),
+	// on the alternate screen (so a terminal that prints the query instead of
+	// answering it scribbles on a screen we are about to paint over anyway),
+	// and before any child is spawned or any goroutine reads stdin.
+	m.initTheme(fd)
+
 	return nil
+}
+
+// initTheme resolves --theme / MAGMUX_THEME, probing the terminal only when
+// neither says. Any keystrokes the probe swallowed are parked in
+// m.pendingInput for inputLoop; see the field's comment for why that matters.
+func (m *Magmux) initTheme(fd int) {
+	pref := themeSetting(m.themePref, os.Getenv("MAGMUX_THEME"))
+	// The colour the probe read, if it read one. It outlives the classification
+	// because children ask the same question magmux just asked, and are owed the
+	// real answer rather than the palette's stand-in for it.
+	var probed rgb
+	var probedOK bool
+	kind, leftover := resolveTheme(pref, func() (themeKind, []byte) {
+		// Nothing to ask and nobody to answer: a piped stdin has no
+		// background colour, and a dumb terminal has no OSC at all. Both
+		// would otherwise cost every run the probe timeout for nothing.
+		if !term.IsTerminal(fd) || os.Getenv("TERM") == "dumb" {
+			return themeDark, nil
+		}
+		// Recorded before the probe writes, and only on the path that
+		// actually writes: an explicit --theme never asks the terminal
+		// anything, so inputLoop must not then go looking for an answer.
+		m.themeAskedAt = time.Now()
+		k, c, ok, rest := detectThemeColor(os.Stdin, themeProbeTimeout)
+		probed, probedOK = c, ok
+		return k, rest
+	})
+	setTheme(kind)
+	// After setTheme, which resets the reported colours to the palette's
+	// assumptions. An explicit --theme never probes, so it keeps those — a
+	// coherent guess, which is all a child needs.
+	if probedOK {
+		setDetectedBackground(probed)
+	}
+	m.pendingInput = append(m.pendingInput, leftover...)
+	if dbgFile != nil {
+		fmt.Fprintf(dbgFile, "theme: pref=%s -> %s (%d bytes of input preserved, background %s)\n",
+			pref, kind, len(leftover), xColorString(termBack))
+	}
 }
 
 func (m *Magmux) restore() {
@@ -2200,7 +3467,7 @@ func (m *Magmux) restore() {
 }
 
 func (m *Magmux) buildLayout(commands []PaneConfig) error {
-	statusH := 1
+	statusH := m.statusRowsLocked()
 	availH := m.rows - statusH
 
 	if len(commands) == 0 {
@@ -2210,7 +3477,7 @@ func (m *Magmux) buildLayout(commands []PaneConfig) error {
 	// Special layout for POC: top half split horizontal, bottom pane, status bar
 	switch len(commands) {
 	case 1:
-		p, err := newPane(0, 0, availH, m.cols, commands[0].Cmd, commands[0].Args...)
+		p, err := newPaneFor(0, 0, availH, m.cols, commands[0])
 		if err != nil {
 			return err
 		}
@@ -2227,11 +3494,11 @@ func (m *Magmux) buildLayout(commands []PaneConfig) error {
 		}
 		w1 := m.cols / 2
 		w2 := m.cols - w1 - 1
-		p1, err := newPane(0, 0, availH, w1, commands[0].Cmd, commands[0].Args...)
+		p1, err := newPaneFor(0, 0, availH, w1, commands[0])
 		if err != nil {
 			return err
 		}
-		p2, err := newPane(0, w1+1, availH, w2, commands[1].Cmd, commands[1].Args...)
+		p2, err := newPaneFor(0, w1+1, availH, w2, commands[1])
 		if err != nil {
 			return err
 		}
@@ -2254,11 +3521,11 @@ func (m *Magmux) buildLayout(commands []PaneConfig) error {
 		}
 		w1 := m.cols / 2
 		w2 := m.cols - w1 - 1
-		p1, err := newPane(0, 0, topH, w1, commands[0].Cmd, commands[0].Args...)
+		p1, err := newPaneFor(0, 0, topH, w1, commands[0])
 		if err != nil {
 			return err
 		}
-		p2, err := newPane(0, w1+1, topH, w2, commands[1].Cmd, commands[1].Args...)
+		p2, err := newPaneFor(0, w1+1, topH, w2, commands[1])
 		if err != nil {
 			return err
 		}
@@ -2268,7 +3535,7 @@ func (m *Magmux) buildLayout(commands []PaneConfig) error {
 		p2.parent = topPane
 
 		// Bottom pane
-		p3, err := newPane(topH+1, 0, botH, m.cols, commands[2].Cmd, commands[2].Args...)
+		p3, err := newPaneFor(topH+1, 0, botH, m.cols, commands[2])
 		if err != nil {
 			return err
 		}
@@ -2288,7 +3555,19 @@ func (m *Magmux) buildLayout(commands []PaneConfig) error {
 		m.focused = p1
 	}
 
+	m.stampPaneIDs()
 	return nil
+}
+
+// stampPaneIDs assigns each pane its permanent id — its index in m.allPanes.
+// Called by both layout builders as the last step, before any goroutine can
+// see a pane. Ids are written once and never touched again, which is what lets
+// every other goroutine read Pane.id without treeMu.
+func (m *Magmux) stampPaneIDs() {
+	for i, p := range m.allPanes {
+		p.id = i
+		p.mux = m
+	}
 }
 
 // buildColumn recursively splits a slice of commands into a vertical binary tree.
@@ -2330,7 +3609,7 @@ func buildColumn(cmds []PaneConfig, y, x, h, w int) (*Pane, []*Pane, error) {
 
 // buildGrid creates a balanced 2-column grid layout from a list of commands.
 func (m *Magmux) buildGrid(commands []PaneConfig) error {
-	statusH := 1
+	statusH := m.statusRowsLocked()
 	availH := m.rows - statusH
 
 	if len(commands) == 0 {
@@ -2397,8 +3676,9 @@ func (m *Magmux) buildGrid(commands []PaneConfig) error {
 		leftPane.parent = m.root
 		rightPane.parent = m.root
 
-		m.allPanes = append(leftLeaves, rightLeaves...)
-		m.focused = m.allPanes[0]
+		leaves := append(leftLeaves, rightLeaves...)
+		m.allPanes = leaves
+		m.focused = leaves[0]
 	}
 
 	// Mark all panes as grid mode
@@ -2406,11 +3686,48 @@ func (m *Magmux) buildGrid(commands []PaneConfig) error {
 		p.gridMode = true
 	}
 
+	m.stampPaneIDs()
 	return nil
 }
 
+// installHiddenPanel creates the control panel and gives it an id, but leaves
+// it OUT of the layout tree.
+//
+// It is deliberately not a config appended to the layout builders. Handing them
+// an extra command would change the shape they build — buildLayout's 3+ branch
+// only ever builds three panes and would silently drop it — and the panel would
+// then have to be surgically removed again to start hidden. Building the
+// session layout exactly as it has always been built and adding the panel to
+// the id table afterwards means the visible layout of a hidden-panel magmux is
+// byte-identical to a magmux that has no panel at all.
+//
+// The panel still lands LAST in m.allPanes, so session panes keep the indices a
+// controller would naturally use (pane 0 is the first -e command).
+//
+// Caller must NOT hold treeMu.
+func (m *Magmux) installHiddenPanel() *Pane {
+	m.treeMu.Lock()
+	defer m.treeMu.Unlock()
+	if p := m.panelLocked(); p != nil {
+		return p
+	}
+	// Plausible geometry so nothing reads a zero-sized screen before the first
+	// Ctrl-G p; showPanelLocked resizes it for real through reshapeChildren.
+	h := maxInt(1, m.rows-m.statusRowsLocked())
+	w := maxInt(1, m.cols/2)
+	p := newControlPane(0, maxInt(0, m.cols-w), h, w, "")
+	p.hidden = true
+	p.gridMode = m.gridMode
+	m.allPanes = append(m.allPanes, p)
+	m.panel = p
+	m.stampPaneIDs()
+	return p
+}
+
 func (m *Magmux) startReadLoops() {
-	for _, p := range m.allPanes {
+	m.treeMu.Lock()
+	defer m.treeMu.Unlock()
+	for _, p := range m.livePanesLocked(nil) {
 		if p.isControl {
 			continue // no PTY to read from
 		}
@@ -2423,44 +3740,85 @@ func (m *Magmux) startReadLoops() {
 // any registered factory recognizes the pane's command. Called once after
 // the layout is built and panes are spawned.
 func (m *Magmux) attachControllers() {
-	if m.ctx == nil {
-		m.ctx = context.Background()
-	}
-	for _, p := range m.allPanes {
-		p.mux = m
-		if p.controller != nil {
-			continue
-		}
-		for _, factory := range m.controllerFactories {
-			if c := factory(p); c != nil {
-				p.controller = c
-				if err := c.Start(m.ctx); err != nil {
-					if dbgFile != nil {
-						fmt.Fprintf(dbgFile, "[ctrl] %s.Start error: %v\n", c.Name(), err)
-					}
-					p.controller = nil
-					continue
-				}
-				if dbgFile != nil {
-					fmt.Fprintf(dbgFile, "[ctrl] attached %s to pane\n", c.Name())
-				}
-				break
-			}
-		}
+	for _, p := range m.livePanes() {
+		m.attachController(p)
 	}
 }
 
-// pollControllers polls each attached controller and translates the
-// resulting Snapshot into pane state (inputReady, tint, overlayText).
-// Throttled to ~4Hz from the render loop.
-func (m *Magmux) pollControllers() {
-	now := time.Now()
-	if !m.lastControllerPoll.IsZero() && now.Sub(m.lastControllerPoll) < 250*time.Millisecond {
+// attachController attaches a ToolController to one pane if a factory
+// recognizes its command.
+//
+// It exists separately from attachControllers because OpenPane calls it while
+// the new pane is still PRIVATE — before it is appended to m.allPanes — so
+// p.controller is written before any other goroutine can observe the pane, and
+// Start()'s filesystem work happens off treeMu entirely.
+//
+// Caller must NOT hold treeMu (Start touches the filesystem) or p.mu.
+func (m *Magmux) attachController(p *Pane) {
+	if m.ctx == nil {
+		m.ctx = context.Background()
+	}
+	p.mux = m
+	if p.controller != nil {
 		return
+	}
+	for _, factory := range m.controllerFactories {
+		c := factory(p)
+		if c == nil {
+			continue
+		}
+		p.controller = c
+		if err := c.Start(m.ctx); err != nil {
+			if dbgFile != nil {
+				fmt.Fprintf(dbgFile, "[ctrl] %s.Start error: %v\n", c.Name(), err)
+			}
+			p.controller = nil
+			continue
+		}
+		if dbgFile != nil {
+			fmt.Fprintf(dbgFile, "[ctrl] attached %s to pane %d\n", c.Name(), p.id)
+		}
+		return
+	}
+}
+
+// pollControllers polls each attached controller and translates the resulting
+// Snapshot into pane state (inputReady, tint, overlayText). Throttled to ~4Hz;
+// `force` skips the throttle for the final poll before teardown.
+//
+// It COLLECTS its snapshot events and returns them rather than broadcasting
+// inline. Broadcasting here would put conn.Write — with its 100ms-per-client
+// deadline — on the render goroutine, so one wedged subscriber would stall the
+// frame. The caller broadcasts.
+//
+// Caller must NOT hold treeMu. Poll is filesystem work, not memory work:
+// ClaudeCodeController.Poll tails a transcript and, until it has found one,
+// re-scans every directory under ~/.claude/projects on EVERY tick. Under
+// treeMu.RLock that scan blocks the next queued writer — a keystroke, SIGWINCH,
+// or any socket open_pane/close_pane/focus — for its whole duration, which is
+// how a healthy magmux misses a 10s MCP lifecycle timeout. So the pane list is
+// snapshotted under RLock and the lock is released before any Poll runs.
+//
+// A pane closed between the snapshot and its Poll is polled anyway: the poll
+// only reads a transcript, and applying its snapshot writes p.mu-guarded
+// content fields on a pane nothing paints any more. Harmless, and cheaper than
+// re-resolving every pane under the lock.
+func (m *Magmux) pollControllers(force bool) []any {
+	m.pollMu.Lock()
+	defer m.pollMu.Unlock()
+
+	now := time.Now()
+	if !force && !m.lastControllerPoll.IsZero() && now.Sub(m.lastControllerPoll) < 250*time.Millisecond {
+		return nil
 	}
 	m.lastControllerPoll = now
 
-	for idx, p := range m.allPanes {
+	m.treeMu.RLock()
+	panes := m.livePanesLocked(nil)
+	m.treeMu.RUnlock()
+
+	var events []any
+	for _, p := range panes {
 		if p.controller == nil {
 			continue
 		}
@@ -2483,10 +3841,10 @@ func (m *Magmux) pollControllers() {
 			// Feed the control panel from what magmux actually observed,
 			// not from what the pilot claims it asked for — the panel has
 			// to be able to show the two disagreeing.
-			m.control.recordObserved(idx, snap.State.String(), snap.LastResponse, snap.LastTool)
-			m.broadcastEvent(map[string]any{
+			m.control.recordObserved(p.id, snap.State.String(), snap.LastResponse, snap.LastTool)
+			events = append(events, map[string]any{
 				"type":        "snapshot",
-				"pane":        idx,
+				"pane":        p.id,
 				"controller":  p.controller.Name(),
 				"state":       snap.State.String(),
 				"project":     snap.Project,
@@ -2499,6 +3857,7 @@ func (m *Magmux) pollControllers() {
 			})
 		}
 	}
+	return events
 }
 
 // snapshotChanged returns true if the meaningful fields of a controller
@@ -2605,10 +3964,13 @@ func (m *Magmux) handleSIGWINCH() {
 				if err != nil {
 					continue
 				}
+				// Geometry is structural, and m.root.resize writes it on
+				// every node in the tree — this is a writer, not a reader.
+				m.treeMu.Lock()
 				m.rows = h
 				m.cols = w
-				statusH := 1
-				m.root.resize(0, 0, h-statusH, w)
+				m.reflowLocked()
+				m.treeMu.Unlock()
 				// resize rebuilds each pane's Screen. A child process
 				// redraws itself on SIGWINCH; the control panel has no
 				// process to do that, so it must be repainted here or it
@@ -2621,18 +3983,69 @@ func (m *Magmux) handleSIGWINCH() {
 	}()
 }
 
+// focusNext moves focus to the next live pane, wrapping. Tombstoned panes are
+// skipped: they are not on screen, so focusing one would look like focus
+// vanishing. Caller must NOT hold treeMu.
 func (m *Magmux) focusNext() {
-	for i, p := range m.allPanes {
+	m.treeMu.Lock()
+	defer m.treeMu.Unlock()
+	// A hidden pane is not on screen, so cycling onto it would look exactly
+	// like focus vanishing — the same reason tombstones are skipped.
+	var live []*Pane
+	for _, p := range m.livePanesLocked(nil) {
+		if !p.hidden {
+			live = append(live, p)
+		}
+	}
+	if len(live) == 0 {
+		return
+	}
+	// The lock order is treeMu -> cp.mu, so telling the panel from in here is
+	// legal; it marks which route row the user is actually looking at.
+	for i, p := range live {
 		if p == m.focused {
-			m.focused = m.allPanes[(i+1)%len(m.allPanes)]
+			m.focused = live[(i+1)%len(live)]
+			m.control.setFocused(m.focused.id)
 			return
 		}
 	}
+	m.focused = live[0]
+	m.control.setFocused(m.focused.id)
 }
 
-// findPaneAt returns the leaf pane at terminal coordinates (row, col)
+// findPaneAt returns the leaf pane at terminal coordinates (row, col).
+// Caller must NOT hold treeMu.
 func (m *Magmux) findPaneAt(row, col int) *Pane {
+	m.treeMu.RLock()
+	defer m.treeMu.RUnlock()
+	return m.findPaneAtLocked(row, col)
+}
+
+// findPaneAtLocked is the twin for callers already holding treeMu.
+func (m *Magmux) findPaneAtLocked(row, col int) *Pane {
 	return findPaneAtRecursive(m.root, row, col)
+}
+
+// focusedPane resolves m.focused to a pointer the caller can use once treeMu
+// is released. Every keystroke path goes through it: writePTY blocks on the
+// PTY, and rule 1 says the lock must not be held across that.
+//
+// Caller must NOT hold treeMu.
+func (m *Magmux) focusedPane() *Pane {
+	m.treeMu.RLock()
+	defer m.treeMu.RUnlock()
+	if m.focused != nil && m.focused.closed {
+		return nil
+	}
+	return m.focused
+}
+
+// typeToFocused delivers raw keystrokes to whichever pane has focus, or drops
+// them if the layout has none left. Caller must NOT hold treeMu.
+func (m *Magmux) typeToFocused(data []byte) {
+	if p := m.focusedPane(); p != nil {
+		p.writePTY(data)
+	}
 }
 
 func findPaneAtRecursive(p *Pane, row, col int) *Pane {
@@ -2652,20 +4065,124 @@ func findPaneAtRecursive(p *Pane, row, col int) *Pane {
 	return findPaneAtRecursive(p.child2, row, col)
 }
 
+// themeReplyWindow is how long after the OSC 11 query inputLoop keeps
+// swallowing the terminal's answer to it.
+//
+// detectTheme waits themeProbeTimeout (150ms) and then gives up, but giving up
+// is a decision about the palette, not about the bytes: a terminal behind an
+// ssh hop or another multiplexer can answer a second or two later, and those
+// bytes land in stdin, where inputLoop would type them into the focused pane as
+// if the user had. magmux asked the question, so magmux eats the answer
+// whenever it arrives.
+//
+// Three seconds is the bound: it is an order of magnitude over the slowest
+// round trip a terminal reply plausibly takes, and short enough that a user
+// cannot reach it by hand — the window only ever swallows a *well formed* OSC
+// 11 reply, and typing one of those on purpose within three seconds of startup
+// is not a thing that happens. Past the window every byte is forwarded exactly
+// as before.
+const themeReplyWindow = 3 * time.Second
+
+// osc11MaxHold bounds how many bytes inputLoop will hold back while it decides
+// whether it is looking at an OSC 11 reply. A real one is under 30 bytes
+// ("\x1b]11;rgb:ffff/ffff/eeee\x1b\\" is 27); anything longer is not a reply,
+// and holding it would let an odd or hostile stream park the user's input
+// indefinitely by opening a sequence it never terminates.
+const osc11MaxHold = 64
+
+// takeLateOSC11 classifies the head of the input buffer during the theme-reply
+// window. It returns the number of bytes to DISCARD (a complete reply), or
+// hold=true meaning buf is a strict prefix of one and the decision has to wait
+// for more bytes — which is what stops half a reply being forwarded when it
+// spans two reads.
+//
+// It is deliberately narrow. Only ESC ] 1 1 ; qualifies, only with a printable
+// body, and only terminated by BEL or ST. Every other OSC, every other escape
+// sequence and every ordinary keystroke returns (0, false) and is handled by
+// the untouched path below it: swallowing real input would be a far worse bug
+// than the one this fixes.
+func takeLateOSC11(buf []byte) (n int, hold bool) {
+	const prefix = "\x1b]11;"
+	if len(buf) < 2 {
+		// A BARE ESC is never held, and that is a deliberate asymmetry. ESC is
+		// a key the user can press, and in a finished grid it is the key that
+		// dismisses the window; holding it until some other byte happens to
+		// arrive makes magmux look hung. Nothing is lost by letting it
+		// through: the loop below already parks a lone ESC waiting for the
+		// rest of its sequence, so a reply split after its first byte is still
+		// reassembled here on the next read — everywhere except the finished
+		// grid, where ESC has always meant quit and still does.
+		return 0, false
+	}
+	if len(buf) < len(prefix) {
+		// A partial opening is held; anything else is somebody's keystroke.
+		return 0, strings.HasPrefix(prefix, string(buf))
+	}
+	if !strings.HasPrefix(string(buf), prefix) {
+		return 0, false
+	}
+	for i := len(prefix); i < len(buf); i++ {
+		switch c := buf[i]; {
+		case c == '\x07': // BEL terminator
+			return i + 1, false
+		case c == '\x1b': // ST terminator, ESC \
+			if i+1 >= len(buf) {
+				return 0, len(buf) < osc11MaxHold
+			}
+			if buf[i+1] == '\\' {
+				return i + 2, false
+			}
+			return 0, false // ESC anything-else: not a reply
+		case c < 0x20 || c > 0x7e:
+			return 0, false // a control byte in the body: not a reply
+		}
+	}
+	// Well formed so far, no terminator yet.
+	return 0, len(buf) < osc11MaxHold
+}
+
 func (m *Magmux) inputLoop() {
 	// Buffered input reader — accumulates partial reads so escape sequences
 	// that span multiple read() calls are handled correctly.
 	inbuf := make([]byte, 0, 4096)
 	commandMode := false
 
+	// The theme-reply window, resolved once. Zero if the probe never ran, in
+	// which case nothing is ever swallowed and this loop behaves exactly as it
+	// always has. Local rather than a field because only this goroutine cares,
+	// and it latches shut on the first byte that arrives after it expires.
+	var swallowUntil time.Time
+	if !m.themeAskedAt.IsZero() {
+		swallowUntil = m.themeAskedAt.Add(themeReplyWindow)
+	}
+
+	// Startup input first. The theme probe (init()) is the only other reader
+	// stdin ever has, and anything it read that was not the terminal's OSC 11
+	// reply is a keystroke that has not been handled yet. It goes in front of
+	// everything that arrives from here on, and it is handled WITHOUT waiting
+	// for the next key: a `q` typed into a finished grid during startup must
+	// quit then, not when something else is pressed.
+	inbuf = append(inbuf, m.pendingInput...)
+	m.pendingInput = nil
+	pending := len(inbuf) > 0
+
 	// Stdin is read on a background goroutine so the main loop can also wake
 	// on m.quit. Without this, a renderLoop-driven close(m.quit) (e.g. -w
 	// auto-exit) cannot unblock the main goroutine, and magmux hangs.
+	//
+	// Resolved once, here, rather than dereferenced per read: this goroutine
+	// outlives the loop below (it can still be parked in Read when m.quit
+	// closes), so reading a variable somebody else might reassign is a race
+	// with no upside.
+	in := m.stdin
+	if in == nil {
+		in = os.Stdin
+	}
 	stdinCh := make(chan []byte, 8)
 	go func() {
 		buf := make([]byte, 4096)
 		for {
-			n, err := os.Stdin.Read(buf)
+			n, err := in.Read(buf)
 			if n > 0 {
 				chunk := make([]byte, n)
 				copy(chunk, buf[:n])
@@ -2680,14 +4197,21 @@ func (m *Magmux) inputLoop() {
 
 	for {
 		var chunk []byte
-		select {
-		case <-m.quit:
-			return
-		case c, ok := <-stdinCh:
-			if !ok {
+		if pending {
+			// One pass over the startup bytes, then never again: if they were
+			// an incomplete escape sequence the inner loop leaves them in
+			// inbuf and we block for the rest, exactly as for live input.
+			pending = false
+		} else {
+			select {
+			case <-m.quit:
 				return
+			case c, ok := <-stdinCh:
+				if !ok {
+					return
+				}
+				chunk = c
 			}
-			chunk = c
 		}
 		inbuf = append(inbuf, chunk...)
 
@@ -2696,30 +4220,83 @@ func (m *Magmux) inputLoop() {
 
 			if commandMode {
 				commandMode = false
+				m.armChord(false)
 				switch b {
 				case 'q':
 					m.quitOnce.Do(func() { close(m.quit) })
 					return
 				case '\t', 'o':
 					m.focusNext()
+				case 'p':
+					m.togglePanel()
+				case 's':
+					m.toggleStatusBar()
+				case '[':
+					// tmux's copy-mode binding, and an ACTION rather than a
+					// toggle: it scrolls back one page, which both enters the
+					// mode and shows something. A toggle that entered a mode
+					// with an unchanged screen would look like a key that did
+					// nothing.
+					m.treeMu.RLock()
+					page := 20
+					if f := m.focused; f != nil {
+						page = scrollPage(f.h)
+					}
+					m.treeMu.RUnlock()
+					m.scrollFocusedBy(page)
 				default:
-					m.focused.writePTY([]byte{0x07, b})
+					m.typeToFocused([]byte{0x07, b})
 				}
 				inbuf = inbuf[1:]
 				continue
 			}
 
+			// The terminal's late answer to our own OSC 11 question, eaten
+			// before anything downstream can mistake it for typing. It has to
+			// come before the auto-close cancel below as well as before the
+			// pane write: a reply that dismissed the completion countdown
+			// would be the same bug wearing a different hat.
+			if !swallowUntil.IsZero() {
+				if time.Now().After(swallowUntil) {
+					swallowUntil = time.Time{} // latched shut; never checked again
+				} else if n, hold := takeLateOSC11(inbuf); n > 0 {
+					inbuf = inbuf[n:]
+					if dbgFile != nil {
+						fmt.Fprintf(dbgFile, "[input] swallowed a late OSC 11 reply (%d bytes)\n", n)
+					}
+					continue
+				} else if hold {
+					// Only part of a reply so far. Wait for the rest rather
+					// than forwarding a fragment we would then have to
+					// un-send.
+					goto needMore
+				}
+			}
+
 			// Any keystroke cancels an armed auto-close: someone is here and
 			// reading, so the window must not disappear under them.
-			if !m.closeAt.IsZero() {
+			//
+			// Read under RLock and escalate only when it is actually armed.
+			// The countdown needs -x AND a pilot's finish, so in every other
+			// run this is the zero value and taking the WRITE lock to
+			// re-zero it — once per keystroke — put a queued writer in front
+			// of the render loop's next RLock for no reason at all. Go's
+			// RWMutex blocks later readers behind a waiting writer, so that
+			// one keystroke cost a whole frame of latency.
+			m.treeMu.RLock()
+			armed := !m.closeAt.IsZero()
+			m.treeMu.RUnlock()
+			if armed {
+				m.treeMu.Lock()
 				m.closeAt = time.Time{}
+				m.treeMu.Unlock()
 				m.control.cancelClose()
 			}
 
 			// Keys aimed at the control panel scroll it. The panel has no PTY,
 			// so without this every key pressed while it is focused is silently
 			// swallowed and the pane looks broken.
-			if m.focused != nil && m.focused.isControl {
+			if f := m.focusedPane(); f != nil && f.isControl {
 				if n := m.consumeControlKey(inbuf); n > 0 {
 					inbuf = inbuf[n:]
 					continue
@@ -2738,8 +4315,25 @@ func (m *Magmux) inputLoop() {
 
 			if b == commandKey&0x1f { // Ctrl-G
 				commandMode = true
+				m.armChord(true)
 				inbuf = inbuf[1:]
 				continue
+			}
+
+			// Scroll mode. It comes AFTER the Ctrl-G arm above, so the prefix —
+			// and therefore quitting — keeps working while a pane is scrolled
+			// back, and before the escape parsing below, so arrows and PgUp/PgDn
+			// move the viewport instead of reaching the child. It is entered
+			// only by Ctrl-G [ or the wheel, so nothing here can steal a key
+			// from a TUI that has not been deliberately put aside.
+			if m.focusedScrollOff() > 0 {
+				if n := m.consumeScrollKey(inbuf); n > 0 {
+					inbuf = inbuf[n:]
+					continue
+				}
+				if len(inbuf) < 4 {
+					goto needMore
+				}
 			}
 
 			// ESC — could be start of mouse sequence or other escape
@@ -2758,7 +4352,7 @@ func (m *Magmux) inputLoop() {
 					goto needMore
 				}
 				// Not a recognized escape sequence, pass ESC through
-				m.focused.writePTY(inbuf[:1])
+				m.typeToFocused(inbuf[:1])
 				inbuf = inbuf[1:]
 				continue
 			}
@@ -2769,7 +4363,7 @@ func (m *Magmux) inputLoop() {
 			for end < len(inbuf) && inbuf[end] != 0x1b && inbuf[end] != commandKey&0x1f {
 				end++
 			}
-			m.focused.writePTY(inbuf[:end])
+			m.typeToFocused(inbuf[:end])
 			inbuf = inbuf[end:]
 		}
 		continue
@@ -2802,7 +4396,7 @@ func (m *Magmux) tryParseEscape(buf []byte) (int, bool) {
 		for end < len(buf) {
 			if buf[end] >= 0x40 && buf[end] <= 0x7e {
 				// Complete CSI sequence — forward to focused pane
-				m.focused.writePTY(buf[:end+1])
+				m.typeToFocused(buf[:end+1])
 				return end + 1, true
 			}
 			end++
@@ -2816,12 +4410,12 @@ func (m *Magmux) tryParseEscape(buf []byte) (int, bool) {
 		if len(buf) < 3 {
 			return 0, false
 		}
-		m.focused.writePTY(buf[:3])
+		m.typeToFocused(buf[:3])
 		return 3, true
 	}
 
 	// Default: ESC + char, forward both
-	m.focused.writePTY(buf[:2])
+	m.typeToFocused(buf[:2])
 	return 2, true
 }
 
@@ -2834,16 +4428,25 @@ type Selection struct {
 	ey, ex int // end (pane-relative)
 }
 
+// sel is package-level state, so it is treeMu-guarded like the rest of the
+// layout: sel.pane is a *Pane that close_pane can detach at any moment, and
+// the renderer reads the whole struct on every frame.
 var sel Selection
 
+// selClear drops the current selection. Caller holds treeMu.Lock.
 func (m *Magmux) selClear() {
 	sel.active = false
 	sel.pane = nil
 }
 
-func (m *Magmux) selCopy() {
+// selTextLocked extracts the selected text and clears the selection. It does
+// NO I/O: putting the text on the clipboard runs pbcopy, and rule 1 forbids
+// holding treeMu across that. Returns "" when there is nothing to copy.
+//
+// Caller holds treeMu.Lock.
+func (m *Magmux) selTextLocked() string {
 	if sel.pane == nil {
-		return
+		return ""
 	}
 	s := sel.pane.screen
 
@@ -2853,37 +4456,40 @@ func (m *Magmux) selCopy() {
 		sy, sx, ey, ex = ey, ex, sy, sx
 	}
 
-	// Extract text line by line from screen buffer
+	// Extract text line by line from the screen buffer. A selection is up to
+	// three segments — the anchor row from sx to the right edge, whole rows
+	// between, and the cursor row from the left edge to ex — which is why this
+	// is three rowsText calls and not one. rowsText clamps rows past s.rows,
+	// so a selection left over from before a shrink drops them exactly as the
+	// old `r < s.rows` loop guard did.
 	var lines []string
 	sel.pane.mu.Lock()
-	for r := sy; r <= ey && r < s.rows; r++ {
-		cs := 0
-		ce := s.cols - 1
-		if r == sy {
-			cs = sx
-		}
-		if r == ey {
-			ce = ex
-		}
-		var line strings.Builder
-		for c := cs; c <= ce && c < s.cols; c++ {
-			ch := s.cells[r][c].Ch
-			if ch == 0 {
-				ch = ' '
-			}
-			if !s.cells[r][c].Cont {
-				line.WriteRune(ch)
-			}
-		}
-		lines = append(lines, strings.TrimRight(line.String(), " "))
+	if sy == ey {
+		lines = s.rowsText(sy, sy+1, sx, ex)
+	} else {
+		lines = append(lines, s.rowsText(sy, sy+1, sx, s.cols-1)...)
+		lines = append(lines, s.rowsText(sy+1, ey, 0, s.cols-1)...)
+		lines = append(lines, s.rowsText(ey, ey+1, 0, ex)...)
 	}
 	sel.pane.mu.Unlock()
 
 	content := strings.Join(lines, "\n")
 	if content == "" {
-		return
+		return ""
 	}
 
+	// Deselect after copy
+	sel.pane = nil
+	sel.active = false
+	return content
+}
+
+// putClipboard pushes text to the terminal's clipboard. Blocking (it execs
+// pbcopy), so it must run with no lock held.
+func putClipboard(content string) {
+	if content == "" {
+		return
+	}
 	// Method 1: OSC 52 clipboard escape (works over SSH)
 	encoded := encodeBase64(content)
 	os.Stdout.WriteString(fmt.Sprintf("\x1b]52;c;%s\x07", encoded))
@@ -2892,10 +4498,6 @@ func (m *Magmux) selCopy() {
 	cmd := exec.Command("pbcopy")
 	cmd.Stdin = strings.NewReader(content)
 	cmd.Run()
-
-	// Deselect after copy
-	sel.pane = nil
-	sel.active = false
 }
 
 func encodeBase64(s string) string {
@@ -2965,10 +4567,24 @@ func (m *Magmux) parseSGRMouse(buf []byte) (int, bool) {
 	col0 := col - 1
 	termChar := buf[end]
 
+	// All of the state below (m.focused, sel, pane geometry) is treeMu's, so
+	// the whole decision runs under one write lock and the two blocking
+	// consequences — forwarding to a PTY, and putting text on the clipboard —
+	// are deferred until after it is released.
+	var (
+		scrollPanel int    // 0 = no, else lines to scroll
+		forwardTo   *Pane  // alt-screen mouse forwarding target
+		forward     string // the sequence to forward
+		copyText    string
+	)
+
+	m.treeMu.Lock()
+
 	// Always: left click press switches focus (even in alt mode)
 	if press && btn == 0 {
-		if target := m.findPaneAt(row0, col0); target != nil {
+		if target := m.findPaneAtLocked(row0, col0); target != nil {
 			m.focused = target
+			m.control.setFocused(target.id)
 		}
 	}
 
@@ -2976,61 +4592,98 @@ func (m *Magmux) parseSGRMouse(buf []byte) (int, bool) {
 	// focus. Checked before the alt-screen forward below: the panel has no
 	// PTY, so forwarding would drop the event entirely.
 	if btn == 64 || btn == 65 {
-		if target := m.findPaneAt(row0, col0); target != nil && target.isControl {
+		if target := m.findPaneAtLocked(row0, col0); target != nil && target.isControl {
 			if btn == 64 {
-				m.control.scrollBy(3)
+				scrollPanel = 3
 			} else {
-				m.control.scrollBy(-3)
+				scrollPanel = -3
 			}
-			return end + 1, true
 		}
 	}
 
-	// If focused pane is in alternate screen (vim, htop, Claude Code, OpenCode),
-	// forward ALL mouse events to it — like tmux does.
-	if m.focused != nil && m.focused.altMode {
-		localRow := row0 - m.focused.y + 1
-		localCol := col0 - m.focused.x + 1
-		if localRow < 1 {
-			localRow = 1
+	if scrollPanel == 0 {
+		// If focused pane is in alternate screen (vim, htop, Claude Code,
+		// OpenCode), forward ALL mouse events to it — like tmux does.
+		if f := m.focused; f != nil && f.altMode {
+			localRow := maxInt(1, row0-f.y+1)
+			localCol := maxInt(1, col0-f.x+1)
+			forwardTo = f
+			forward = fmt.Sprintf("\x1b[<%d;%d;%d%c", btn, localCol, localRow, termChar)
+		} else {
+			// Normal mode (bash, etc.): handle mouse ourselves for selection
+			switch {
+			case btn == 64 || btn == 65: // wheel up / down
+				// Scrolling a non-alt pane with the wheel is what every terminal
+				// does and it cannot collide with anything: the alt-screen
+				// branch above already claimed the wheel for TUIs, and this
+				// branch is only reached when the focused pane is not one. It
+				// targets the pane UNDER THE POINTER rather than the focused
+				// one, like the panel's wheel handling directly above.
+				target := m.findPaneAtLocked(row0, col0)
+				if target == nil {
+					target = m.focused
+				}
+				if target != nil && !target.isControl && target.screen != nil {
+					target.mu.Lock()
+					if !target.altMode && (target.screen.sbLen > 0 || target.screen.sbOff > 0) {
+						if btn == 64 {
+							target.screen.scrollBackBy(3)
+						} else {
+							target.screen.scrollBackBy(-3)
+						}
+						target.dirty = true
+					}
+					target.mu.Unlock()
+				}
+
+			case press && btn == 0: // Left click → start selection
+				m.selClear()
+				if f := m.focused; f != nil {
+					// Clamp, exactly as the drag and release branches below do.
+					// findPaneAtLocked returns nil on a split border, so a click
+					// there does NOT move focus — it stays on the pane it was
+					// already on, one cell away. A border above or to the left of
+					// that pane then yields -1 here, and renderSelection indexes
+					// p.screen.cells with it on the very next frame: magmux
+					// panics and takes every session inside it down.
+					sel.pane = f
+					sel.active = true
+					sel.sy = clamp(row0-f.y, 0, maxInt(0, f.h-1))
+					sel.sx = clamp(col0-f.x, 0, maxInt(0, f.w-1))
+					sel.ey = sel.sy
+					sel.ex = sel.sx
+				}
+
+			case press && btn == 32: // Drag
+				if sel.active && sel.pane != nil {
+					sel.ey = clamp(row0-sel.pane.y, 0, maxInt(0, sel.pane.h-1))
+					sel.ex = clamp(col0-sel.pane.x, 0, maxInt(0, sel.pane.w-1))
+				}
+
+			case !press && btn == 0: // Release → copy
+				if sel.active && sel.pane != nil {
+					sel.ey = clamp(row0-sel.pane.y, 0, maxInt(0, sel.pane.h-1))
+					sel.ex = clamp(col0-sel.pane.x, 0, maxInt(0, sel.pane.w-1))
+					if sel.sy != sel.ey || sel.sx != sel.ex {
+						copyText = m.selTextLocked()
+					}
+					sel.active = false
+				}
+			}
 		}
-		if localCol < 1 {
-			localCol = 1
-		}
-		fwd := fmt.Sprintf("\x1b[<%d;%d;%d%c", btn, localCol, localRow, termChar)
-		m.focused.writePTY([]byte(fwd))
+	}
+
+	m.treeMu.Unlock()
+
+	if scrollPanel != 0 {
+		m.control.scrollBy(scrollPanel)
 		return end + 1, true
 	}
-
-	// Normal mode (bash, etc.): handle mouse ourselves for selection
-	switch {
-	case press && btn == 0: // Left click → start selection
-		m.selClear()
-		if m.focused != nil {
-			sel.pane = m.focused
-			sel.active = true
-			sel.sy = row0 - m.focused.y
-			sel.sx = col0 - m.focused.x
-			sel.ey = sel.sy
-			sel.ex = sel.sx
-		}
-
-	case press && btn == 32: // Drag
-		if sel.active && sel.pane != nil {
-			sel.ey = clamp(row0-sel.pane.y, 0, sel.pane.h-1)
-			sel.ex = clamp(col0-sel.pane.x, 0, sel.pane.w-1)
-		}
-
-	case !press && btn == 0: // Release → copy
-		if sel.active && sel.pane != nil {
-			sel.ey = clamp(row0-sel.pane.y, 0, sel.pane.h-1)
-			sel.ex = clamp(col0-sel.pane.x, 0, sel.pane.w-1)
-			if sel.sy != sel.ey || sel.sx != sel.ex {
-				m.selCopy()
-			}
-			sel.active = false
-		}
+	if forwardTo != nil {
+		forwardTo.writePTY([]byte(forward))
+		return end + 1, true
 	}
+	putClipboard(copyText)
 
 	return end + 1, true
 }
@@ -3085,10 +4738,65 @@ type sockMsg struct {
 	Steps   int      `json:"steps,omitempty"`   // planned step count, 0 if open-ended
 	Model   string   `json:"model,omitempty"`   // model the pilot itself is running
 	Summary string   `json:"summary,omitempty"` // pilot's closing summary
+	// Client is the controller's identity for the panel header
+	// ("claude-code/2.1"). The ONE field MCP adds to the pilot protocol —
+	// everything else an MCP client does arrives as an ordinary socket verb.
+	Client string `json:"client,omitempty"`
+	// Request/response fields. All optional and purely additive — a message
+	// that omits them behaves exactly as it did before they existed.
+	//
+	// ID is json.RawMessage rather than a string so a numeric or string id
+	// round-trips verbatim: a client that sent 7 gets 7 back, not "7".
+	// Presence of ID is the *only* thing that makes a message answerable.
+	ID        json.RawMessage `json:"id,omitempty"`
+	Lines     int             `json:"lines,omitempty"`     // capture: keep the last N rows
+	Offset    int             `json:"offset,omitempty"`    // capture: rows of scrollback to reach back through
+	Cursor    bool            `json:"cursor,omitempty"`    // capture: caller wants the cursor position
+	Cmd       string          `json:"cmd,omitempty"`       // pane lifecycle: command to run
+	Cwd       string          `json:"cwd,omitempty"`       // pane lifecycle: working directory
+	Dir       string          `json:"dir,omitempty"`       // pane lifecycle: synonym for cwd
+	Env       []string        `json:"env,omitempty"`       // pane lifecycle: extra KEY=VALUE entries
+	Target    any             `json:"target,omitempty"`    // open_pane: pane to split; absent = focused
+	Direction string          `json:"split,omitempty"`     // open_pane: auto | horizontal | vertical
+	Ratio     float64         `json:"ratio,omitempty"`     // open_pane: first half's share, 0 = 0.5
+	Force     bool            `json:"force,omitempty"`     // pane lifecycle: escalate to SIGKILL
+	Focus     *bool           `json:"focus,omitempty"`     // pane lifecycle: focus the result
+	TimeoutMs int             `json:"timeoutMs,omitempty"` // per-request budget, 0 = the verb's default
+}
+
+// validSocketID reports whether a --id NAME may be interpolated into the
+// socket path. Restricted to [A-Za-z0-9_-]+ so a name can carry no path
+// separator and no "..": the socket is created with this process's own
+// privileges, and `--id ../../home/me/.ssh/agent` must not be able to reach
+// out of /tmp and unlink something. The length cap keeps the result inside the
+// ~104-byte sun_path limit on darwin.
+func validSocketID(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// socketPath is where the IPC socket is bound. The pid-based default is
+// documented as stable and stays byte-identical; --id only substitutes the
+// name, which is what lets a caller know the path *before* magmux starts and
+// poll for it rather than having to discover a pid.
+func (m *Magmux) socketPath() string {
+	if m.sockID != "" {
+		return "/tmp/magmux-" + m.sockID + ".sock"
+	}
+	return fmt.Sprintf("/tmp/magmux-%d.sock", os.Getpid())
 }
 
 func (m *Magmux) socketServer() {
-	sockPath := fmt.Sprintf("/tmp/magmux-%d.sock", os.Getpid())
+	sockPath := m.socketPath()
 	m.sockPath = sockPath
 
 	// Set env so children inherit it
@@ -3149,6 +4857,19 @@ func (m *Magmux) socketServer() {
 }
 
 func (m *Magmux) handleSocketConn(conn net.Conn) {
+	// Wait for the layout before serving anything on this connection. The
+	// listener is bound before the first child forks, on purpose — MAGMUX_SOCK
+	// must be in that child's environment — so connections can and do arrive
+	// while m.root and m.allPanes are still nil. Serving one there writes an
+	// EMPTY aggregate snapshot as the connection's first line, and a subscriber
+	// seeds its whole pane map from that line, so it would then wait forever
+	// for per-pane snapshots that only ever fire on change.
+	//
+	// Done BEFORE sockClientsMu is taken: that lock is what makes the write and
+	// the registration below atomic against the shutdown broadcast, and holding
+	// it across a wait would block every other client's `results`.
+	m.waitLayoutReady(layoutReadyTimeout)
+
 	// Immediately send the current pane-state snapshot so a subscriber that
 	// connects *after* some panes have already exited still receives full
 	// state (the live exit/snapshot events it missed are folded into this one
@@ -3213,13 +4934,85 @@ func (m *Magmux) handleSocketConn(conn net.Conn) {
 	}()
 
 	scanner := bufio.NewScanner(conn)
+	// Raise the token limit off the 64KB default. An oversized line is not
+	// skipped: Scan returns false and this loop ends, so one long message
+	// (a pasted instruction, a large payload) silently drops the *whole*
+	// client connection rather than one line — the subscriber stops receiving
+	// broadcasts with no error anywhere. 4MB matches the transcript scanners
+	// in controller_claude.go.
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	// Whether this connection ever DROVE anything, as opposed to subscribing
+	// and tinting. It is the only thing the panel needs to report a controller
+	// arriving and going away: the fd close below is already the disconnect.
+	// An operator staring at a frozen panel needs to know the controller went
+	// away rather than got slow.
+	driving := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		var msg sockMsg
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
 			continue
 		}
-		m.dispatchSocketMsg(msg)
+		if m.handleSocketMsg(msg, conn) && !driving {
+			driving = true
+			m.control.noteController(true)
+		}
+	}
+	if driving {
+		m.control.noteController(false)
+	}
+}
+
+// layoutReadyTimeout bounds how long a connection waits for the layout. It
+// exists so a magmux that fails to build one (or dies between binding the
+// socket and finishing startup) hands its client an honest `not_ready` instead
+// of a connection that never says anything — a hang is the one failure mode an
+// agent cannot report on.
+const layoutReadyTimeout = 5 * time.Second
+
+// markLayoutReady publishes the layout to the socket. Safe to call repeatedly,
+// and called from a defer in main so no failure path can leave a connection
+// parked on the channel while magmux exits underneath it.
+func (m *Magmux) markLayoutReady() {
+	if m.layoutReady == nil {
+		return
+	}
+	m.layoutReadyOnce.Do(func() { close(m.layoutReady) })
+}
+
+// layoutIsReady is the non-blocking form, for a verb that has already waited.
+func (m *Magmux) layoutIsReady() bool {
+	if m.layoutReady == nil {
+		return true
+	}
+	select {
+	case <-m.layoutReady:
+		return true
+	default:
+		return false
+	}
+}
+
+// waitLayoutReady blocks until the layout exists, magmux starts shutting down,
+// or the timeout expires; it reports whether the layout is actually there.
+//
+// Callers must hold NO lock — least of all sockClientsMu, which serialises
+// every broadcast: waiting under it would stall the shutdown broadcast that
+// delivers `results` behind a client that connected during startup.
+func (m *Magmux) waitLayoutReady(timeout time.Duration) bool {
+	if m.layoutIsReady() {
+		return true
+	}
+	select {
+	case <-m.layoutReady:
+		return true
+	case <-m.quit:
+		// Teardown never waits on a subscriber. The connection is still served:
+		// handleSocketConn's finalEvents replay is what gives it results →
+		// shutdown → EOF, and that path must stay reachable.
+		return false
+	case <-time.After(timeout):
+		return false
 	}
 }
 
@@ -3327,77 +5120,146 @@ func (m *Magmux) closeSockClients(timeout time.Duration) {
 	}
 }
 
-func (m *Magmux) dispatchSocketMsg(msg sockMsg) {
+// dispatchSocketMsg runs one verb and reports its outcome. Behaviour when no
+// reply was requested is unchanged: a caller that ignores both returns gets
+// exactly the old semantics, which is what every legacy client relies on.
+func (m *Magmux) dispatchSocketMsg(msg sockMsg) (map[string]any, error) {
+	return m.dispatchSocketVerb(msg, nil)
+}
+
+// dispatchSocketVerb runs one verb.
+//
+// done, if non-nil, is how a verb whose work outlives this call answers: it
+// returns errReplyDeferred and calls done exactly once, later, on whatever
+// goroutine finished the work. Only `send` does that — its writes are paced
+// across hundreds of milliseconds and the socket reader must not block on them.
+// A nil done means nobody is listening, so those verbs keep their old
+// fire-and-forget shape.
+func (m *Magmux) dispatchSocketVerb(msg sockMsg, done func(map[string]any, error)) (map[string]any, error) {
 	switch msg.Type {
+	case "capabilities":
+		return m.sockCapabilities()
+
+	case "list":
+		return m.sockList()
+
+	case "capture":
+		return m.sockCapture(msg)
+
+	case "open_pane":
+		return m.sockOpenPane(msg)
+
+	case "close_pane":
+		return m.sockClosePane(msg)
+
+	case "focus":
+		return m.sockFocus(msg)
+
 	case "status":
+		m.treeMu.Lock()
 		m.statusText = msg.Text
 		// Force a redraw
-		for _, p := range m.allPanes {
+		for _, p := range m.livePanesLocked(nil) {
 			p.mu.Lock()
 			p.dirty = true
 			p.mu.Unlock()
 		}
+		m.treeMu.Unlock()
+		return nil, nil
 
 	case "tint":
+		color := msg.Color
+		if color == "reset" {
+			color = ""
+		}
 		paneIdx := m.parsePaneIndex(msg.Pane)
-		if paneIdx == -1 {
-			// "*" — apply to all panes
-			color := msg.Color
-			if color == "reset" {
-				color = ""
-			}
-			for _, p := range m.allPanes {
+		if paneIdx == paneAll {
+			// "*" — apply to every LIVE pane. A tombstoned pane is not on
+			// screen, so tinting it would be a write nobody can ever see.
+			for _, p := range m.livePanes() {
 				p.mu.Lock()
 				p.tint = color
 				p.dirty = true
 				p.mu.Unlock()
 			}
-		} else if paneIdx >= 0 && paneIdx < len(m.allPanes) {
-			color := msg.Color
-			if color == "reset" {
-				color = ""
-			}
-			p := m.allPanes[paneIdx]
-			p.mu.Lock()
-			p.tint = color
-			p.dirty = true
-			p.mu.Unlock()
+			return nil, nil
 		}
+		p, err := m.paneForMsg(paneIdx)
+		if err != nil {
+			return nil, err
+		}
+		p.mu.Lock()
+		p.tint = color
+		p.dirty = true
+		p.mu.Unlock()
+		return nil, nil
 
 	case "overlay":
 		paneIdx := m.parsePaneIndex(msg.Pane)
-		if paneIdx >= 0 && paneIdx < len(m.allPanes) {
-			p := m.allPanes[paneIdx]
-			p.mu.Lock()
-			p.overlayText = msg.Text
-			p.overlayStyle = msg.Style
-			p.dirty = true
-			p.mu.Unlock()
+		p, err := m.paneForMsg(paneIdx)
+		if err != nil {
+			return nil, err
 		}
+		p.mu.Lock()
+		p.overlayText = msg.Text
+		p.overlayStyle = msg.Style
+		p.dirty = true
+		p.mu.Unlock()
+		return nil, nil
 
 	case "send":
 		// Drive a pane from outside — the inbound half of a controlled
 		// session. Defaults to the pilot's target pane so a pilot that has
 		// announced itself need not repeat the index on every instruction.
+		//
+		// Only an *absent* pane takes that default. "*" and an unparseable
+		// pane both refuse: there is no such thing as typing an instruction
+		// into every pane, and guessing a target types someone's next
+		// instruction into the wrong session, which is both expensive and
+		// invisible.
 		paneIdx := m.parsePaneIndex(msg.Pane)
-		if paneIdx < 0 {
-			paneIdx = m.control.targetPane()
+		switch {
+		case paneIdx == paneUnspecified:
+			// One route means the single-session case, so this is free. Several
+			// open routes means the default would be a guess, and targetPane
+			// refuses rather than typing the next instruction into whichever
+			// Claude Code session happened to be first.
+			var err error
+			if paneIdx, err = m.control.targetPane(); err != nil {
+				return nil, err
+			}
+		case paneIdx == paneAll:
+			return nil, sockErrf(sockCodeBadRequest, `send has no fan-out: "*" is not a target`)
+		case paneIdx < 0:
+			return nil, sockErrf(sockCodeBadRequest, "pane is not an index")
 		}
 		enter := true
 		if msg.Enter != nil {
 			enter = *msg.Enter
 		}
-		m.sendToPane(paneIdx, msg.Text, msg.Keys, enter, msg.Label)
+		if done == nil {
+			return nil, m.sendToPane(paneIdx, msg.Text, msg.Keys, enter, msg.Label, nil)
+		}
+		// Delivery outlives this call, so the reply does too: it means "the
+		// bytes reached the PTY", which is the failure mode that used to live
+		// and die inside sendToPane's goroutine.
+		result := map[string]any{"pane": paneIdx, "bytes": len(msg.Text), "keys": len(msg.Keys), "enter": enter}
+		if err := m.sendToPane(paneIdx, msg.Text, msg.Keys, enter, msg.Label, func(err error) {
+			done(result, err)
+		}); err != nil {
+			return nil, err
+		}
+		return nil, errReplyDeferred
 
 	case "pilot":
-		m.dispatchPilotMsg(msg)
+		return nil, m.dispatchPilotMsg(msg)
 
 	case "agent":
 		paneIdx := m.parsePaneIndex(msg.Pane)
-		if paneIdx < 0 || paneIdx >= len(m.allPanes) {
-			return
+		p, err := m.paneForMsg(paneIdx)
+		if err != nil {
+			return nil, err
 		}
-		p := m.allPanes[paneIdx]
 		p.mu.Lock()
 
 		oldStatus := p.agentStatus
@@ -3472,33 +5334,71 @@ func (m *Magmux) dispatchSocketMsg(msg sockMsg) {
 		if oldStatus != newStatus {
 			m.updateAgentStatusBar()
 		}
+		return nil, nil
 	}
+
+	// An unknown verb stays silent without an id, which is the behaviour every
+	// client written before replies existed depends on — and is exactly what
+	// makes `capabilities` a usable version probe: an older magmux answers a
+	// verb it does not know with nothing at all.
+	return nil, sockErrf(sockCodeUnknownVerb, "unknown verb %q", msg.Type)
 }
 
+// Sentinels parsePaneIndex returns in place of an index. All negative, so the
+// existing `idx >= 0 && idx < len(m.allPanes)` bounds checks reject them
+// without needing a special case.
+const (
+	paneAll         = -1 // "*" — fan out to every pane
+	paneInvalid     = -2 // the field was present but is not a pane index
+	paneUnspecified = -3 // the field was absent; the verb's own default applies
+)
+
+// parsePaneIndex resolves a socket message's `pane` field to a pane index or
+// to one of the sentinels above.
+//
+// The string branch used to be fmt.Sscanf with its error dropped, which left
+// idx at its zero value on failure — so {"pane":"api"} silently drove *pane 0*,
+// the wrong session, with no diagnostic anywhere. strconv.Atoi rejects the
+// whole string (Sscanf would have taken the "1" out of "1x"), so anything that
+// is neither a bare integer nor "*" is paneInvalid and every caller drops it.
+//
+// An absent field is distinct from a bad one: it is how a pilot says "the pane
+// I already announced", so it gets its own sentinel rather than sharing the one
+// that means "refuse this message".
 func (m *Magmux) parsePaneIndex(v any) int {
 	switch val := v.(type) {
+	case nil:
+		return paneUnspecified
 	case float64:
 		return int(val)
 	case string:
-		if val == "*" {
-			return -1
+		s := strings.TrimSpace(val)
+		if s == "*" {
+			return paneAll
 		}
-		var idx int
-		fmt.Sscanf(val, "%d", &idx)
+		idx, err := strconv.Atoi(s)
+		if err != nil {
+			return paneInvalid
+		}
 		return idx
 	}
-	return -2 // invalid
+	return paneInvalid
 }
 
 // TODO: Add native macOS kqueue-based file watcher (kqueue_darwin.go) for monitoring
 // ~/.cctop/sessions/ as a fallback when agents don't send IPC messages directly.
 // Also consider Linux inotify equivalent (inotify_linux.go).
 
+// updateAgentStatusBar rebuilds the status bar from the agent hook state of
+// every live pane. Caller must NOT hold treeMu.
 func (m *Magmux) updateAgentStatusBar() {
 	var parts []string
 	needsAttention := 0
 
-	for _, p := range m.allPanes {
+	m.treeMu.Lock()
+	defer m.treeMu.Unlock()
+	live := m.livePanesLocked(nil)
+	for _, p := range live {
 		p.mu.Lock()
 		status := p.agentStatus
 		name := p.agentProject
@@ -3551,7 +5451,7 @@ func (m *Magmux) updateAgentStatusBar() {
 	}
 
 	m.statusText = statusText
-	for _, p := range m.allPanes {
+	for _, p := range live {
 		p.mu.Lock()
 		p.dirty = true
 		p.mu.Unlock()
@@ -3562,14 +5462,34 @@ func (m *Magmux) updateAgentStatusBar() {
 
 // ── Grid Mode Exit Handling ─────────────────────────────────────────────────
 
-// waitForChild waits for a pane's child process to exit and sets exit state.
-func (m *Magmux) waitForChild(p *Pane) {
-	if p.cmd == nil {
-		return
+// reapChild waits for a pane's child to exit and records the outcome. It is
+// the half of waitForChild that has nothing to do with presentation, and it
+// must run for EVERY spawned child, in every mode, or the child becomes a
+// zombie for the life of magmux:
+//
+//   - nobody else calls cmd.Wait. readLoop notices the PTY closing and sets
+//     p.dead, which looks like reaping and is not — the process entry survives
+//     until it is waited on.
+//   - p.reaped stays false without it, so reapPane's delayed SIGKILL always
+//     fires on the force path, and the check that stops that kill landing on a
+//     recycled pid becomes decorative.
+//
+// It is safe to call on a pane that was never published (an OpenPane unwind):
+// it touches only that pane's own fields.
+//
+// Reports whether it actually waited, so waitForChild can skip painting a
+// tombstone for a pane that had no child.
+func (m *Magmux) reapChild(p *Pane) bool {
+	if p == nil || p.cmd == nil {
+		return false
 	}
 	err := p.cmd.Wait()
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.dead = true
+	// The pid has now been collected and is free for the OS to reuse, so no
+	// delayed force-kill may target its process group from here on.
+	p.reaped = true
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			p.exitCode = exitErr.ExitCode()
@@ -3579,6 +5499,25 @@ func (m *Magmux) waitForChild(p *Pane) {
 	} else {
 		p.exitCode = 0
 	}
+	return true
+}
+
+// waitForChild reaps a pane's child and, in grid mode, turns its exit into the
+// tombstone overlay and the `exit` event.
+//
+// The reaping is unconditional; only the PRESENTATION is grid-mode's. Outside
+// grid mode there is no ✓ DONE overlay to paint and never has been — a plain
+// multiplexer pane whose shell exits just goes quiet — but the child still has
+// to be collected, which is why this is started for every pane rather than only
+// for grid ones.
+func (m *Magmux) waitForChild(p *Pane) {
+	if !m.reapChild(p) {
+		return
+	}
+	if !p.gridMode {
+		return
+	}
+	p.mu.Lock()
 
 	// Build completion overlay with duration + last output line
 	var duration string
@@ -3613,20 +5552,14 @@ func (m *Magmux) waitForChild(p *Pane) {
 	snap := p.controllerSnap
 	p.mu.Unlock()
 
-	// Find pane index (stable across the lifetime of Magmux).
-	paneIdx := -1
-	for i, pp := range m.allPanes {
-		if pp == p {
-			paneIdx = i
-			break
-		}
-	}
-
 	// Push an exit event over the IPC socket so subscribers (e.g. claudish)
-	// learn about per-pane completion without polling files.
+	// learn about per-pane completion without polling files. p.id replaces the
+	// old linear scan of m.allPanes: the id IS the index and never changes, so
+	// the scan was both slower and — once panes can be appended concurrently —
+	// a read of the slice header from the wrong goroutine.
 	m.broadcastEvent(map[string]any{
 		"type":     "exit",
-		"pane":     paneIdx,
+		"pane":     p.id,
 		"exitCode": exitCode,
 		"duration": duration,
 		"lastLine": lastMsg,
@@ -3637,18 +5570,56 @@ func (m *Magmux) waitForChild(p *Pane) {
 	})
 }
 
-// buildPaneResults collects the final state of every pane into a serializable
-// slice. Used to push an authoritative final state to subscribers right before
-// the socket closes.
+// buildPaneResults collects the state of every pane into a serializable slice.
+// It backs three things — the connect-time aggregate `snapshot`, the shutdown
+// `results` event, and the `list` verb — and that is deliberate: one code path
+// means a client polling `list` and a subscriber reading `results` can never be
+// told different things about the same pane.
+//
+// Fields beyond the original state/exitCode/dead set are added only when they
+// can be sourced; an observer that cannot see a pane's pid is better served by
+// the key being absent than by a zero. Unknown fields are documented as
+// ignorable (README), so the additions are safe for existing subscribers.
 func (m *Magmux) buildPaneResults() []map[string]any {
+	m.treeMu.RLock()
+	defer m.treeMu.RUnlock()
+	return m.buildPaneResultsLocked()
+}
+
+// buildPaneResultsLocked is the twin for callers already holding treeMu.
+func (m *Magmux) buildPaneResultsLocked() []map[string]any {
 	results := make([]map[string]any, 0, len(m.allPanes))
-	for i, p := range m.allPanes {
+	focused := m.focused
+	for _, p := range m.allPanes {
+		if p == nil {
+			continue
+		}
+		if p.closed {
+			// Tombstones are reported, not omitted. Ids are sparse after a
+			// close and a subscriber that treated results as a dense array
+			// would otherwise silently shift every pane after the hole.
+			entry := map[string]any{
+				"pane": p.id, "state": "closed", "closed": true, "dead": true,
+			}
+			if p.label != "" {
+				entry["label"] = p.label
+			}
+			results = append(results, entry)
+			continue
+		}
 		if p.isControl {
 			// Reported rather than omitted, so a subscriber walking results
 			// still sees every pane index and can tell why this one has no
 			// session state of its own.
+			//
+			// state stays "panel" whether the panel is on screen or hidden.
+			// Hidden is not a state of the SESSION — there is no session — it
+			// is a fact about magmux's own chrome, so it rides as its own
+			// field. test/ui/case3.ts asserts state == "panel"; a magmux
+			// started without -c must not answer that differently.
 			results = append(results, map[string]any{
-				"pane": i, "state": "panel", "control": true,
+				"pane": p.id, "state": "panel", "control": true,
+				"hidden": p.hidden,
 			})
 			continue
 		}
@@ -3666,10 +5637,41 @@ func (m *Magmux) buildPaneResults() []map[string]any {
 			state = "running"
 		}
 		entry := map[string]any{
-			"pane":     i,
+			"pane":     p.id,
 			"state":    state,
 			"exitCode": p.exitCode,
 			"dead":     p.dead,
+			"focused":  p == focused,
+			"altMode":  p.altMode,
+		}
+		if p.label != "" {
+			entry["label"] = p.label
+		}
+		if s := p.screen; s != nil {
+			// The geometry an observer needs to read the text `capture`
+			// returns: without the width there is no telling a wrapped line
+			// from a hard one.
+			entry["rows"], entry["cols"] = s.rows, s.cols
+		}
+		if p.inputSignal != "" {
+			// Which heuristic called the pane idle — "osc", "2004", "title",
+			// "idle", "ctrl", "perm". Two of those are far weaker evidence than
+			// the others, and a reader deciding whether to trust awaiting_input
+			// has no way to tell them apart from the state alone.
+			entry["inputSignal"] = p.inputSignal
+		}
+		if c := p.cmd; c != nil {
+			if len(c.Args) > 0 {
+				entry["cmd"] = strings.Join(c.Args, " ")
+			} else if c.Path != "" {
+				entry["cmd"] = c.Path
+			}
+			if c.Dir != "" {
+				entry["cwd"] = c.Dir
+			}
+			if c.Process != nil {
+				entry["pid"] = c.Process.Pid
+			}
 		}
 		if p.controller != nil {
 			entry["controller"] = p.controller.Name()
@@ -3705,17 +5707,708 @@ func (m *Magmux) buildPaneResults() []map[string]any {
 // inputReady. The control panel is not a session — it is never "done" and has
 // no process to exit, so counting it would deadlock -w forever.
 func (m *Magmux) allPanesDone() bool {
+	m.treeMu.RLock()
+	defer m.treeMu.RUnlock()
+	return m.allPanesDoneLocked()
+}
+
+// allPanesDoneLocked is the twin render() calls, which holds treeMu.RLock for
+// its whole body. Taking a second RLock there would deadlock the moment a
+// writer queued between the two — silently, with no race report, which is why
+// the twin is mandatory rather than a style preference.
+//
+// Caller holds at least treeMu.RLock.
+func (m *Magmux) allPanesDoneLocked() bool {
 	sessions := 0
 	for _, p := range m.allPanes {
-		if p.isControl {
+		// A tombstone is not an unfinished session — counting one would mean
+		// -w could never fire after an agent closed a pane.
+		if p == nil || p.closed || p.isControl {
 			continue
 		}
 		sessions++
-		if !p.dead && !p.inputReady {
+		p.mu.Lock()
+		busy := !p.dead && !p.inputReady
+		p.mu.Unlock()
+		if busy {
 			return false
 		}
 	}
 	return sessions > 0
+}
+
+// ── Dynamic panes ────────────────────────────────────────────────────────────
+
+// A pane below these is unusable: no room for a prompt plus a line of output,
+// and no room for a path. Enforced on BOTH halves of a split, because the
+// interesting failure is the one that shrinks the pane you were splitting.
+const (
+	minPaneRows = 3
+	minPaneCols = 20
+)
+
+// OpenPaneRequest.Target sentinels.
+const (
+	targetFocused = -1 // split whichever pane has focus
+	targetLargest = -2 // split the largest live leaf
+)
+
+var (
+	// errPaneTooSmall carries the code mcp_tools.go's openPaneHint branches on.
+	errPaneTooSmall = sockErrf("too_small",
+		"no room to split: each half needs at least %d rows and %d columns", minPaneRows, minPaneCols)
+	errTargetGone = sockErrf(sockCodeNoSuchPane,
+		"the pane to split is no longer part of the layout")
+	errClosing = sockErrf(sockCodeUnsupported, "magmux is shutting down")
+)
+
+type OpenPaneRequest struct {
+	PaneConfig
+	Target int       // pane id to split; -1 = focused, -2 = largest live leaf
+	Split  SplitType // SplitNone = auto (split the longer axis)
+	Ratio  float64   // 0 => 0.5
+	Focus  bool
+}
+
+// OpenPane splits an existing leaf and spawns a child in the new half.
+//
+// The ordering below is the whole design: the slow part (openPTY, fork/exec,
+// the controller's filesystem probing) runs with NO lock held, and treeMu is
+// taken only for the pointer surgery and reflow, which are microseconds. That
+// is why this can run straight on the socket goroutine instead of being queued
+// onto the render loop.
+//
+// Safe from any goroutine. Caller must NOT hold treeMu or p.mu.
+func (m *Magmux) OpenPane(req OpenPaneRequest) (int, error) {
+	// 1. Resolve the target and read its geometry, then let go.
+	m.treeMu.RLock()
+	if m.closing {
+		m.treeMu.RUnlock()
+		return -1, errClosing
+	}
+	t := m.resolveSplitTargetLocked(req.Target)
+	if t == nil {
+		m.treeMu.RUnlock()
+		if req.Target >= 0 {
+			return -1, sockErrf(sockCodeNoSuchPane, "no pane %d", req.Target)
+		}
+		return -1, errTargetGone
+	}
+	st := req.Split
+	if st == SplitNone {
+		// Split the longer axis. The 2:1 bias reproduces buildGrid's
+		// two-column shape organically: on an 80x24 terminal a full pane is
+		// 80 >= 48, so the first split is vertical-border/side-by-side and the
+		// halves then split top/bottom, exactly like the static grid.
+		if t.w >= 2*t.h {
+			st = SplitHorizontal
+		} else {
+			st = SplitVertical
+		}
+	}
+	ratio := req.Ratio
+	if ratio <= 0 || ratio >= 1 {
+		ratio = 0.5
+	}
+	ty, tx, th, tw := t.y, t.x, t.h, t.w
+	gridMode := m.gridMode
+	m.treeMu.RUnlock()
+
+	// 2. Refuse before spawning anything if either half would be unusable.
+	var ny, nx, nh, nw int
+	if st == SplitHorizontal {
+		w1 := int(float64(tw) * ratio)
+		w2 := tw - w1 - 1
+		if w1 < minPaneCols || w2 < minPaneCols || th < minPaneRows {
+			return -1, errPaneTooSmall
+		}
+		ny, nx, nh, nw = ty, tx+w1+1, th, w2
+	} else {
+		h1 := int(float64(th) * ratio)
+		h2 := th - h1 - 1
+		if h1 < minPaneRows || h2 < minPaneRows || tw < minPaneCols {
+			return -1, errPaneTooSmall
+		}
+		ny, nx, nh, nw = ty+h1+1, tx, h2, tw
+	}
+
+	// 3. The slow part, outside every lock.
+	np, err := newPaneFor(ny, nx, nh, nw, req.PaneConfig)
+	if err != nil {
+		return -1, sockErrf(sockCodeInternal, "could not start %q: %v", req.Cmd, err)
+	}
+
+	// 4. Still private — nothing else can reach np yet, so this needs no lock,
+	// and attaching the controller here means p.controller is written before
+	// any other goroutine could read it (and Start's filesystem work stays off
+	// treeMu). Missing gridMode here would give the pane different writePTY
+	// suppression and no DONE overlay compared with its siblings.
+	np.gridMode = gridMode
+	m.attachController(np)
+
+	// 5. Publish.
+	m.treeMu.Lock()
+	if m.closing {
+		m.treeMu.Unlock()
+		m.unwindPane(np)
+		return -1, errClosing
+	}
+	if !m.splitTargetIntactLocked(t) {
+		m.treeMu.Unlock()
+		m.unwindPane(np)
+		return -1, errTargetGone
+	}
+	np.id = len(m.allPanes)
+	m.allPanes = append(m.allPanes, np)
+	m.splitLeafLocked(t, np, st, ratio)
+	if !np.isControl {
+		// Under the same lock cleanup() sets m.closing, which is what keeps
+		// this Add from racing wg.Wait.
+		m.wg.Add(1)
+	}
+	if req.Focus {
+		m.focused = np
+	}
+	id := np.id
+	m.treeMu.Unlock()
+
+	// The panel's route table marks the focused pane with a ▸, and it is told
+	// by whoever moved the focus: focusNext, parseSGRMouse, ClosePane and
+	// sockFocus all do. This did not, so `focus:true` left the marker on the
+	// pane the agent had just navigated away from — the instrument disagreeing
+	// with magmux about a fact magmux owns. Outside the lock, like ClosePane's,
+	// because cp.mu is a second lock and there is nothing here that needs both.
+	if req.Focus {
+		m.control.setFocused(id)
+	}
+
+	// 6. Start the pane's goroutines now that it is reachable. The waiter is
+	// NOT conditional on grid mode: it is the only caller of cmd.Wait, so
+	// without it every close_pane in a non-grid session leaves a zombie and
+	// p.reaped never becomes true. What grid mode gates is the tombstone it
+	// paints, inside waitForChild.
+	if !np.isControl {
+		go np.readLoop(&m.wg)
+		go m.waitForChild(np)
+	}
+
+	// 7. Tell subscribers.
+	ev := map[string]any{"type": "pane_opened", "pane": id, "cmd": req.Cmd}
+	if req.Dir != "" {
+		ev["cwd"] = req.Dir
+	}
+	if req.Label != "" {
+		ev["label"] = req.Label
+	}
+	m.broadcastEvent(ev)
+	return id, nil
+}
+
+// ClosePane detaches a pane from the layout and reaps its child. The allPanes
+// slot is retained as a tombstone so ids never shift.
+//
+// Note the two-state model this preserves: `dead` means the process is gone but
+// the pane is still on screen with its ✓ DONE / ✗ FAIL overlay — a self-exit
+// never auto-collapses, because in grid mode the finished grid IS the report.
+// `closed` means the pane itself is gone. close_pane on a dead pane is the
+// normal way to reclaim its space.
+//
+// Caller must NOT hold treeMu or p.mu.
+func (m *Magmux) ClosePane(id int, force bool) error {
+	m.treeMu.Lock()
+	p := m.paneByIDLocked(id)
+	if p == nil {
+		m.treeMu.Unlock()
+		return sockErrf(sockCodeNoSuchPane, "no pane %d", id)
+	}
+
+	// Compute the sibling BEFORE the surgery: focus prefers a leaf under it,
+	// which is what tmux does and what keeps focus near where you were.
+	var sib *Pane
+	if p.parent != nil {
+		sib = p.parent.child1
+		if sib == p {
+			sib = p.parent.child2
+		}
+	}
+
+	p.closed = true
+	m.removeLeafLocked(p)
+
+	refocused := -1
+	if m.focused == p || m.focused == nil || m.focused.closed {
+		m.focused = firstLiveLeaf(sib)
+		if m.focused == nil {
+			m.focused = firstLiveLeaf(m.root)
+		}
+		if m.focused != nil {
+			refocused = m.focused.id
+		}
+	}
+	if sel.pane == p {
+		m.selClear()
+	}
+
+	// "Was that the last one?" is answered under the same lock that removed
+	// it, so two concurrent closes cannot both decide it was not.
+	//
+	// Two conditions, because the control panel is chrome rather than a
+	// session: an empty layout obviously has nothing left to show, and so does
+	// a magmux whose last SESSION is gone — with only the panel left, -w can
+	// never fire (allPanesDone needs at least one session) and the window would
+	// sit there forever. The everSession guard keeps a panel-only magmux, which
+	// never had a session to lose, from quitting on its first close.
+	liveTotal, liveSessions, everSession := 0, 0, false
+	for _, q := range m.allPanes {
+		if q == nil {
+			continue
+		}
+		if !q.isControl {
+			everSession = true
+		}
+		if q.closed {
+			continue
+		}
+		liveTotal++
+		if !q.isControl {
+			liveSessions++
+		}
+	}
+	lastOne := liveTotal == 0 || (everSession && liveSessions == 0)
+	m.treeMu.Unlock()
+
+	// Everything below is blocking or takes another lock, so it runs after the
+	// unlock.
+	//
+	// The panel stops painting rather than dereferencing a detached pane, and
+	// its focus marker moves with the focus we just fixed — focusNext and
+	// sockFocus both tell it, and a close that did not would leave the table's
+	// ▸ pointing at a pane that no longer exists until the next focus change.
+	m.control.detach(p)
+	if refocused >= 0 {
+		m.control.setFocused(refocused)
+	}
+
+	// Releasing the transcript claim is not optional: claimedSessions is never
+	// otherwise cleaned, and a stranded entry leaves the next pane in the same
+	// project stuck in `starting` silently and forever.
+	m.releaseSessions(p)
+	m.reapPane(p, force)
+	m.broadcastEvent(map[string]any{"type": "pane_closed", "pane": id})
+
+	if lastOne {
+		m.quitOnce.Do(func() { close(m.quit) })
+	}
+	return nil
+}
+
+// splitTargetIntactLocked re-verifies, after the fork, that the target OpenPane
+// resolved before it is still a node a new pane can be spliced onto.
+//
+// Everything the fork/exec window can do to it: a concurrent close_pane
+// tombstones the id slot, and Ctrl-G p HIDES the panel — removeLeafLocked
+// detaches it from the tree while leaving it very much alive and in the id
+// table. Splicing onto either attaches the new pane to a subtree m.root cannot
+// reach: alive, never painted, undismissable. Hidden is the third state, not a
+// synonym for closed, and the id check alone only ever caught the second.
+//
+// Caller holds at least treeMu.RLock.
+func (m *Magmux) splitTargetIntactLocked(t *Pane) bool {
+	return t != nil && m.paneByIDLocked(t.id) == t && !t.hidden
+}
+
+// resolveSplitTargetLocked turns a Target into a live LEAF pane, or nil.
+// Caller holds at least treeMu.RLock.
+func (m *Magmux) resolveSplitTargetLocked(target int) *Pane {
+	if target >= 0 {
+		// A hidden pane has no place in the tree to splice onto, and its
+		// geometry is whatever it was when it was taken out.
+		p := m.paneByIDLocked(target)
+		if p == nil || p.hidden || p.splitType != SplitNone {
+			return nil
+		}
+		return p
+	}
+	if target == targetFocused {
+		// isControl is filtered here for the same reason firstLiveLeaf,
+		// allPanesDone and buildPaneResults filter it: the panel is magmux's own
+		// chrome, not a place to put a session. focusNext filters only
+		// !p.hidden, so `Ctrl-G Tab` really does park focus on a VISIBLE panel —
+		// with `magmux -c -e claude` a human Tabs onto it to read the ledger, an
+		// MCP client calls open_pane with no target, and the agent's pane gets
+		// halved out of the control panel's column and nested inside it.
+		if p := m.focused; p != nil && !p.closed && !p.hidden && !p.isControl && p.splitType == SplitNone {
+			return p
+		}
+		// Focus can be nil after the last pane closed, or on a pane that was
+		// just detached. Falling back beats refusing.
+	}
+	return m.largestLiveLeafLocked()
+}
+
+// largestLiveLeafLocked returns the live leaf with the most cells, which is the
+// one a split hurts least — preferring a real SESSION over the control panel,
+// exactly as firstLiveLeaf does and for the same reason.
+//
+// The panel is magmux's own chrome, and it is frequently the biggest thing on
+// screen because it is a full column: with `magmux -c -e claude` an untargeted
+// open_pane would halve it and nest the agent's session inside the instrument
+// that is supposed to be watching it. The panel is only ever nominated when
+// there is no session leaf left at all, which in a running magmux means the
+// last session just closed and the layout is on its way out.
+//
+// Caller holds at least treeMu.RLock.
+func (m *Magmux) largestLiveLeafLocked() *Pane {
+	var best, fallback *Pane
+	bestArea, fallbackArea := -1, -1
+	for _, p := range m.allPanes {
+		// Hidden panes carry stale geometry — the size they had when they left
+		// the tree — so an unqualified h*w would happily nominate one.
+		if p == nil || p.closed || p.hidden || p.splitType != SplitNone {
+			continue
+		}
+		a := p.h * p.w
+		if p.isControl {
+			if a > fallbackArea {
+				fallback, fallbackArea = p, a
+			}
+			continue
+		}
+		if a > bestArea {
+			best, bestArea = p, a
+		}
+	}
+	if best != nil {
+		return best
+	}
+	return fallback
+}
+
+// firstLiveLeaf returns the first live leaf under node, preferring a real
+// session over the control panel — focus on the panel does nothing visible and
+// looks broken.
+func firstLiveLeaf(node *Pane) *Pane {
+	var fallback *Pane
+	var walk func(*Pane) *Pane
+	walk = func(p *Pane) *Pane {
+		if p == nil || p.closed {
+			return nil
+		}
+		if p.splitType == SplitNone {
+			if p.isControl {
+				if fallback == nil {
+					fallback = p
+				}
+				return nil
+			}
+			return p
+		}
+		if f := walk(p.child1); f != nil {
+			return f
+		}
+		return walk(p.child2)
+	}
+	if f := walk(node); f != nil {
+		return f
+	}
+	return fallback
+}
+
+// splitLeafLocked splices a FRESH internal node in place of leaf t, with t as
+// child1 and np as child2, then reflows.
+//
+// The leaf is never converted in place. It owns screen, ptmx, cmd and
+// vt.node == p, and it is pointed at from outside the tree by
+// ClaudeCodeController.pane, ControlPanel.pane, sel.pane and m.claimedSessions;
+// turning it into an internal node would strand every one of them.
+//
+// Reflow is the existing reshapeChildren → resize path, which for a leaf does
+// screen.resize + setWinSize. No new geometry code exists anywhere in this file.
+//
+// Caller holds treeMu.Lock.
+func (m *Magmux) splitLeafLocked(t, np *Pane, st SplitType, ratio float64) {
+	m.splitNodeLocked(t, np, st, ratio, false)
+}
+
+// splitNodeLocked is splitLeafLocked with the side chosen by the caller, and
+// with `t` allowed to be an internal node.
+//
+// Both generalisations exist for one caller: re-showing the control panel.
+// removeLeafLocked collapsed the panel's parent into its SIBLING, and that
+// sibling is usually a whole column rather than a leaf; putting the panel back
+// where it was means splitting that node again, on the side it was on. Nothing
+// else here changes — the parent is still a FRESH node and `t` is still never
+// converted in place, which is the invariant that keeps ControlPanel.pane,
+// sel.pane and the controllers' back-pointers valid.
+//
+// Caller holds treeMu.Lock.
+func (m *Magmux) splitNodeLocked(t, np *Pane, st SplitType, ratio float64, npFirst bool) {
+	par := &Pane{
+		splitType: st,
+		y:         t.y, x: t.x, h: t.h, w: t.w,
+		ratio:  ratio,
+		parent: t.parent,
+		child1: t,
+		child2: np,
+	}
+	if npFirst {
+		par.child1, par.child2 = np, t
+	}
+	switch {
+	case t.parent == nil:
+		m.root = par
+	case t.parent.child1 == t:
+		t.parent.child1 = par
+	default:
+		t.parent.child2 = par
+	}
+	t.parent = par
+	np.parent = par
+	par.reshapeChildren()
+}
+
+// removeLeafLocked detaches leaf t and collapses its parent into its sibling,
+// which inherits the parent's EXACT geometry — so the space t occupied plus the
+// border between them goes to the sibling with no gap and no overlap.
+//
+// Caller holds treeMu.Lock.
+func (m *Magmux) removeLeafLocked(t *Pane) {
+	par := t.parent
+	if par == nil {
+		// t was the whole tree. An empty tree is legal for exactly as long as
+		// it takes ClosePane to quit; renderPane's nil guard covers the frames
+		// in between.
+		if m.root == t {
+			m.root = nil
+		}
+		return
+	}
+	sib := par.child1
+	if sib == t {
+		sib = par.child2
+	}
+	sib.parent = par.parent
+	switch {
+	case par.parent == nil:
+		m.root = sib
+	case par.parent.child1 == par:
+		par.parent.child1 = sib
+	default:
+		par.parent.child2 = sib
+	}
+	t.parent = nil
+	sib.resize(par.y, par.x, par.h, par.w)
+}
+
+// ── Chrome: the control panel and the status bar ─────────────────────────────
+//
+// magmux's default is now to show nothing of itself. `magmux -e claude` is a
+// bare terminal running Claude Code: one leaf, no border (renderBorder only
+// ever paints a SPLIT node, so a lone leaf has nothing to draw), the whole
+// terminal minus the status row. Ctrl-G p reveals the panel, Ctrl-G s drops
+// the status row, and -c means "start with the panel already visible" so every
+// invocation that predates this looks exactly as it did.
+
+// panelTooNarrow is what the status bar says when the terminal cannot carry
+// both a session and a panel at the minimum a pane is usable at.
+const panelTooNarrow = "no room for the panel — widen the terminal"
+
+// splitFits reports whether splitting t leaves both halves usable. Same
+// arithmetic and the same floor as OpenPane, deliberately: "usable" cannot
+// mean one thing for an agent opening a pane and another for the panel.
+func splitFits(t *Pane, st SplitType, ratio float64) bool {
+	if t == nil {
+		return false
+	}
+	if st == SplitHorizontal {
+		w1 := int(float64(t.w) * ratio)
+		return w1 >= minPaneCols && t.w-w1-1 >= minPaneCols && t.h >= minPaneRows
+	}
+	h1 := int(float64(t.h) * ratio)
+	return h1 >= minPaneRows && t.h-h1-1 >= minPaneRows && t.w >= minPaneCols
+}
+
+// hidePanelLocked takes the panel out of the layout and gives its space back.
+//
+// This is NOT a close. `closed` is a tombstone and is permanent; `dead` is a
+// child that exited. A hidden panel is alive, keeps every row of its OUT/IN
+// ledger, keeps its id, and is still reported by buildPaneResults as
+// state:"panel" — it is merely not in the tree, so it costs no columns and the
+// sessions reflow over it.
+//
+// Caller holds treeMu.Lock.
+func (m *Magmux) hidePanelLocked(p *Pane) {
+	if par := p.parent; par != nil {
+		sib := par.child1
+		if sib == p {
+			sib = par.child2
+		}
+		m.panelAnchor = sib
+		m.panelSplit = par.splitType
+		m.panelRatio = par.ratio
+		m.panelFirst = par.child1 == p
+	} else {
+		// The panel was the whole tree (magmux -c with no -e). There is no
+		// sibling to anchor to; showing it again makes it the root.
+		m.panelAnchor, m.panelSplit, m.panelRatio, m.panelFirst = nil, SplitHorizontal, 0.5, false
+	}
+	m.removeLeafLocked(p)
+	p.hidden = true
+	// A selection anchored in a pane that is no longer on screen would paint
+	// its highlight over whatever grew into that space.
+	if sel.pane == p {
+		m.selClear()
+	}
+	// Focus must not be left on something invisible: every keystroke would go
+	// to a pane nobody can see. firstLiveLeaf prefers a real session over the
+	// panel, which is exactly what is wanted here.
+	if m.focused == p {
+		m.focused = firstLiveLeaf(m.root)
+	}
+}
+
+// showPanelLocked splices the panel back where it was, or reports that there
+// is no room. It does NOT touch focus: the human is typing into their agent,
+// and revealing an instrument must not take the keyboard away from them —
+// which is the same reason main() moves focus off the panel at startup.
+//
+// Caller holds treeMu.Lock.
+func (m *Magmux) showPanelLocked(p *Pane) bool {
+	st, ratio := m.panelSplit, m.panelRatio
+	if st == SplitNone {
+		st = SplitHorizontal
+	}
+	if ratio <= 0 || ratio >= 1 {
+		ratio = 0.5
+	}
+
+	t := m.panelAnchor
+	if !m.nodeInTreeLocked(t) {
+		// The node the panel was taken from is gone (an agent closed the pane
+		// under it). The root is the honest fallback: the panel comes back as a
+		// column beside everything else, which is where the layout builders put
+		// it in the first place.
+		t = m.root
+	}
+	if t == nil {
+		// Empty tree — the panel is the layout.
+		p.hidden = false
+		p.parent = nil
+		m.root = p
+		m.reflowLocked()
+		return true
+	}
+	if !splitFits(t, st, ratio) {
+		// Refuse rather than reshape into a 0-column pane. reshapeChildren
+		// clamps at zero, so the layout would survive — as a panel with no
+		// columns in it, which is worse than not showing it at all.
+		return false
+	}
+	p.hidden = false
+	m.splitNodeLocked(t, p, st, ratio, m.panelFirst)
+	return true
+}
+
+// togglePanel reveals or hides the control panel. Caller must NOT hold treeMu.
+func (m *Magmux) togglePanel() {
+	m.treeMu.Lock()
+	p := m.panelLocked()
+	if p == nil {
+		m.treeMu.Unlock()
+		return
+	}
+	shown, refocus := false, -1
+	if p.hidden {
+		if shown = m.showPanelLocked(p); !shown {
+			m.noteChromeLocked(panelTooNarrow)
+		}
+	} else {
+		m.hidePanelLocked(p)
+		if m.focused != nil {
+			refocus = m.focused.id
+		}
+	}
+	m.markAllDirtyLocked()
+	m.treeMu.Unlock()
+
+	// cp.mu is taken with treeMu released. The documented order treeMu -> cp.mu
+	// would allow it above, but nothing here needs the two held together and
+	// the shorter treeMu hold is free.
+	if refocus >= 0 {
+		m.control.setFocused(refocus)
+	}
+	if shown {
+		// The panel has no child process to redraw it, so a reflow leaves it
+		// blank unless it is told — the same reason SIGWINCH marks it dirty.
+		m.control.markDirty()
+	}
+}
+
+// toggleStatusBar shows or hides the bottom status row, giving the row to the
+// layout or taking it back. Caller must NOT hold treeMu.
+func (m *Magmux) toggleStatusBar() {
+	m.treeMu.Lock()
+	m.hideStatus = !m.hideStatus
+	m.reflowLocked()
+	m.markAllDirtyLocked()
+	m.treeMu.Unlock()
+	m.control.markDirty()
+}
+
+// unwindPane throws away a pane that was spawned but never published.
+//
+// OpenPane forks before it takes the write lock, so a teardown or a concurrent
+// close of the split target can leave a fully-started child that no goroutine
+// owns: wg.Add, readLoop and waitForChild all happen after publication, so
+// nothing would ever call cmd.Wait and the child would sit as a zombie for the
+// life of magmux. reapPane alone is not enough — SIGHUP and closing the PTY
+// end the process, they do not collect it.
+//
+// The wait runs in its own goroutine, and NOT under m.wg: this pane was never
+// added to the WaitGroup, and adding it here would race the wg.Wait that the
+// m.closing unwind path exists to keep clear of.
+func (m *Magmux) unwindPane(p *Pane) {
+	m.reapPane(p, false)
+	if p != nil && p.cmd != nil {
+		go m.reapChild(p)
+	}
+}
+
+// reapPane terminates a pane's child. Called with NO lock held: signalling and
+// closing the PTY are blocking operations, and closing ptmx is precisely what
+// unblocks readLoop's Read — which is what sets p.dead and calls wg.Done.
+func (m *Magmux) reapPane(p *Pane, force bool) {
+	if p == nil || p.isControl {
+		return
+	}
+	if p.cmd != nil && p.cmd.Process != nil {
+		_ = p.cmd.Process.Signal(syscall.SIGHUP)
+	}
+	p.mu.Lock()
+	ptmx := p.ptmx
+	p.mu.Unlock()
+	if ptmx != nil {
+		_ = ptmx.Close()
+	}
+	if !force || p.cmd == nil || p.cmd.Process == nil {
+		return
+	}
+	pid := p.cmd.Process.Pid
+	go func() {
+		time.Sleep(2 * time.Second)
+		// The NEGATIVE pid is the process GROUP, which is correct because
+		// spawnPTY sets Setsid — a shell that ignored SIGHUP would otherwise
+		// leave its own children behind. The reaped check is what stops a
+		// delayed kill landing on a stranger: only after cmd.Wait has returned
+		// is the pid free for the OS to hand to somebody else.
+		p.mu.Lock()
+		reaped := p.reaped
+		p.mu.Unlock()
+		if reaped {
+			return
+		}
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	}()
 }
 
 func (m *Magmux) renderLoop() {
@@ -3730,16 +6423,366 @@ func (m *Magmux) renderLoop() {
 	}
 }
 
+// render paints one frame.
+//
+// It holds treeMu.RLock for the WHOLE of renderLocked — the layout must not
+// change mid-frame, and a pane cannot be spliced out from under the tree walk.
+// That is also why every helper it reaches has a …Locked twin: a second RLock
+// on this goroutine deadlocks if a writer queued in between, and that failure
+// is a silent hang.
+//
+// Everything that can BLOCK stays outside that lock, and there are three such
+// things, not one:
+//
+//   - the controller poll, which is filesystem work (see pollControllers) and
+//     runs before the lock is taken, so its snapshots still take precedence
+//     over the screen-scraping heuristics in the same frame;
+//   - the snapshot events, collected under the lock and broadcast after it
+//     (conn.Write has a 100ms-per-client deadline, so a wedged subscriber would
+//     otherwise stall every writer);
+//   - the frame itself. renderLocked BUILDS the bytes and hands them back; this
+//     is the only place they are written. A tty whose buffer is full blocks
+//     that write for as long as it likes, and with RLock held that is a
+//     keystroke, a SIGWINCH or a socket verb blocked for exactly as long.
 func (m *Magmux) render() {
-	// Poll attached interactive tool controllers (throttled internally to ~4Hz).
-	// This must run BEFORE the heuristic detection below so that controller
-	// state takes precedence over screen-scraping when both are available.
-	m.pollControllers()
+	events := m.pollControllers(false)
 
+	m.treeMu.RLock()
+	frame, out, quit := m.renderLocked()
+	m.treeMu.RUnlock()
+	events = append(events, frame...)
+
+	if out != "" {
+		m.writeTerm(out)
+	}
+
+	if quit {
+		// Final unthrottled controller poll before teardown. allPanesDone
+		// became true because a pane went idle, and that same transition is
+		// what a controller would promote to awaiting_input — but the regular
+		// poll is throttled to 250ms, so quitting here can drop the last
+		// snapshot and leave subscribers to infer the state from `results`
+		// alone (issue #2). Polling once more guarantees it is broadcast.
+		events = append(events, m.pollControllers(true)...)
+	}
+
+	for _, ev := range events {
+		m.broadcastEvent(ev)
+	}
+	// Quitting is signalled back rather than done under the lock, and only
+	// AFTER the events are out. Closing m.quit wakes the socket teardown,
+	// which broadcasts `results` and then closes every subscriber; a snapshot
+	// still sitting in this slice at that moment is simply lost. That is
+	// exactly the final awaiting_input snapshot -w exists to deliver (issue #2).
+	if quit {
+		m.quitOnce.Do(func() { close(m.quit) })
+	}
+}
+
+// writeTerm puts a painted frame on the terminal. Caller must NOT hold treeMu:
+// this is a write to a tty, and a tty with a full buffer blocks.
+func (m *Magmux) writeTerm(s string) {
+	if m.out != nil {
+		_, _ = io.WriteString(m.out, s)
+		return
+	}
+	_, _ = os.Stdout.WriteString(s)
+}
+
+// ── the status bar's panel digest ────────────────────────────────────────────
+//
+// The panel starts hidden, so the status bar is the only place a run announces
+// itself until somebody asks for the panel. What it carries is the panel's own
+// two counters — `▶` what the controller asked for, `◀` what magmux observed —
+// plus the newest signal, degrading to the counters alone as the terminal
+// narrows. It invents no third number: a status bar that reconciled the two
+// would be a second, quieter provenance model beside the panel's.
+//
+// The done/running counts stay. They answer a different question ("how much of
+// this grid has finished") from the counters ("how many instructions has the
+// controller issued, and how many turns has magmux seen close"), and on a run
+// with several panes and one controller they routinely disagree — which is
+// exactly the disagreement worth seeing.
+
+// statusSeg joins two tab-separated status-bar segments.
+func statusSeg(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	return a + "\t" + b
+}
+
+// digestStateSeg is "p0 working · Bash 14s" — which pane, doing what, since
+// when. Empty when the controller has not touched a pane yet.
+func digestStateSeg(d ctrlDigest) string {
+	if d.pane < 0 || d.state == "" {
+		return ""
+	}
+	s := fmt.Sprintf("p%d %s", d.pane, d.state)
+	if d.tool != "" {
+		s += " · " + d.tool
+	}
+	if !d.stateAt.IsZero() {
+		s += " " + formatDuration(time.Since(d.stateAt))
+	}
+	return "M: " + s
+}
+
+// digestSignalSeg is the newest row of the panel's stream, cut to `budget`
+// columns. Empty when there is no room for a useful amount of it — a signal
+// truncated to three characters and an ellipsis is noise, not information.
+func digestSignalSeg(d ctrlDigest, budget int) string {
+	if d.sigVerb == "" && d.sigText == "" {
+		return ""
+	}
+	glyph := "•"
+	switch d.sigDir {
+	case "out":
+		glyph = "▶"
+	case "in":
+		glyph = "◀"
+	}
+	head := glyph + " " + d.sigVerb
+	if d.sigVerb == "" {
+		head = glyph
+	}
+	body := oneLine(d.sigText, maxInt(0, budget-utf8.RuneCountInString(head)-4))
+	if body != "" {
+		head += ` "` + body + `"`
+	}
+	if utf8.RuneCountInString(head) < 6 {
+		return ""
+	}
+	return "D: " + head
+}
+
+// appendPanelDigestLocked adds as much of the digest as fits in m.cols, widest
+// part first out. Caller holds at least treeMu.RLock; d was taken with cp.mu
+// already released.
+func (m *Magmux) appendPanelDigestLocked(segs string, d ctrlDigest, reserve int) string {
+	if !d.active {
+		return segs
+	}
+	fits := func(s string) bool { return approxStatusWidth(s) <= m.cols }
+
+	// The counters are the digest, so they are the LAST thing dropped — but
+	// they are still dropped. A status bar that overruns m.cols wraps onto the
+	// pane above it, and corrupting a session's output to announce that magmux
+	// is here is the exact opposite of what this change is for.
+	out := statusSeg(segs, fmt.Sprintf("W: ▶%d ◀%d", d.sent, d.observed))
+	if !fits(out) {
+		return segs
+	}
+
+	// The key hints are what make a hidden panel discoverable, so their room is
+	// reserved before the state and the signal are measured rather than
+	// competing with them. The caller appends the hints themselves — see
+	// appendKeyHint — once the digest has taken what it can.
+	if st := digestStateSeg(d); st != "" && approxStatusWidth(statusSeg(out, st))+reserve <= m.cols {
+		out = statusSeg(out, st)
+	}
+	if budget := m.cols - approxStatusWidth(out) - 3 - reserve; budget >= 14 {
+		// Re-measured rather than trusted: digestSignalSeg cuts the signal's
+		// TEXT to the budget, but its head (the direction glyph and the verb)
+		// is whatever the verb is, so a long verb can overrun a budget that was
+		// only ever applied to the quoted body — and it would overrun it into
+		// the hints' floor.
+		if sig := digestSignalSeg(d, budget); sig != "" {
+			if cand := statusSeg(out, sig); approxStatusWidth(cand)+reserve <= m.cols {
+				out = cand
+			}
+		}
+	}
+	return out
+}
+
+// ── the status bar's key hints ───────────────────────────────────────────────
+//
+// magmux is invisible by default: no panel, no border, one status row. That row
+// is therefore the ONLY place a user can find out that a control panel exists
+// at all — the panel is not on screen to advertise itself, and `--help` is not
+// on screen either. So `p` is the discovery-critical hint and outranks
+// everything on the bar except `q`, the way out.
+//
+// Survival order as the terminal narrows, last dropped first: q, p, Tab, s.
+// `Tab` only matters with more than one pane on screen, and `s` is the least
+// useful column magmux can spend — hiding the bar hides its own hint, so the
+// one person who wants it gone can find it in `--help`.
+//
+// The hints are not appended after everything else has taken its room: the run
+// summary yields to them (see statusForms / fitStatusBase) and the digest
+// reserves their floor before it measures its optional parts. A hint that only
+// showed up on a wide terminal would be a hint for the people who least need
+// it.
+
+// hintItem is one key hint and the rank at which it is dropped: the lowest rank
+// goes first, and rank 0 is reserved for "keep everything".
+type hintItem struct {
+	text string
+	rank int
+}
+
+const (
+	hintRankStatus = iota + 1 // s: hiding the bar hides this hint with it
+	hintRankScroll            // [: only offered when there is history to reach
+	hintRankTab               // Tab: nothing to switch to with one pane on screen
+	hintRankPanel             // p: the surface nothing else can announce
+	hintRankQuit              // q: the way out
+)
+
+// keyHintItems is the chord's full hint set, in reading order. panelVisible
+// flips "p panel" to "p hide" so the key's effect is unambiguous in both
+// states; multiPane drops Tab when there is nothing to switch to; canScroll
+// offers "[ back" only when the focused pane actually has something behind it.
+//
+// The scroll hint is conditional rather than permanent because most of what
+// magmux runs is on the ALTERNATE screen — Claude Code, vim, htop — and those
+// panes keep no scrollback at all by design. Advertising a key that does
+// nothing on the pane you are looking at teaches the wrong thing about the
+// feature; offering it the moment a shell pane has scrolled teaches the right
+// one.
+//
+// It ranks below Tab so the floor the rest of the bar yields to (panel + quit)
+// is unchanged: the hint appears when there is room, and is the second thing to
+// go when there is not.
+func keyHintItems(panelVisible, multiPane, canScroll bool) []hintItem {
+	panel := "p panel"
+	if panelVisible {
+		panel = "p hide"
+	}
+	items := []hintItem{{panel, hintRankPanel}}
+	if multiPane {
+		items = append(items, hintItem{"Tab", hintRankTab})
+	}
+	if canScroll {
+		items = append(items, hintItem{"[ back", hintRankScroll})
+	}
+	return append(items, hintItem{"s bar", hintRankStatus}, hintItem{"q quit", hintRankQuit})
+}
+
+// keyHintLocked is the hint set for the current layout, or nil when the chord
+// is inert — a finished grid swallows every key but q/Esc/Ctrl-C, so
+// advertising p there would be advertising a key that does nothing.
+// Caller holds at least treeMu.RLock.
+func (m *Magmux) keyHintLocked() []hintItem {
+	if m.gridMode && m.allPanesDoneLocked() {
+		return nil
+	}
+	onScreen := 0
+	for _, p := range m.livePanesLocked(nil) {
+		if !p.hidden {
+			onScreen++
+		}
+	}
+	// treeMu -> p.mu is the legal order, so reading the focused pane's history
+	// depth from here is fine.
+	canScroll := false
+	if f := m.focused; f != nil && !f.isControl && f.screen != nil {
+		f.mu.Lock()
+		canScroll = f.screen.sbLen > 0
+		f.mu.Unlock()
+	}
+	return keyHintItems(!m.panelHiddenLocked(), onScreen > 1, canScroll)
+}
+
+// keyHintList joins the hints, dropping everything ranked at or below `cut`.
+func keyHintList(items []hintItem, cut int) string {
+	var parts []string
+	for _, it := range items {
+		if it.rank > cut {
+			parts = append(parts, it.text)
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// hintFloor is the form the rest of the bar yields to: the panel and the way
+// out. Everything above it (Tab, s) competes for leftovers like any other
+// segment.
+func hintFloor(items []hintItem) string { return keyHintList(items, hintRankTab) }
+
+// hintFloorWidth is what hintFloor costs on the bar, divider included. Zero
+// when there are no hints to place.
+func hintFloorWidth(items []hintItem) int {
+	f := hintFloor(items)
+	if f == "" {
+		return 0
+	}
+	return utf8.RuneCountInString("ctrl-g "+f) + 3
+}
+
+// appendKeyHint puts as much of the hint set on the bar as `cols` allows,
+// dropping items in reverse priority. It never returns a bar wider than cols:
+// a status row that overruns wraps onto the pane above it, which is the one
+// thing magmux's chrome must never do to a session's output.
+func appendKeyHint(segs string, items []hintItem, cols int) string {
+	for cut := 0; cut <= hintRankQuit; cut++ {
+		list := keyHintList(items, cut)
+		if list == "" {
+			break
+		}
+		if out := statusSeg(segs, "D: ctrl-g "+list); approxStatusWidth(out) <= cols {
+			return out
+		}
+	}
+	// Last resort. A terminal too narrow for "ctrl-g q quit" is still a
+	// terminal somebody has to be able to get out of.
+	if len(items) > 0 {
+		if out := statusSeg(segs, "D: ^g q"); approxStatusWidth(out) <= cols {
+			return out
+		}
+	}
+	return segs
+}
+
+// fitStatusBase picks the widest run summary that still leaves the hints their
+// floor. The forms are widest first, and each drops the least valuable segment
+// of the one before it: the running count is derivable from the done pill, the
+// timer is a nice-to-have, and magmux's own name is the first thing a narrow
+// terminal should stop spending columns on.
+func fitStatusBase(budget int, forms ...string) string {
+	for _, f := range forms {
+		if approxStatusWidth(f) <= budget {
+			return f
+		}
+	}
+	return ""
+}
+
+// chordMenuLocked is what the bar says while Ctrl-G has been pressed and magmux
+// is waiting for the second key: the chord teaching itself, for one keystroke,
+// on the one row magmux already owns. Empty when there is nothing to offer.
+// Caller holds at least treeMu.RLock.
+func (m *Magmux) chordMenuLocked(items []hintItem) string {
+	for cut := 0; cut <= hintRankQuit; cut++ {
+		list := keyHintList(items, cut)
+		if list == "" {
+			break
+		}
+		if s := "C: ctrl-g …\tD: " + list; approxStatusWidth(s) <= m.cols {
+			return s
+		}
+	}
+	return ""
+}
+
+// renderLocked paints one frame into a buffer and returns it along with the
+// events to broadcast and whether magmux should quit. It writes NOTHING to the
+// terminal — see render(), which does that with the lock released.
+//
+// The controller poll deliberately happens in render() BEFORE this is called,
+// so that controller state still takes precedence over the screen-scraping
+// heuristics below when both are available.
+//
+// Caller holds treeMu.RLock.
+func (m *Magmux) renderLocked() (events []any, out string, quit bool) {
 	// Grid mode: idle/completion detection
 	if m.gridMode {
 		now := time.Now()
-		for _, p := range m.allPanes {
+		for _, p := range m.livePanesLocked(nil) {
 			p.mu.Lock()
 			// Title idle debounce: fire inputReady after the window title has been
 			// showing ✳ (idle) for at least 2 seconds without any spinner title
@@ -3804,10 +6847,15 @@ func (m *Magmux) render() {
 		}
 	}
 
+	// The key hints, resolved once for this frame: the run summary, the digest
+	// and the chord menu below all have to agree about what the bar is going to
+	// advertise and how much room it needs.
+	hints := m.keyHintLocked()
+
 	// Update status bar with done/running counts (grid mode)
 	if m.gridMode {
 		done, running := 0, 0
-		for _, p := range m.allPanes {
+		for _, p := range m.livePanesLocked(nil) {
 			if p.isControl {
 				continue // the panel is chrome, not a tracked session
 			}
@@ -3839,19 +6887,49 @@ func (m *Magmux) render() {
 			elapsed = formatDuration(time.Since(m.startedAt))
 		}
 
-		// Build segments, then maybe append attribution if there's room
-		var segs string
-		if done == 0 && running == 0 {
-			// No panes tracked yet — leave default text alone
-			segs = ""
-		} else if allDone {
-			segs = fmt.Sprintf("*: %s\tP: %d/%d done\tG: ✓ complete\tM: %s\tD: q or Esc to quit",
-				magmuxLabel(), total, total, elapsed)
-		} else {
-			segs = fmt.Sprintf("*: %s\tP: %d/%d done\tY: %d running\tM: %s\tD: ctrl-g Tab · q quit",
-				magmuxLabel(), done, total, running, elapsed)
+		// The run summary, widest form first: every later form drops the least
+		// valuable segment of the one before it, so that the key hints keep
+		// their floor on a narrow terminal instead of being pushed off it.
+		var forms []string
+		if allDone {
+			forms = []string{
+				fmt.Sprintf("*: %s\tP: %d/%d done\tG: ✓ complete\tM: %s\tD: q or Esc to quit",
+					magmuxLabel(), total, total, elapsed),
+				fmt.Sprintf("*: %s\tP: %d/%d done\tG: ✓ complete\tD: q or Esc to quit",
+					magmuxLabel(), total, total),
+				fmt.Sprintf("P: %d/%d done\tG: ✓ complete\tD: q quit", total, total),
+				fmt.Sprintf("P: %d/%d done\tD: q quit", total, total),
+				"D: q quit",
+			}
+		} else if total > 0 {
+			forms = []string{
+				fmt.Sprintf("*: %s\tP: %d/%d done\tY: %d running\tM: %s",
+					magmuxLabel(), done, total, running, elapsed),
+				fmt.Sprintf("*: %s\tP: %d/%d done\tM: %s", magmuxLabel(), done, total, elapsed),
+				fmt.Sprintf("*: %s\tP: %d/%d done", magmuxLabel(), done, total),
+				fmt.Sprintf("P: %d/%d done", done, total),
+			}
 		}
-		if segs != "" {
+		// cp.mu is taken and released inside digest(); the order
+		// treeMu -> cp.mu is the documented one, and nothing here holds it
+		// across the rendering that follows.
+		dg := m.control.digest()
+		if len(forms) == 0 && dg.active {
+			// No session pane to count — a controlled run against panes the
+			// grid counter skips, or a panel-only magmux — but a controller IS
+			// driving, so the bar needs a label for the digest to hang off.
+			// Untouched panels still leave the default text alone.
+			forms = []string{"*: " + magmuxLabel()}
+		}
+		if len(forms) > 0 {
+			segs := fitStatusBase(m.cols-hintFloorWidth(hints), forms...)
+
+			// The panel's digest goes in BEFORE the hints and the attribution,
+			// so a run with something to say takes the room and the credit
+			// yields — but it reserves the hints' floor before it does.
+			segs = m.appendPanelDigestLocked(segs, dg, hintFloorWidth(hints))
+			segs = appendKeyHint(segs, hints, m.cols)
+
 			// Append "by MadAppGang" attribution if there's room.
 			// Rough visible width: sum of segment text lengths + dividers +
 			// padding. We don't need precision; a permissive threshold is fine.
@@ -3878,18 +6956,12 @@ func (m *Magmux) render() {
 		m.lastDoneCount = done
 	}
 
-	// Auto-exit: quit when all panes done (-w flag)
-	if m.autoExit && m.gridMode && m.allPanesDone() {
-		// Final unthrottled controller poll before teardown. allPanesDone()
-		// became true because a pane went idle, and that same transition is
-		// what a controller would promote to awaiting_input — but the regular
-		// poll is throttled to 250ms, so quitting here can drop the last
-		// snapshot and leave subscribers to infer the state from `results`
-		// alone (issue #2). Polling once more guarantees it is broadcast.
-		m.lastControllerPoll = time.Time{}
-		m.pollControllers()
-		m.quitOnce.Do(func() { close(m.quit) })
-		return
+	// Auto-exit: quit when all panes done (-w flag). render() answers the quit
+	// with one final UNTHROTTLED controller poll before it wakes the teardown —
+	// that poll cannot happen here, because it is filesystem work and this runs
+	// under RLock.
+	if m.autoExit && m.gridMode && m.allPanesDoneLocked() {
+		return events, "", true
 	}
 
 	// Auto-close countdown, armed when a pilot declares the run over. Feed
@@ -3898,8 +6970,7 @@ func (m *Magmux) render() {
 	if !m.closeAt.IsZero() {
 		remain := time.Until(m.closeAt)
 		if remain <= 0 {
-			m.quitOnce.Do(func() { close(m.quit) })
-			return
+			return events, "", true
 		}
 		m.control.setCloseIn(remain)
 	}
@@ -3907,11 +6978,21 @@ func (m *Magmux) render() {
 	// Repaint the control panel before the dirty sweep below, so the frame it
 	// produces is picked up in this same render pass rather than one later.
 	// render() no-ops unless the panel actually has a pane.
-	m.control.render()
+	//
+	// A HIDDEN panel is skipped: painting it would set its dirty flag, and the
+	// sweep below would then order a full repaint every second for a pane that
+	// is not on screen — which is the dirty-flag model inverted. It is marked
+	// dirty on the way back in (togglePanel), so nothing is lost.
+	if !m.panelHiddenLocked() {
+		m.control.render()
+	}
 
 	// Check if any pane has new content
 	anyDirty := false
-	for _, p := range m.allPanes {
+	for _, p := range m.livePanesLocked(nil) {
+		if p.hidden {
+			continue // not on screen; its dirty flag is not a reason to paint
+		}
 		p.mu.Lock()
 		if p.dirty {
 			anyDirty = true
@@ -3920,12 +7001,23 @@ func (m *Magmux) render() {
 		p.mu.Unlock()
 	}
 	if !anyDirty {
-		// Even if no content changed, update cursor position (cheap)
-		if m.focused != nil && m.focused.screen != nil {
-			s := m.focused.screen
-			fmt.Fprintf(os.Stdout, "\x1b[%d;%dH", m.focused.y+s.curY+1, m.focused.x+s.curX+1)
+		// Even if no content changed, update cursor position (cheap). Cheap to
+		// BUILD, that is — it still goes out through render(), because a write
+		// to a blocked tty is not cheap at all.
+		if f := m.focused; f != nil && f.screen != nil {
+			s := f.screen
+			f.mu.Lock()
+			y, x, scrolled := s.curY, s.curX, s.sbOff > 0
+			f.mu.Unlock()
+			// A scrolled-back pane has no cursor to show: the child's cursor is
+			// on a line that is not on screen, and parking the terminal's cursor
+			// where that line WOULD be points at somebody else's text.
+			if scrolled {
+				return events, "", false
+			}
+			return events, fmt.Sprintf("\x1b[%d;%dH", f.y+y+1, f.x+x+1), false
 		}
-		return
+		return events, "", false
 	}
 
 	r := &m.renderer
@@ -3938,23 +7030,61 @@ func (m *Magmux) render() {
 		r.renderSelection(sel.pane)
 	}
 
-	// Status bar
+	// Status bar. Hidden by --no-status / Ctrl-G s, in which case the row it
+	// would have taken already belongs to the layout (reflowLocked).
 	if m.statusText == "" {
-		m.statusText = "*: " + magmuxLabel() + "\tD: ctrl-g q quit\tD: ctrl-g Tab switch"
+		// magmux's name and the chord, held to the terminal's width like every
+		// other form this row can take.
+		m.statusText = appendKeyHint(
+			fitStatusBase(m.cols-hintFloorWidth(hints), "*: "+magmuxLabel()), hints, m.cols)
 	}
-	r.renderStatusBar(m.rows-1, m.cols, m.statusText)
-
-	// Show cursor at focused pane position
-	if m.focused != nil && m.focused.screen != nil {
-		s := m.focused.screen
-		r.showCursor(m.focused.y+s.curY, m.focused.x+s.curX)
+	if !m.hideStatus {
+		text := m.statusText
+		// While Ctrl-G is armed the row belongs to the chord. Nothing else on
+		// screen can teach its second keys, and it is gone again on the very
+		// next keystroke — the panes are not touched either way.
+		if m.chordArmed {
+			if menu := m.chordMenuLocked(hints); menu != "" {
+				text = menu
+			}
+		}
+		text = m.noteRowLocked(text)
+		r.renderStatusBar(m.rows-1, m.cols, text)
 	}
 
-	r.flush()
+	// Show cursor at focused pane position — unless it is scrolled back, in
+	// which case the cursor belongs to a line that is not on screen and the
+	// frame's opening hideCursor is left to stand.
+	if f := m.focused; f != nil && f.screen != nil {
+		s := f.screen
+		f.mu.Lock()
+		y, x, scrolled := s.curY, s.curX, s.sbOff > 0
+		f.mu.Unlock()
+		if !scrolled {
+			r.showCursor(f.y+y, f.x+x)
+		}
+	}
+
+	// The bytes go back to render(), which writes them once the lock is off.
+	return events, r.frame(), false
 }
 
+// cleanup reaps every child and waits for its read loop to finish.
+//
+// m.closing is set under treeMu BEFORE wg.Wait, and OpenPane refuses under the
+// same lock: an open_pane landing between the two would call wg.Add while
+// wg.Wait was running, which panics with "WaitGroup misuse: Add called
+// concurrently with Wait".
+//
+// Caller must NOT hold treeMu.
 func (m *Magmux) cleanup() {
-	for _, p := range m.allPanes {
+	m.treeMu.Lock()
+	m.closing = true
+	panes := m.livePanesLocked(nil)
+	m.treeMu.Unlock()
+
+	// Signalling and closing PTYs is blocking I/O, so it happens off the lock.
+	for _, p := range panes {
 		if p.cmd != nil && p.cmd.Process != nil {
 			p.cmd.Process.Signal(syscall.SIGHUP)
 		}
@@ -3970,6 +7100,17 @@ func (m *Magmux) cleanup() {
 type PaneConfig struct {
 	Cmd  string
 	Args []string
+	// Dir is the child's working directory; empty inherits magmux's own.
+	// Setting it is what makes `open_pane` with a cwd real — and it is also
+	// why ClaudeCodeController.Start consults p.cmd.Dir before os.Getwd(),
+	// which is no longer this pane's directory.
+	Dir string
+	// Env is appended after magmux's own TERM/COLUMNS/LINES/MAGMUX_SOCK block,
+	// so a caller can override any of them.
+	Env []string
+	// Label is a short human name for the pane, echoed back in `list` so a
+	// client can address panes by name instead of by index.
+	Label string
 	// Control makes this a control-panel pane instead of a child process:
 	// magmux paints it itself and Cmd/Args are ignored.
 	Control bool
@@ -4027,6 +7168,16 @@ func getUserShell() string {
 }
 
 func main() {
+	// The MCP server hook must be the FIRST statement here: it has to come
+	// before the --version/--help scan below (which walks every argument and
+	// would claim a --help meant for `magmux mcp`), and long before init()
+	// puts the tty in raw mode or anything writes to stdout — a single stray
+	// byte on stdout desynchronises a JSON-RPC client for the rest of the
+	// session.
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		os.Exit(runMCP(os.Args[2:]))
+	}
+
 	// Handle --version / -v / --help / -h first pass
 	for _, arg := range os.Args[1:] {
 		if arg == "--version" || arg == "-v" {
@@ -4044,8 +7195,12 @@ func main() {
 			fmt.Println("  -g FILE   Grid file (one command per line, overrides -e)")
 			fmt.Println("  -e CMD    Run CMD in a pane (can be repeated)")
 			fmt.Println("  -w        Auto-exit when all panes are done (dead or idle)")
-			fmt.Println("  -c        Add a control panel pane for a controlled session")
+			fmt.Println("  -c        Start with the control panel visible (it always exists;")
+			fmt.Println("            without -c it starts hidden — Ctrl-G p reveals it)")
+			fmt.Println("  --no-status   Start with the status bar hidden (Ctrl-G s toggles)")
 			fmt.Println("  -x SECS   Close SECS after a pilot finishes (default: wait for a keypress)")
+			fmt.Println("  --id NAME Bind /tmp/magmux-NAME.sock instead of the pid socket ([A-Za-z0-9_-])")
+			fmt.Println("  --theme MODE  light | dark | auto (default: auto, via OSC 11)")
 			fmt.Println("  -v        Show version")
 			fmt.Println("  -h        Show this help")
 			fmt.Println()
@@ -4061,11 +7216,18 @@ func main() {
 			fmt.Println("  End / G       Control panel: resume following the newest exchange")
 			fmt.Println("  q / Esc       Quit (when all panes done, grid mode)")
 			fmt.Println("  Ctrl-G Tab    Switch focus to next pane")
+			fmt.Println("  Ctrl-G p      Show / hide the control panel (keeps its history)")
+			fmt.Println("  Ctrl-G s      Show / hide the status bar")
+			fmt.Println("  Ctrl-G [      Scroll the focused pane back through its scrollback.")
+			fmt.Println("                Then k/j ↑/↓ PgUp/PgDn g/G move, q / Enter / Esc go live.")
+			fmt.Println("                Alternate-screen panes (Claude Code, vim, htop) keep none.")
+			fmt.Println("  Mouse wheel   Scroll a non-alt pane's scrollback; forwarded to TUIs")
 			fmt.Println("  Mouse click   Switch focus to clicked pane")
 			fmt.Println("  Mouse drag    Select text (auto-copies to clipboard)")
 			fmt.Println()
 			fmt.Println("IPC Socket:")
 			fmt.Println("  /tmp/magmux-{pid}.sock — JSON line protocol")
+			fmt.Println("  /tmp/magmux-{name}.sock with --id NAME (known before magmux starts)")
 			fmt.Println("  Env var MAGMUX_SOCK exported to child processes")
 			fmt.Println()
 			fmt.Println("Agent Status Monitoring:")
@@ -4084,6 +7246,14 @@ func main() {
 			fmt.Println("  `send` writes to a pane even when it is idle — steering a finished")
 			fmt.Println("  turn is the point — and clears its done state like a real keystroke.")
 			fmt.Println()
+			fmt.Println("Pane lifecycle (a message with an \"id\" gets one `reply` back):")
+			fmt.Println("  {\"type\":\"open_pane\",\"id\":1,\"cmd\":\"claude\",\"cwd\":\"/proj\",\"split\":\"vertical\"}")
+			fmt.Println("  {\"type\":\"close_pane\",\"id\":2,\"pane\":1,\"force\":false}")
+			fmt.Println("  {\"type\":\"focus\",\"id\":3,\"pane\":0}")
+			fmt.Println()
+			fmt.Println("  Pane indices are permanent: closing a pane leaves a tombstone rather")
+			fmt.Println("  than renumbering, so ids go sparse and never move under a caller.")
+			fmt.Println()
 			fmt.Println("  Events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,")
 			fmt.Println("          Stop, Notification, PermissionRequest, PreCompact, PostCompact,")
 			fmt.Println("          SessionEnd")
@@ -4095,6 +7265,13 @@ func main() {
 			fmt.Println("    }]}]}}")
 			fmt.Println()
 			fmt.Println("Environment:")
+			fmt.Println("  MAGMUX_THEME    light | dark | auto (default: auto). magmux asks the")
+			fmt.Println("                  terminal for its background colour (OSC 11) and picks a")
+			fmt.Println("                  palette; set this when a terminal answers wrongly.")
+			fmt.Println("                  --theme wins over it.")
+			fmt.Println("  MAGMUX_SCROLLBACK  Lines of history kept per pane (default: 1000, 0 off).")
+			fmt.Println("                  Only the primary screen records; the ring fills lazily,")
+			fmt.Println("                  so a pane that never scrolls costs nothing.")
 			fmt.Println("  MAGMUX_SEL_FG   Selection foreground (256-color index, default: 0)")
 			fmt.Println("  MAGMUX_SEL_BG   Selection background (256-color index, default: 220)")
 			fmt.Println("  MAGMUX_DEBUG    Enable debug logging to /tmp/magmux-debug.log")
@@ -4110,7 +7287,10 @@ func main() {
 	var customCmds []PaneConfig
 	autoExit := false
 	withControl := false
+	noStatus := false
 	var autoClose time.Duration
+	var sockID string
+	var themePref string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-g":
@@ -4129,13 +7309,45 @@ func main() {
 		case "-w":
 			autoExit = true
 		case "-c", "--control":
+			// Now means "start with the panel VISIBLE". Every session gets a
+			// panel either way; without this it starts hidden and the sessions
+			// have the whole terminal. Kept on the same flag deliberately, so
+			// `magmux -c …` looks exactly as it always has.
 			withControl = true
+		case "--no-status":
+			noStatus = true
 		case "-x", "--close-after":
 			if i+1 < len(args) {
 				i++
 				var secs int
 				if _, err := fmt.Sscanf(args[i], "%d", &secs); err == nil && secs > 0 {
 					autoClose = time.Duration(secs) * time.Second
+				}
+			}
+		case "--theme":
+			if i+1 < len(args) {
+				i++
+				if validThemeSetting(args[i]) {
+					themePref = args[i]
+				} else {
+					// Ignored rather than fatal, like --id: auto-detection
+					// still runs, so a typo costs the chosen palette and
+					// nothing else. Said out loud, because "my --theme did
+					// nothing" is otherwise silent.
+					fmt.Fprintf(os.Stderr, "magmux: ignoring --theme %q (want light, dark or auto)\n", args[i])
+				}
+			}
+		case "--id":
+			if i+1 < len(args) {
+				i++
+				if validSocketID(args[i]) {
+					sockID = args[i]
+				} else {
+					// Ignored rather than fatal: the pid socket still binds, so
+					// a bad name costs the caller its chosen path and nothing
+					// else. Said out loud, because an agent polling
+					// /tmp/magmux-<name>.sock would otherwise just hang.
+					fmt.Fprintf(os.Stderr, "magmux: ignoring --id %q (allowed: A-Z a-z 0-9 _ -, max 64)\n", args[i])
 				}
 			}
 		}
@@ -4183,6 +7395,11 @@ func main() {
 
 	// The control panel is the last pane, so session panes keep the indices a
 	// pilot would naturally use (pane 0 is the first -e command).
+	//
+	// Only when it starts VISIBLE. A panel that starts hidden is installed
+	// after the layout is built (installHiddenPanel) rather than handed to the
+	// builders, so the visible layout is byte-identical to a magmux with no
+	// panel at all — see that function for why the builders cannot take it.
 	if withControl && useGrid {
 		commands = append(commands, PaneConfig{Control: true})
 	}
@@ -4190,8 +7407,12 @@ func main() {
 	mux := &Magmux{
 		gridMode:       useGrid,
 		autoExit:       autoExit,
+		hideStatus:     noStatus,
 		autoCloseAfter: autoClose,
+		sockID:         sockID,
+		themePref:      themePref,
 		sockDone:       make(chan struct{}),
+		layoutReady:    make(chan struct{}),
 		control:        newControlPanel(),
 		controllerFactories: []ControllerFactory{
 			claudeCodeFactory,
@@ -4204,8 +7425,23 @@ func main() {
 	}
 	defer mux.restore()
 
+	// Publish MAGMUX_SOCK synchronously. socketServer does this too, but it
+	// runs on its own goroutine and the sleep below is a delay, not a
+	// synchronisation primitive: on a loaded machine that goroutine can still
+	// be unscheduled when the first child forks, and the child then inherits an
+	// empty MAGMUX_SOCK with nothing to say why. The path is derived from the
+	// pid or --id, so it is known before the listener exists.
+	mux.sockPath = mux.socketPath()
+	os.Setenv("MAGMUX_SOCK", mux.sockPath)
+
 	// Start socket server before spawning children (so MAGMUX_SOCK is set)
 	go mux.socketServer()
+	// A connection is accepted from this moment on, but the layout does not
+	// exist yet, so nothing is served until markLayoutReady below. The defer is
+	// the safety net: an early os.Exit takes the waiters with the process, but
+	// any other way out of main must release them or a client sits on the
+	// timeout for no reason.
+	defer mux.markLayoutReady()
 	// Give the socket a moment to bind before spawning children
 	sleepMs(10)
 
@@ -4223,15 +7459,31 @@ func main() {
 		}
 	}
 
+	// Every session gets a panel, whether or not -c was passed; without -c it
+	// starts hidden and Ctrl-G p reveals it. This runs after the layout so the
+	// panel takes the last id and the session layout is untouched.
+	if !withControl {
+		mux.installHiddenPanel()
+	}
+
 	// Bind the panel to whichever pane was built for it, and keep focus on a
 	// real session — typing into the panel does nothing, so starting there
 	// would look broken.
-	for _, p := range mux.allPanes {
+	//
+	// Under treeMu because the socket server is already accepting connections:
+	// a client that connects right now runs buildPaneResults, which reads
+	// m.focused. The panel's own pane pointer is cp.mu's (attach takes it), and
+	// the order treeMu -> cp.mu is the documented one.
+	mux.treeMu.Lock()
+	live := mux.livePanesLocked(nil)
+	for _, p := range live {
 		if p.isControl {
-			mux.control.pane = p
-			mux.control.markDirty()
+			mux.control.attach(p)
+			// The pane Ctrl-G p toggles. Already set on the hidden path; this
+			// is the -c one, where the builders made it as an ordinary pane.
+			mux.panel = p
 			if mux.focused == p {
-				for _, q := range mux.allPanes {
+				for _, q := range live {
 					if !q.isControl {
 						mux.focused = q
 						break
@@ -4240,18 +7492,29 @@ func main() {
 			}
 		}
 	}
+	mux.treeMu.Unlock()
+	mux.control.markDirty()
 
 	mux.startReadLoops()
 	mux.attachControllers()
 
-	// In grid mode, start waiters for each child process
-	if useGrid {
-		for _, p := range mux.allPanes {
-			if p.isControl {
-				continue // no child to wait on
-			}
-			go mux.waitForChild(p)
+	// The layout is now real AND live: panes exist, their read loops are
+	// running and their controllers are attached. Only now is the connect-time
+	// aggregate worth anything — published here rather than straight after
+	// buildGrid so a client's first snapshot describes panes that can actually
+	// change state, not a layout still being wired up.
+	mux.markLayoutReady()
+
+	// Start a waiter for every child, grid mode or not: waitForChild is the
+	// only caller of cmd.Wait, so gating it on grid mode left the default
+	// three-shell layout leaking a zombie per exited shell. The grid-only part
+	// (the ✓ DONE / ✗ FAIL tombstone and the `exit` event) is gated inside
+	// waitForChild by p.gridMode, so nothing about non-grid rendering changes.
+	for _, p := range live {
+		if p.isControl {
+			continue // no child to wait on
 		}
+		go mux.waitForChild(p)
 	}
 
 	mux.handleSIGWINCH()

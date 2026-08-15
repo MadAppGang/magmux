@@ -54,6 +54,21 @@ type ClaudeCodeController struct {
 	// only shared state between them.
 	injected atomic.Bool
 
+	// published is sessionPath republished for OTHER goroutines. Transcript is
+	// served on the socket goroutine while everything else here runs on the
+	// render goroutine, and sessionPath is written by that render goroutine on
+	// every lock-on and every reset — so reading the field itself from the
+	// socket would be a plain data race.
+	//
+	// It is a copy rather than a lock for the same reason `injected` is: it
+	// keeps the ONE piece of state shared between the two goroutines explicit,
+	// and it means Transcript takes nothing at all before doing file I/O,
+	// which is what stops a slow disk from stalling a frame. Publishing is
+	// one-way — the render goroutine writes, everyone else reads — and the
+	// worst a racing reader can see is the previous path, which it then reads
+	// from disk and finds unchanged or gone. Both are honest answers.
+	published atomic.Pointer[string]
+
 	snap Snapshot
 }
 
@@ -202,13 +217,23 @@ func (c *ClaudeCodeController) Start(ctx context.Context) error {
 	if c.spawnedAt.IsZero() {
 		c.spawnedAt = time.Now()
 	}
-	// Resolve cwd. magmux's spawned children inherit magmux's cwd, which is
-	// where `task` (or the user) ran the command from — but a pane launched
-	// as `cd /foo && claude '...'` writes its transcript under /foo instead,
-	// so prefer a cd target parsed out of the command when there is one.
+	// Resolve cwd, in descending order of how directly it states where claude
+	// will actually run:
+	//
+	//  1. a `cd /foo &&` prefix parsed out of the command;
+	//  2. the pane's own cmd.Dir — set by open_pane's cwd. Without this step a
+	//     dynamically opened claude pane silently regresses to the slow
+	//     scan-every-project fallback, because os.Getwd() is magmux's
+	//     directory and no longer has anything to do with this pane;
+	//  3. os.Getwd(), the inherited default.
+	//
+	// Content-matching remains the last resort, exactly as before — cmd.Dir is
+	// only a better first guess, never the only way in.
 	if c.cwd == "" {
 		if dir := extractClaudeCwd(c.pane); dir != "" {
 			c.cwd = dir
+		} else if c.pane != nil && c.pane.cmd != nil && c.pane.cmd.Dir != "" {
+			c.cwd = c.pane.cmd.Dir
 		} else if wd, err := os.Getwd(); err == nil {
 			c.cwd = wd
 		}
@@ -294,6 +319,13 @@ func (c *ClaudeCodeController) consumeInjected() {
 		c.snap.StartedAt = time.Now()
 		c.snap.CompletedAt = time.Time{}
 		c.snap.LastTool = ""
+		// A new turn must not inherit the previous turn's answer. The
+		// transcript's own user entry clears this too (applyLine), but this
+		// path exists precisely for when the transcript is lagging or was
+		// never found — and pollControllers emits `response` on every
+		// snapshot, so anything left here is broadcast as if the new turn had
+		// said it. A tool-only turn would then re-settle still carrying it.
+		c.snap.LastResponse = ""
 		if dbgFile != nil {
 			fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p input injected → working\n", c.pane)
 		}
@@ -374,7 +406,7 @@ func (c *ClaudeCodeController) pollTranscript() error {
 			// Not started yet
 			return nil
 		}
-		c.sessionPath = path
+		c.setSessionPath(path)
 		c.fileSize = 0
 		if dbgFile != nil {
 			fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p locked onto session %s\n", c.pane, filepath.Base(path))
@@ -385,7 +417,7 @@ func (c *ClaudeCodeController) pollTranscript() error {
 	info, err := os.Stat(c.sessionPath)
 	if err != nil {
 		// Session file disappeared — reset
-		c.sessionPath = ""
+		c.setSessionPath("")
 		c.fileSize = 0
 		return nil
 	}
@@ -412,6 +444,27 @@ func (c *ClaudeCodeController) pollTranscript() error {
 	}
 	c.fileSize = info.Size()
 	return nil
+}
+
+// setSessionPath records the transcript this controller is tailing and
+// republishes it for readers on other goroutines. Every write to sessionPath
+// goes through here — a bare assignment would leave Transcript serving the
+// previous session's file, or a file that has since been deleted, with nothing
+// to say it had gone stale.
+//
+// Caller is the render goroutine (pollTranscript).
+func (c *ClaudeCodeController) setSessionPath(path string) {
+	c.sessionPath = path
+	c.published.Store(&path)
+}
+
+// discoveredSession returns the transcript path for a reader on any goroutine,
+// or "" if discovery has not succeeded (yet, or at all).
+func (c *ClaudeCodeController) discoveredSession() string {
+	if p := c.published.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // sessionCandidate is one transcript that could belong to this pane.
@@ -607,6 +660,282 @@ func readFirstUserPrompt(path string) string {
 	return ""
 }
 
+// ── turn history ────────────────────────────────────────────────────────────
+//
+// Snapshot answers "what is this session doing"; the code below answers "what
+// did it actually say and do". Both read the same file, found the same way:
+// Transcript serves whatever path pollTranscript locked onto, so the two can
+// never disagree about which session belongs to this pane. What they cannot
+// share is the PARSE — the tailer is an incremental state machine that keeps
+// only the latest of each field, and history needs whole turns with their tool
+// inputs and results. The one rule they must not diverge on, "a `user` entry
+// with array content is a tool RESULT and not a prompt", is therefore factored
+// into claudePromptText and called from both.
+
+// transcriptByteBudget bounds the memory ONE Transcript call holds while it
+// parses. It is not truncation: no field is ever shortened, but once the
+// retained turns exceed the budget the oldest of them are dropped, so a caller
+// asking for 50 turns of a session that pasted a 40MB file into a tool result
+// gets the newest turns that fit rather than the machine's memory.
+const transcriptByteBudget = 2 << 20 // 2MB
+
+// Transcript returns the last `turns` turns of this session's own JSONL
+// record, oldest first.
+//
+// It RE-READS the file on every call rather than retaining turns as we tail.
+// Retaining would be faster and is the wrong trade here: steady-state memory
+// stays flat for a pane nobody ever asks about (the common case — most panes
+// are never read), the tailer's hot path stays a state machine over the last
+// few bytes rather than a growing ring, and a re-read is correct across the
+// rewrites the tailer cannot see. Claude Code compacts, edits and replays its
+// transcripts; a retained ring would still be serving turns the file no longer
+// contains. The cost is one pass over a file we would have had to open anyway.
+//
+// Safe on any goroutine: it reads one atomically published path and then owns
+// its own file handle. It holds no lock at all, and therefore none across the
+// I/O.
+func (c *ClaudeCodeController) Transcript(turns int) ([]Turn, error) {
+	path := c.discoveredSession()
+	if path == "" {
+		return nil, errNoTranscript
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		// Located once, unreadable now: rotated, compacted, or deleted out
+		// from under us. That is still "we cannot reach the record", not "the
+		// session said nothing", so it stays the same class of error.
+		return nil, fmt.Errorf("%w: %v", errNoTranscript, err)
+	}
+	defer f.Close()
+	return parseClaudeTurns(f, normalizeTranscriptTurns(turns), transcriptByteBudget)
+}
+
+// parseClaudeTurns reads a Claude Code JSONL transcript and returns its last
+// maxTurns turns, oldest first, holding no more than byteBudget bytes of them.
+//
+// Split out from Transcript so it can be tested against a reader with no file,
+// no controller and no discovery — this is the part most likely to rot, since
+// the JSONL shape belongs to Claude Code and can change without notice.
+func parseClaudeTurns(r io.Reader, maxTurns, byteBudget int) ([]Turn, error) {
+	sc := bufio.NewScanner(r)
+	// Same 4MB budget as the tailer: a single tool result carrying a whole file
+	// comfortably exceeds bufio's 64KB default, and an oversized token does not
+	// get skipped — Scan returns false and the rest of the transcript silently
+	// vanishes.
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+
+	var (
+		turns []Turn
+		sizes []int // bytes retained per turn, parallel to turns
+		total int
+		// open reports whether the last retained turn is an assistant turn
+		// still being appended to. Claude Code writes one assistant reply as
+		// several entries; they are one turn.
+		open bool
+	)
+	// trim drops the OLDEST turns until the request's bounds are met, always
+	// keeping at least one: a caller who asked for history and whose newest
+	// turn alone blows the budget still wants that turn.
+	trim := func() {
+		for len(turns) > 1 && (len(turns) > maxTurns || total > byteBudget) {
+			total -= sizes[0]
+			turns, sizes = turns[1:], sizes[1:]
+			if len(turns) == 0 {
+				open = false
+			}
+		}
+	}
+	push := func(t Turn, size int) {
+		turns = append(turns, t)
+		sizes = append(sizes, size)
+		total += size
+		trim()
+	}
+	grow := func(i, n int) {
+		if i < 0 || i >= len(sizes) || n == 0 {
+			return
+		}
+		sizes[i] += n
+		total += n
+		trim()
+	}
+
+	for sc.Scan() {
+		var entry map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &entry); err != nil {
+			continue // a partially flushed line; the next poll sees it whole
+		}
+		msg, _ := entry["message"].(map[string]any)
+
+		switch t, _ := entry["type"].(string); t {
+		case "user":
+			if text, isPrompt := claudePromptText(msg); isPrompt {
+				open = false
+				push(Turn{
+					Role:      TurnUser,
+					Text:      text,
+					Timestamp: parseClaudeTimestamp(entry["timestamp"]),
+				}, len(text))
+				continue
+			}
+			// Not a prompt: a tool RESULT, which Claude Code also files as a
+			// `user` entry. It belongs to the call it answers, not to a turn of
+			// its own — see the note in applyLine on what treating it as a turn
+			// boundary costs.
+			for _, block := range claudeContentBlocks(msg) {
+				if bt, _ := block["type"].(string); bt != "tool_result" {
+					continue
+				}
+				id, _ := block["tool_use_id"].(string)
+				text := claudeToolResultText(block["content"])
+				if i := attachToolResult(turns, id, text); i >= 0 {
+					grow(i, len(text))
+				}
+			}
+
+		case "assistant":
+			if !open {
+				push(Turn{
+					Role:      TurnAssistant,
+					Timestamp: parseClaudeTimestamp(entry["timestamp"]),
+				}, 0)
+				open = true
+			}
+			cur := &turns[len(turns)-1]
+			added := 0
+			for _, block := range claudeContentBlocks(msg) {
+				switch bt, _ := block["type"].(string); bt {
+				case "text":
+					txt, _ := block["text"].(string)
+					txt = strings.TrimSpace(txt)
+					if txt == "" {
+						continue
+					}
+					if cur.Text != "" {
+						cur.Text += "\n\n"
+						added += 2
+					}
+					cur.Text += txt
+					added += len(txt)
+				case "tool_use":
+					name, _ := block["name"].(string)
+					id, _ := block["id"].(string)
+					input := claudeToolInput(block["input"])
+					cur.Tools = append(cur.Tools, ToolCall{Name: name, Input: input, id: id})
+					added += len(name) + len(input)
+				}
+			}
+			grow(len(turns)-1, added)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		// Whatever was parsed before the failure is real and is returned with
+		// the error: a caller that can show six of eight turns and say why the
+		// rest are missing is strictly better off than one handed nothing.
+		return turns, err
+	}
+	return turns, nil
+}
+
+// attachToolResult files a tool result against the call it answers and returns
+// the index of the turn it landed in, or -1.
+//
+// Matching is by tool_use_id, searching backwards because a result is always
+// answering a recent call. The id-less fallback exists because the id is
+// Claude Code's field and not ours: without it a result would be dropped
+// silently, and "the tool ran and returned nothing" is exactly the wrong thing
+// to tell a driver.
+func attachToolResult(turns []Turn, id, text string) int {
+	for i := len(turns) - 1; i >= 0; i-- {
+		for j := len(turns[i].Tools) - 1; j >= 0; j-- {
+			call := &turns[i].Tools[j]
+			if id != "" {
+				if call.id != id {
+					continue
+				}
+			} else if call.Result != "" {
+				continue // answered already; the open call is the one we want
+			}
+			call.Result = text
+			return i
+		}
+	}
+	return -1
+}
+
+// claudePromptText reports whether a `user` entry is a REAL prompt, and
+// returns it if so.
+//
+// The rule — string content is a prompt, array content is a tool result — is
+// an undocumented shape of Claude Code's record, and both readers in this file
+// depend on it for different reasons: the tailer must not treat a tool result
+// as a turn boundary, and the history parser must not file one as a turn. One
+// function so they cannot drift apart.
+func claudePromptText(msg map[string]any) (string, bool) {
+	content, ok := msg["content"].(string)
+	return content, ok
+}
+
+// claudeContentBlocks returns the content blocks of a message, or nil when the
+// content is a bare string (a prompt) or missing.
+func claudeContentBlocks(msg map[string]any) []map[string]any {
+	raw, _ := msg["content"].([]any)
+	out := make([]map[string]any, 0, len(raw))
+	for _, b := range raw {
+		if block, ok := b.(map[string]any); ok {
+			out = append(out, block)
+		}
+	}
+	return out
+}
+
+// claudeToolInput renders a tool_use input as the JSON it was recorded as.
+// Kept as text rather than as a nested object: it crosses a socket and an MCP
+// boundary on its way to a model, and a model reads `{"command":"ls -la"}`
+// exactly as well as a decoded map while costing every hop less.
+func claudeToolInput(v any) string {
+	if v == nil {
+		return ""
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// claudeToolResultText flattens a tool_result's content, which Claude Code
+// writes as a plain string for simple tools and as a block array for the ones
+// that return structured output.
+func claudeToolResultText(v any) string {
+	switch c := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return c
+	case []any:
+		var parts []string
+		for _, raw := range c {
+			block, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if txt, ok := block["text"].(string); ok && txt != "" {
+				parts = append(parts, txt)
+				continue
+			}
+			// A non-text block (an image, say). Naming it beats dropping it:
+			// "the tool returned something we did not render" is information.
+			if bt, ok := block["type"].(string); ok && bt != "" {
+				parts = append(parts, "["+bt+"]")
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return claudeToolInput(v)
+	}
+}
+
 // applyLine parses one JSONL entry and updates the snapshot state machine.
 func (c *ClaudeCodeController) applyLine(line []byte) {
 	var entry map[string]any
@@ -635,7 +964,7 @@ func (c *ClaudeCodeController) applyLine(line []byte) {
 		// message, but the tool does not — which is why a turn that plainly ran
 		// Bash reported no tool at all.
 		msg, _ := entry["message"].(map[string]any)
-		content, isPrompt := msg["content"].(string)
+		content, isPrompt := claudePromptText(msg)
 		if !isPrompt {
 			return
 		}

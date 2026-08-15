@@ -6,6 +6,7 @@
     "test:ui:case1": "bun test/ui/case1.ts",
     "test:ui:case2": "bun test/ui/case2.ts",
     "test:ui:case3": "bun test/ui/case3.ts",
+    "test:ui:case4": "bun test/ui/case4.ts",
     "pilot": "bun pilot/pilot.ts"
   },
   "devDependencies": {
