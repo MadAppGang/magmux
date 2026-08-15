@@ -1,16 +1,16 @@
 {
   "enabledPlugins": {
     "claudish@magus": true,
-    "code-analysis@magus": true,
     "mnemex@magus": true,
-    "multimodel@magus": true,
-    "dev@magus": true,
     "go@magus": true,
     "browser-use@magus": true,
     "terminal@magus": true,
     "kanban@magus": true,
     "setup@magus": true,
-    "style@magus": true
+    "style@magus": true,
+    "code-analysis@magus": true,
+    "multimodel@magus": true,
+    "dev@magus": true
   },
   "installedPluginVersions": {
     "code-analysis@magus": "5.3.1",
