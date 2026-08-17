@@ -15,9 +15,36 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
+
+// TestVersionFlagExitsZero pins the exit status of --version and -v.
+//
+// It exists because the contract has a consumer in ANOTHER REPOSITORY. The
+// Homebrew formula generated from .goreleaser.yml calls
+// `shell_output("#{bin}/magmux --version 2>&1", <status>)`, and shell_output
+// RAISES when the observed status differs from the one it was given. The
+// formula passed 1 while magmux has always exited 0, so `brew test magmux`
+// failed against every release up to and including v0.8.0 — and nothing in this
+// suite could see it, because the assertion lives in the tap.
+//
+// --version returns before init(), so this needs no pty and runs everywhere.
+func TestVersionFlagExitsZero(t *testing.T) {
+	bin := magmuxBinForTest(t)
+	for _, flag := range []string{"--version", "-v"} {
+		out, err := exec.Command(bin, flag).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s exited non-zero (%v) — the Homebrew formula's shell_output would raise. Output: %s",
+				flag, err, out)
+		}
+		if !strings.Contains(string(out), "magmux ") {
+			t.Errorf("%s printed %q, want it to contain %q", flag, out, "magmux ")
+		}
+	}
+}
 
 // dialASAP connects the instant the listener exists. The 50ms retry in
 // rpcMagmux.dial is deliberately not used here: this test's whole subject is
