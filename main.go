@@ -1561,7 +1561,17 @@ type Pane struct {
 	// child's pid has been collected and is free for the OS to reuse. The
 	// force-kill path in reapPane checks it before signalling the process
 	// GROUP, so a delayed SIGKILL can never land on a stranger. Guarded by mu.
-	reaped       bool
+	reaped bool
+	// deadAt is when this pane FIRST went dead, whichever of the two writers of
+	// p.dead got there first (readLoop on PTY EOF, reapChild on cmd.Wait). Both
+	// stamp it under mu and both guard on IsZero, so neither can move it.
+	//
+	// Its ZERO value is load-bearing: "went dead at the dawn of time", so
+	// time.Since(deadAt) is centuries and paneDoneLocked's grace period expires
+	// instantly. That is what keeps every existing Pane{dead:true} test literal
+	// behaving exactly as it does today. A test that wants to exercise the race
+	// must set deadAt: time.Now() explicitly.
+	deadAt       time.Time
 	exitCode     int       // exit code of child process
 	startedAt    time.Time // when the child process was started (for exec duration)
 	tint         string    // "green", "red", "" — border/indicator color
@@ -1900,6 +1910,14 @@ func (p *Pane) readLoop(wg *sync.WaitGroup) {
 		if err != nil {
 			p.mu.Lock()
 			p.dead = true
+			// Stamped, but NOT reaped: the PTY closing says the child let go of
+			// its terminal, not that its status has been collected. cmd.Wait is
+			// still running on waitForChild's goroutine and p.exitCode is still
+			// zero. paneDoneLocked uses this stamp to bound how long -w waits
+			// for the real number.
+			if p.deadAt.IsZero() {
+				p.deadAt = time.Now()
+			}
 			p.mu.Unlock()
 			return
 		}
@@ -2766,15 +2784,39 @@ type Magmux struct {
 	//
 	// Written once before renderLoop starts and never again, so it needs no
 	// lock; treat it as immutable from the moment the render loop exists.
-	out           io.Writer
-	rawState      *term.State
-	quit          chan struct{}
-	quitOnce      sync.Once
-	wg            sync.WaitGroup
-	gridMode      bool       // -g flag was used
-	autoExit      bool       // -w flag: quit automatically when all panes done
-	sockPath      string     // /tmp/magmux-{pid}.sock, or {name} with --id
-	sockID        string     // --id NAME: bind a named socket instead of the pid one
+	out io.Writer
+	// headless suppresses every interaction with the terminal: no raw mode, no
+	// alternate screen, no OSC 11 probe, no frame written anywhere. What it does
+	// NOT suppress is the render loop — renderLocked is also where -w decides to
+	// quit and where the snapshot events are collected, so only the WRITE half
+	// (writeTerm) is skipped.
+	//
+	// It is stated as a POSITIVE that is FALSE by default for the same reason
+	// hideStatus/panelFirst are stated as negatives: every unit test builds a
+	// Magmux as a struct literal, so the zero value must be today's behaviour,
+	// and today's behaviour is interactive. An `interactive bool` would invert
+	// that and silently make every existing literal headless.
+	//
+	// Written in init() and nowhere else — including the auto-degrade — and read
+	// everywhere after. No lock, deliberately, on the same argument as
+	// pendingInput and themeAskedAt: init() returns before any goroutine exists.
+	headless bool
+	rawState *term.State
+	quit     chan struct{}
+	quitOnce sync.Once
+	wg       sync.WaitGroup
+	gridMode bool   // -g flag was used
+	autoExit bool   // -w flag: quit automatically when all panes done
+	sockPath string // /tmp/magmux-{pid}.sock, or {name} with --id
+	sockID   string // --id NAME: bind a named socket instead of the pid one
+	// sockDir overrides where this magmux binds (--sock-dir / MAGMUX_SOCK_DIR).
+	// Empty means the package default in sockdir.go, i.e. /tmp — so every
+	// existing struct literal keeps binding exactly where it always did. Same
+	// empty-means-default shape as m.out and m.stdin, neither of which is ever
+	// assigned in production either.
+	//
+	// Written once, in main(), before any goroutine exists.
+	sockDir       string
 	sockClients   []net.Conn // currently-connected socket subscribers (for push events)
 	sockClientsMu sync.Mutex
 	// finalEvents holds the marshaled shutdown payloads (results, then
@@ -3029,6 +3071,53 @@ func (m *Magmux) statusRowsLocked() int {
 		return 0
 	}
 	return 1
+}
+
+// headlessSize is the geometry a run with no terminal gets.
+//
+// COLUMNS/LINES first, and the consequence is DELIBERATE: magmux exports exactly
+// those two to its own children, so a headless magmux started INSIDE a magmux
+// pane inherits that pane's size rather than a stand-in. That is the right
+// answer — the nested run's captures then line up with the space a human is
+// actually looking at — but it means the same command can produce different
+// `results` geometry depending on where it was launched from, which is why it is
+// written down and tested rather than left to be discovered.
+//
+// 80x24 otherwise: the VT100 default every tool assumes.
+//
+// The bounds are not paranoia. newScreen(h, w) allocates h*w Cells, so
+// COLUMNS=99999999 is an OOM with a stack trace instead of an error, and
+// COLUMNS=0 gives every pane a zero-width screen whose every capture comes back
+// empty with no error anywhere. Both arrive from the ENVIRONMENT, the input
+// class nobody validates.
+// A per-side bound is NOT enough, and the first version of this function only
+// had one. newScreen allocates rows*cols Cells and a Cell is 20 bytes here
+// (rune 4 + two 6-byte Colors + Attr 2 + two bools), so LINES=9999
+// COLUMNS=9999 — both inside a 10000 per-side cap — is 99,980,001 cells and a
+// ~2GB allocation before a single byte of output, which is the OOM the comment
+// above claims to have prevented. The PRODUCT is what costs memory, so the
+// product is what is capped. 4,000,000 cells is ~80MB: far past any real
+// terminal (a 300x600 pane is 180,000) and nowhere near a container limit.
+const maxHeadlessCells = 4_000_000
+
+func headlessSize() (rows, cols int) {
+	rows, cols = 24, 80
+	if v, err := strconv.Atoi(os.Getenv("LINES")); err == nil && v > 0 && v < 10000 {
+		rows = v
+	}
+	if v, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && v > 0 && v < 10000 {
+		cols = v
+	}
+	// Both together, after both are known: either alone can be legal while the
+	// pair is not. Falling back to 80x24 rather than clamping one side keeps the
+	// answer a geometry somebody could actually have meant, and it is said out
+	// loud because a silently ignored COLUMNS is indistinguishable from a bug.
+	if rows*cols > maxHeadlessCells {
+		fmt.Fprintf(os.Stderr, "magmux: ignoring LINES=%d COLUMNS=%d (%d cells exceeds the %d-cell cap); using 80x24\n",
+			rows, cols, rows*cols, maxHeadlessCells)
+		rows, cols = 24, 80
+	}
+	return rows, cols
 }
 
 // reflowLocked resizes the whole tree to the current terminal minus the status
@@ -3388,8 +3477,41 @@ func (m *Magmux) init() error {
 		fmt.Sscanf(v, "%d", &selBg)
 	}
 
+	fd := int(m.stdinFile().Fd())
+
+	// Auto-degrade. Stdin that is not a terminal cannot be put in raw mode and
+	// has no geometry — term.MakeRaw AND term.GetSize both fail on a pipe — so a
+	// caller redirecting stdin has already asked for headless whether or not
+	// they know the flag exists. `magmux -w -e 'echo hi' < /dev/null` used to
+	// exit 1 with "raw mode: operation not supported by device"; this is the one
+	// line that fixes it.
+	//
+	// Resolved HERE and not in main() so the mode is reachable from a test that
+	// never spawns a process: &Magmux{stdin: pipeReader} + init() degrades,
+	// because a pipe is not a terminal.
+	if !m.headless && !term.IsTerminal(fd) {
+		m.headless = true
+	}
+	if dbgFile != nil {
+		fmt.Fprintf(dbgFile, "init: headless=%v (stdin fd %d is a terminal: %v)\n",
+			m.headless, fd, term.IsTerminal(fd))
+	}
+
+	if m.headless {
+		// Synthetic geometry. buildGrid divides by m.cols and subtracts
+		// statusRowsLocked from m.rows; zeros there give every pane a zero-sized
+		// Screen and every capture comes back empty. errPanesDontFit is what
+		// turns "too small to be usable" into an error rather than that silence.
+		m.rows, m.cols = headlessSize()
+		m.quit = make(chan struct{})
+		// Still called: --theme / MAGMUX_THEME still choose a palette, and the
+		// palette is what children are told about the background. Only the PROBE
+		// is skipped, by initTheme's own guard.
+		m.initTheme(fd)
+		return nil
+	}
+
 	// Enter raw mode
-	fd := int(os.Stdin.Fd())
 	state, err := term.MakeRaw(fd)
 	if err != nil {
 		return fmt.Errorf("raw mode: %w", err)
@@ -3433,14 +3555,21 @@ func (m *Magmux) initTheme(fd int) {
 		// Nothing to ask and nobody to answer: a piped stdin has no
 		// background colour, and a dumb terminal has no OSC at all. Both
 		// would otherwise cost every run the probe timeout for nothing.
-		if !term.IsTerminal(fd) || os.Getenv("TERM") == "dumb" {
+		//
+		// m.headless is the third case and is NOT implied by the first two:
+		// --headless forced from a real tty passes term.IsTerminal, and the
+		// probe writes its query to FD 0. That is a byte on the terminal from
+		// a mode whose whole contract is that it emits none, which is why
+		// this guard is listed as its own site rather than folded into the
+		// stdout enumeration.
+		if m.headless || !term.IsTerminal(fd) || os.Getenv("TERM") == "dumb" {
 			return themeDark, nil
 		}
 		// Recorded before the probe writes, and only on the path that
 		// actually writes: an explicit --theme never asks the terminal
 		// anything, so inputLoop must not then go looking for an answer.
 		m.themeAskedAt = time.Now()
-		k, c, ok, rest := detectThemeColor(os.Stdin, themeProbeTimeout)
+		k, c, ok, rest := detectThemeColor(m.stdinFile(), themeProbeTimeout)
 		probed, probedOK = c, ok
 		return k, rest
 	})
@@ -3459,10 +3588,18 @@ func (m *Magmux) initTheme(fd int) {
 }
 
 func (m *Magmux) restore() {
+	// Nothing was changed, so nothing is restored. rawState is nil headless, so
+	// only the escape write below actually needed guarding — but returning here
+	// states the rule once instead of leaving a reader to prove it, and it is
+	// what makes AC1.4 ("zero bytes on stdout") hold on every exit path,
+	// including the two `mux.restore(); os.Exit(1)` unwinds in main().
+	if m.headless {
+		return
+	}
 	// Disable mouse + show cursor + exit alternate screen
 	os.Stdout.WriteString("\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l")
 	if m.rawState != nil {
-		term.Restore(int(os.Stdin.Fd()), m.rawState)
+		term.Restore(int(m.stdinFile().Fd()), m.rawState)
 	}
 }
 
@@ -3570,9 +3707,52 @@ func (m *Magmux) stampPaneIDs() {
 	}
 }
 
+// layoutSpec is what an unusable-pane error has to say and what buildColumn's
+// recursion cannot reconstruct: how many panes the CALLER asked for, and the
+// terminal it asked for them in.
+//
+// The base case knows only its own one-element slice and its own box, so on its
+// own it would report "cannot lay out 1 panes in 40x1" for a 40-pane request on
+// an 80x24 terminal — true of the recursion and useless to the human, who has
+// to decide between fewer -e commands and a bigger window.
+type layoutSpec struct {
+	panes      int
+	rows, cols int
+}
+
+// errPanesDontFit names the count AND the geometry, because "no room" without
+// either is a message a caller cannot act on. The COLUMNS/LINES hint is aimed
+// at the headless caller, for whom those two env vars ARE the terminal.
+//
+// The floor is minPaneRows/minPaneCols — the SAME constants OpenPane and
+// splitFits use, deliberately and with no second copy: "usable" cannot mean one
+// thing for an agent's open_pane, another for Ctrl-G p, and a third for -e.
+func errPanesDontFit(spec layoutSpec) error {
+	return fmt.Errorf(
+		"cannot lay out %d panes in %dx%d: every pane needs at least %d rows and %d columns "+
+			"(use fewer -e commands, a larger terminal, or set COLUMNS/LINES)",
+		spec.panes, spec.cols, spec.rows, minPaneRows, minPaneCols)
+}
+
 // buildColumn recursively splits a slice of commands into a vertical binary tree.
-func buildColumn(cmds []PaneConfig, y, x, h, w int) (*Pane, []*Pane, error) {
+//
+// It REFUSES a box too small to be usable rather than clamping it. That is the
+// codebase's existing split, not a new rule: CREATION refuses, because the
+// caller asked for something impossible and can still be told (OpenPane returns
+// errPaneTooSmall, splitFits returns false, showPanelLocked says so in
+// chromeNote); RESHAPE clamps, because a SIGWINCH has nobody to tell
+// (reshapeChildren). buildColumn is creation. A clamped pane is alive,
+// addressable and captures as empty, which turns a layout mistake into a
+// scenario that silently reports no output — the same misattributed-diagnostics
+// shape S-1 fixes on the other side.
+func buildColumn(cmds []PaneConfig, y, x, h, w int, spec layoutSpec) (*Pane, []*Pane, error) {
 	if len(cmds) == 1 {
+		// EXHAUSTIVE: every leaf of every layout passes through here, so this
+		// check alone is sufficient for correctness. The ones below it exist
+		// only to refuse earlier.
+		if h < minPaneRows || w < minPaneCols {
+			return nil, nil, errPanesDontFit(spec)
+		}
 		p, err := newPaneFor(y, x, h, w, cmds[0])
 		if err != nil {
 			return nil, nil, err
@@ -3584,11 +3764,19 @@ func buildColumn(cmds []PaneConfig, y, x, h, w int) (*Pane, []*Pane, error) {
 	topH := h * topN / len(cmds)
 	botH := h - topH - 1 // -1 for border
 
-	topPane, topLeaves, err := buildColumn(cmds[:topN], y, x, topH, w)
+	// Not strictly necessary — a too-small half fails its own base case — but
+	// refusing BEFORE recursing means no child process is spawned for a layout
+	// already known to be impossible, and it keeps a negative height from being
+	// passed down at all.
+	if topH < minPaneRows || botH < minPaneRows {
+		return nil, nil, errPanesDontFit(spec)
+	}
+
+	topPane, topLeaves, err := buildColumn(cmds[:topN], y, x, topH, w, spec)
 	if err != nil {
 		return nil, nil, err
 	}
-	botPane, botLeaves, err := buildColumn(cmds[topN:], y+topH+1, x, botH, w)
+	botPane, botLeaves, err := buildColumn(cmds[topN:], y+topH+1, x, botH, w, spec)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -3616,9 +3804,19 @@ func (m *Magmux) buildGrid(commands []PaneConfig) error {
 		return fmt.Errorf("no commands specified")
 	}
 
+	// The count and the terminal, carried down so the refusal below can name
+	// what the caller asked for rather than what the recursion is looking at.
+	spec := layoutSpec{panes: len(commands), rows: availH, cols: m.cols}
+
 	switch len(commands) {
 	case 1:
-		// Single pane — fullscreen
+		// Single pane — fullscreen. No border, because there is no split, so it
+		// is charged for neither. The asymmetry with the branches below is
+		// deliberate and mirrors splitFits, which also only charges for a border
+		// when there is one.
+		if availH < minPaneRows || m.cols < minPaneCols {
+			return errPanesDontFit(spec)
+		}
 		p, err := newPaneFor(0, 0, availH, m.cols, commands[0])
 		if err != nil {
 			return err
@@ -3631,6 +3829,11 @@ func (m *Magmux) buildGrid(commands []PaneConfig) error {
 		// Horizontal split: left | right
 		w1 := m.cols / 2
 		w2 := m.cols - w1 - 1
+		// Refused before newPaneFor, so no child process is ever spawned for a
+		// layout that will be rejected — the ordering OpenPane already uses.
+		if availH < minPaneRows || w1 < minPaneCols || w2 < minPaneCols {
+			return errPanesDontFit(spec)
+		}
 		p1, err := newPaneFor(0, 0, availH, w1, commands[0])
 		if err != nil {
 			return err
@@ -3657,11 +3860,17 @@ func (m *Magmux) buildGrid(commands []PaneConfig) error {
 		leftW := m.cols / 2
 		rightW := m.cols - leftW - 1
 
-		leftPane, leftLeaves, err := buildColumn(commands[:leftN], 0, 0, availH, leftW)
+		// The column WIDTHS are this branch's own arithmetic; the heights are
+		// buildColumn's and are checked there.
+		if leftW < minPaneCols || rightW < minPaneCols {
+			return errPanesDontFit(spec)
+		}
+
+		leftPane, leftLeaves, err := buildColumn(commands[:leftN], 0, 0, availH, leftW, spec)
 		if err != nil {
 			return err
 		}
-		rightPane, rightLeaves, err := buildColumn(commands[leftN:], 0, leftW+1, availH, rightW)
+		rightPane, rightLeaves, err := buildColumn(commands[leftN:], 0, leftW+1, availH, rightW, spec)
 		if err != nil {
 			return err
 		}
@@ -3833,6 +4042,12 @@ func (m *Magmux) pollControllers(force bool) []any {
 		prev := p.controllerSnap
 		p.controllerSnap = snap
 		applyControllerSnapshot(p, snap)
+		// p.label is write-once at construction — newPane and newControlPane are
+		// its only writers, both before the pane is reachable — so it is as safe
+		// to read unlocked as p.id. It is captured inside this block anyway
+		// because that costs nothing and removes the need for a reader to
+		// reconstruct the argument.
+		label := p.label
 		p.mu.Unlock()
 
 		// Broadcast on meaningful change (state transition, new response,
@@ -3842,7 +4057,7 @@ func (m *Magmux) pollControllers(force bool) []any {
 			// not from what the pilot claims it asked for — the panel has
 			// to be able to show the two disagreeing.
 			m.control.recordObserved(p.id, snap.State.String(), snap.LastResponse, snap.LastTool)
-			events = append(events, map[string]any{
+			ev := map[string]any{
 				"type":        "snapshot",
 				"pane":        p.id,
 				"controller":  p.controller.Name(),
@@ -3854,7 +4069,18 @@ func (m *Magmux) pollControllers(force bool) []any {
 				"tool":        snap.LastTool,
 				"startedAt":   timeStringOrEmpty(snap.StartedAt),
 				"completedAt": timeStringOrEmpty(snap.CompletedAt),
-			})
+			}
+			// The one emit site of the three that lacked it. `results` and the
+			// `list` verb (which is buildPaneResults verbatim) already carry the
+			// label, so a client that addresses panes by name could resolve one
+			// at connect time and then not recognise the live events about it.
+			//
+			// Added conditionally, matching buildPaneResultsLocked's shape: an
+			// unlabelled pane emits no `label` key at all, exactly as today.
+			if label != "" {
+				ev["label"] = label
+			}
+			events = append(events, ev)
 		}
 	}
 	return events
@@ -3954,13 +4180,21 @@ func applyControllerSnapshot(p *Pane, s Snapshot) {
 }
 
 func (m *Magmux) handleSIGWINCH() {
+	// A process whose stdin is a pipe is never sent SIGWINCH, and term.GetSize
+	// would fail if it were. Under a FORCED --headless on a real tty the signal
+	// CAN arrive, and is still ignored on purpose: headless geometry is
+	// synthetic and stable, and reflowing panes under a controller mid-run
+	// because a human dragged a window is a surprise nobody asked for.
+	if m.headless {
+		return
+	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGWINCH)
 	go func() {
 		for {
 			select {
 			case <-sigCh:
-				w, h, err := term.GetSize(int(os.Stdin.Fd()))
+				w, h, err := term.GetSize(int(m.stdinFile().Fd()))
 				if err != nil {
 					continue
 				}
@@ -3981,6 +4215,138 @@ func (m *Magmux) handleSIGWINCH() {
 			}
 		}
 	}()
+}
+
+// handleSignals turns the first lifecycle signal into magmux's ORDINARY quit,
+// and a second one into an immediate exit.
+//
+// The handler must not unlink anything. The socket is removed inside
+// socketServer's <-m.quit goroutine, which first broadcasts `results`, then
+// `shutdown`, then closes every subscriber to give it a clean EOF *after* that
+// event. Trapping the signal and calling os.Remove(m.sockPath) is the one-line
+// version of this feature and it silently deletes `results` — the one event
+// every integrator relies on.
+//
+// SIGINT is registered for `kill -INT`, not for Ctrl-C: magmux runs the tty in
+// raw mode, which clears ISIG, so ^C arrives as byte 0x03 and inputLoop routes
+// it.
+//
+// PLACEMENT: after markLayoutReady(), and nowhere earlier. The layout builders
+// write m.root, m.allPanes and m.focused WITHOUT holding treeMu — legally,
+// because startup is single-threaded up to that point. Closing m.quit inside
+// that window is what makes it multi-threaded: socketServer's teardown
+// goroutine wakes, calls buildPaneResults, takes treeMu.RLock and walks
+// m.allPanes while buildGrid is still writing it. -race would flag that, and it
+// is semantically wrong besides — main() would then go on to fork children for
+// a session already torn down and already reported. Not before init() either:
+// m.quit is created there, and close(nil) panics.
+//
+// The trade, said out loud: a SIGTERM arriving in that startup window — process
+// start through child spawn and controller attach, tens of milliseconds — keeps
+// today's default disposition, so the process dies and leaks its socket. It is
+// bounded by the socket being pid-named, which means the synchronous reaper in
+// socketServer removes it on the very next magmux start. Trading a rare
+// self-healing leaked file for a startup data race is the right direction.
+func (m *Magmux) handleSignals() {
+	// Buffered so a second signal is not dropped while phase 1 is still
+	// running: signal.Notify never blocks on a full channel, it DISCARDS.
+	ch := make(chan os.Signal, 4)
+	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	go m.signalLoop(ch, os.Exit)
+}
+
+// signalLoop is TWO PHASES, and is deliberately not a loop.
+//
+// The obvious `for { select { case <-m.quit: return; case <-ch: … } }` is
+// broken three ways, all of which this shape avoids:
+//
+//  1. once the first signal has closed m.quit, <-m.quit is PERMANENTLY ready,
+//     so the next iteration returns and the hard-exit branch is unreachable;
+//  2. with a second signal already buffered, select chooses at RANDOM — so it
+//     is nondeterministic, not merely wrong;
+//  3. once the goroutine returns, signal.Notify is still registered with no
+//     receiver, which SWALLOWS every later ^C rather than letting it take its
+//     default disposition. A user hammering Ctrl-C at a wedged teardown would
+//     be left with only SIGKILL — worse than not trapping signals at all.
+//
+// Phase 2 therefore waits on the SIGNAL CHANNEL ALONE, and must not also watch
+// m.quit: by then m.quit is closed and would win every select. In the normal
+// case phase 2 blocks forever and the process exits through main() returning.
+// That is intentional — after the first signal this goroutine's only remaining
+// job is to be a live receiver.
+//
+// exit is injected so a test can assert the hard-exit path without terminating
+// the test binary. main() supplies os.Exit at the single call site above, which
+// keeps the POLICY there. This is the one os.Exit outside main(), and it has to
+// be: there is no return path from a goroutine, and the premise of a second
+// signal is that the graceful path is stuck. Routing it through a channel
+// main() selects on fails for the same reason — main() may be blocked inside
+// inputLoop, waitSocketShutdown or cleanup, and the second signal exists
+// precisely because one of those is.
+func (m *Magmux) signalLoop(ch <-chan os.Signal, exit func(int)) {
+	// ── phase 1 ──
+	// hurry carries a signal that turned out to belong to phase 2 after all;
+	// see the both-ready case below.
+	var hurry os.Signal
+	select {
+	case <-m.quit:
+		// Quit came from somewhere else (-w, -x, the Ctrl-G q chord). Fall
+		// through rather than returning: a signal arriving DURING teardown
+		// must still be able to cut it short.
+	case s := <-ch:
+		first := false
+		m.quitOnce.Do(func() { close(m.quit); first = true })
+		if !first {
+			// m.quit was ALREADY closed, and select simply happened to pick
+			// this case over the equally-ready <-m.quit above — select chooses
+			// among READY cases at random. So this signal is a "hurry up"
+			// arriving during teardown, not a "quit", and swallowing it here
+			// would make the coin toss decide whether the user's signal did
+			// anything at all. Carry it into phase 2 instead.
+			//
+			// Without this, the two-phase design reproduces the exact fault it
+			// was written to avoid in the rejected for/select version:
+			// nondeterminism, not merely wrongness.
+			hurry = s
+		}
+	}
+
+	// ── phase 2 ──
+	// Any LATER signal is a human saying the graceful path is taking too long.
+	// waitSocketShutdown allows 3s and closeSockClients 2s — both CEILINGS that
+	// return as soon as teardown completes, but a person who has pressed ^C
+	// twice must not be made to discover that.
+	sig := hurry
+	if sig == nil {
+		sig = <-ch
+	}
+	// DEREGISTER FIRST, and before restore() specifically.
+	//
+	// From here on nothing reads ch again, and everything below can block:
+	// restore() writes escape sequences to os.Stdout, and a tty that has wedged
+	// blocks that write for as long as it likes. With signal.Notify still
+	// registered and no receiver, a further ^C is buffered into ch and then —
+	// once the buffer of 4 fills — silently DISCARDED, because signal.Notify
+	// never blocks. The user is left with only SIGKILL. That is failure mode 3
+	// from the header comment, the one the two-phase shape exists to avoid,
+	// reappearing in the escalation path where it matters most.
+	//
+	// signal.Reset, not signal.Stop, for two reasons. Reset restores the
+	// DEFAULT disposition for the named signals outright, which is the property
+	// wanted here — the next ^C must kill the process, not merely miss a
+	// channel. Stop is also unusable at this call site: it takes a send-side
+	// `chan<- os.Signal` and ch is receive-only, and it would restore the
+	// default only incidentally, by leaving zero registrations behind.
+	signal.Reset(syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	// restore() next, and unconditionally: os.Exit runs no defers, so the
+	// `defer mux.restore()` in main() will not fire, and a terminal left in raw
+	// mode with the alternate screen up is unusable.
+	m.restore()
+	n := 15 // SIGTERM's number, if the value is somehow not a syscall.Signal
+	if s, ok := sig.(syscall.Signal); ok {
+		n = int(s)
+	}
+	exit(128 + n)
 }
 
 // focusNext moves focus to the next live pane, wrapping. Tombstoned panes are
@@ -4174,10 +4540,7 @@ func (m *Magmux) inputLoop() {
 	// outlives the loop below (it can still be parked in Read when m.quit
 	// closes), so reading a variable somebody else might reassign is a race
 	// with no upside.
-	in := m.stdin
-	if in == nil {
-		in = os.Stdin
-	}
+	in := m.stdinFile()
 	stdinCh := make(chan []byte, 8)
 	go func() {
 		buf := make([]byte, 4096)
@@ -4769,30 +5132,58 @@ type sockMsg struct {
 // separator and no "..": the socket is created with this process's own
 // privileges, and `--id ../../home/me/.ssh/agent` must not be able to reach
 // out of /tmp and unlink something. The length cap keeps the result inside the
-// ~104-byte sun_path limit on darwin.
+// ~104-byte sun_path limit on darwin — sized against /tmp, which is why
+// --sock-dir re-checks the length against the real final path (validSockDir).
+//
+// A purely NUMERIC name is rejected, and that is a deliberate, documented
+// restriction on the flag's alphabet rather than an oversight. The startup
+// reaper (sockdir.go) identifies "ours to delete" BY the name being a pid, and
+// its only liveness oracle is treating that number as one. A live
+// `magmux --id 1234` would therefore be reapable by any other magmux the
+// moment pid 1234 is dead — almost always. Disambiguating instead by reading
+// the pid's argv needs /proc (absent on darwin) or sysctl, is racy, and buys
+// back an alphabet nothing in this repo uses.
 func validSocketID(s string) bool {
 	if s == "" || len(s) > 64 {
 		return false
 	}
+	allDigits := true
 	for _, r := range s {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_', r == '-':
+			allDigits = false
 		default:
 			return false
 		}
 	}
-	return true
+	return !allDigits
+}
+
+// socketDir is where this magmux binds. The field wins over the package
+// default so a test can point one Magmux at a t.TempDir() without swapping a
+// package var out from under anything else.
+func (m *Magmux) socketDir() string {
+	if m.sockDir != "" {
+		return m.sockDir
+	}
+	return sockDir
 }
 
 // socketPath is where the IPC socket is bound. The pid-based default is
 // documented as stable and stays byte-identical; --id only substitutes the
 // name, which is what lets a caller know the path *before* magmux starts and
 // poll for it rather than having to discover a pid.
+//
+// filepath.Join, not concatenation, so a --sock-dir with a trailing slash is
+// cleaned. Join("/tmp", "magmux-1234.sock") is exactly "/tmp/magmux-1234.sock",
+// which is the byte-for-byte default TestSocketPathDefaultIsUnchanged pins.
 func (m *Magmux) socketPath() string {
+	id := strconv.Itoa(os.Getpid())
 	if m.sockID != "" {
-		return "/tmp/magmux-" + m.sockID + ".sock"
+		id = m.sockID
 	}
-	return fmt.Sprintf("/tmp/magmux-%d.sock", os.Getpid())
+	return filepath.Join(m.socketDir(), "magmux-"+id+".sock")
 }
 
 func (m *Magmux) socketServer() {
@@ -4802,11 +5193,45 @@ func (m *Magmux) socketServer() {
 	// Set env so children inherit it
 	os.Setenv("MAGMUX_SOCK", sockPath)
 
+	// Remove the sockets of magmuxes that died without cleaning up after
+	// themselves — SIGKILL, a panic, an OOM kill, power loss, and magmux's own
+	// second-signal hard exit. All of those skip the teardown below, so nothing
+	// else in the system ever removes those files; this sweep is the only
+	// recovery there is.
+	//
+	// SYNCHRONOUS, on this goroutine, and BEFORE the bind. Not a goroutine: an
+	// untracked one can be outlived by a short run
+	// (`for i in $(seq 1 100); do magmux -w -e true; done`) and then the sweep
+	// simply never happens, silently, on exactly the workload that creates the
+	// most sockets. It is cheap enough to be synchronous — ~10ms against a
+	// 1500-entry directory, against a 50ms deadline — and main()'s 10ms sleep
+	// before forking children is explicitly "a delay, not a synchronisation
+	// primitive": MAGMUX_SOCK is published synchronously above, and clients
+	// retry.
+	//
+	// Before rather than after net.Listen so the sweep cannot observe our own
+	// socket at all; that makes reapStaleSockets' path != self rule
+	// belt-and-braces rather than load-bearing, because a reaper whose safety
+	// depends on correctly recognising itself is one refactor away from
+	// deleting its own socket.
+	reapStart := time.Now()
+	if n := reapStaleSockets(filepath.Dir(sockPath), sockPath, reapDeadline); n > 0 && dbgFile != nil {
+		// The elapsed time is worth logging: it is the only way to tell a sweep
+		// that finished from one the deadline cut short, and a short one leaves
+		// work for the next start.
+		fmt.Fprintf(dbgFile, "reaped %d stale socket(s) in %v\n", n, time.Since(reapStart))
+	}
+
 	// Clean up stale socket
 	os.Remove(sockPath)
 
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
+		// On stderr, not just dbgFile: until now a magmux that could not bind
+		// ran with NO socket and said nothing at all, so a caller polling the
+		// path it was promised simply hung. Unconditional — stderr is not the
+		// frame, and integrators read it.
+		fmt.Fprintf(os.Stderr, "magmux: socket %s: %v\n", sockPath, err)
 		if dbgFile != nil {
 			fmt.Fprintf(dbgFile, "socket listen error: %v\n", err)
 		}
@@ -5487,6 +5912,9 @@ func (m *Magmux) reapChild(p *Pane) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.dead = true
+	if p.deadAt.IsZero() {
+		p.deadAt = time.Now()
+	}
 	// The pid has now been collected and is free for the OS to reuse, so no
 	// delayed force-kill may target its process group from here on.
 	p.reaped = true
@@ -5627,6 +6055,30 @@ func (m *Magmux) buildPaneResultsLocked() []map[string]any {
 		snap := p.controllerSnap
 		var state string
 		switch {
+		case p.dead && !p.reaped && p.cmd != nil:
+			// The PTY closed but cmd.Wait has not recorded the status, so
+			// p.exitCode is still its zero value and "completed" is a claim we
+			// cannot back. Report the state it had an instant ago rather than
+			// invent a success — a failed run reported as passing is the worst
+			// failure shape available, and headless makes `results` the only
+			// report anybody reads.
+			//
+			// REACHABLE IN THE FINAL RESULTS, and an earlier version of this
+			// comment claimed otherwise. `-w` does not wait for `reaped`: it
+			// waits up to reapGrace and then gives up (paneDoneLocked), so a
+			// child that closes its PTY and keeps running — `sh -c 'exec
+			// 0<&- 1>&- 2>&-; sleep 300'`, or merely a cmd.Wait lagging EOF by
+			// more than reapGrace on a loaded machine — lands here in the very
+			// last report the run produces. Do not delete this branch as dead
+			// code; it is the only thing standing between that pane and a
+			// fabricated "completed".
+			//
+			// `exitCode` still rides along as 0 because the key is part of the
+			// schema and removing it for one state would be a breaking change
+			// (CLAUDE.md: "exitCode and dead keep their keys"). A consumer must
+			// read `state` first — which is exactly why `state` is the honest
+			// one here.
+			state = "running"
 		case p.dead && p.exitCode == 0:
 			state = "completed"
 		case p.dead && p.exitCode != 0:
@@ -5728,13 +6180,60 @@ func (m *Magmux) allPanesDoneLocked() bool {
 		}
 		sessions++
 		p.mu.Lock()
-		busy := !p.dead && !p.inputReady
+		done := paneDoneLocked(p)
 		p.mu.Unlock()
-		if busy {
+		if !done {
 			return false
 		}
 	}
 	return sessions > 0
+}
+
+// reapGrace bounds how long -w waits, after a pane's PTY has closed, for
+// cmd.Wait to record the real exit status. Beyond it the pane is called done
+// anyway: a child that is stopped (SIGSTOP), or whose PTY was inherited by a
+// grandchild that outlives it, must not be able to make -w hang forever.
+//
+// Two seconds is far longer than the microseconds the two events are normally
+// apart — reapChild is parked in wait4 and returns when the process exits,
+// while readLoop returns on PTY EOF — and far shorter than any human's patience.
+const reapGrace = 2 * time.Second
+
+// paneDoneLocked is the ONE definition of "this session pane has finished".
+//
+// Extracted from allPanesDoneLocked so its three consumers — the q/Esc dismiss
+// of a finished grid, the completion timestamp behind the status bar's "done"
+// count, and -w's auto-exit — cannot drift apart. One definition of done is the
+// point; the fix is not special-cased to -w.
+//
+// Caller holds p.mu.
+func paneDoneLocked(p *Pane) bool {
+	// An idle agent pane never exits; it finished its TURN. The reaped
+	// requirement below applies only to the DEAD branch, or -w would never fire
+	// for a Claude Code pane at all.
+	if p.inputReady {
+		return true
+	}
+	if !p.dead {
+		return false
+	}
+	// DEAD needs proof. reapChild writes dead, reaped and exitCode under ONE
+	// p.mu acquisition, so reaped == true IMPLIES exitCode is final. readLoop
+	// sets dead ALONE on PTY EOF, and that is the state that used to be
+	// published as {"state":"completed","exitCode":0} for a child that exited 7.
+	if p.reaped {
+		return true
+	}
+	// A pane with no child has no status to wait for and will never be reaped
+	// (reapChild returns early on a nil cmd). It cannot be allowed to hold -w
+	// open for the grace period, let alone forever.
+	if p.cmd == nil {
+		return true
+	}
+	// Bounded, so a cmd.Wait that never returns cannot wedge -w. deadAt's zero
+	// value is what keeps every existing Pane{dead:true} literal behaving as it
+	// does today: time.Since(zero time) is centuries, so this fires at once.
+	return time.Since(p.deadAt) > reapGrace
 }
 
 // ── Dynamic panes ────────────────────────────────────────────────────────────
@@ -6479,9 +6978,34 @@ func (m *Magmux) render() {
 	}
 }
 
+// stdinFile is where keystrokes and the OSC 11 reply come from. Nil m.stdin
+// means os.Stdin, which is every real run; a test points it at a pipe. One
+// helper rather than the same three lines in init() and inputLoop, so m.stdin is
+// a real seam and not one only inputLoop honours.
+func (m *Magmux) stdinFile() *os.File {
+	if m.stdin != nil {
+		return m.stdin
+	}
+	return os.Stdin
+}
+
 // writeTerm puts a painted frame on the terminal. Caller must NOT hold treeMu:
 // this is a write to a tty, and a tty with a full buffer blocks.
 func (m *Magmux) writeTerm(s string) {
+	// Headless: the frame was BUILT and is thrown away here. Deliberate —
+	// renderLocked is also where -w decides to quit and where the panel is
+	// repainted, so skipping the build would cost auto-exit. The cost is the
+	// paint itself, which the dirty-flag model already reduces to nothing on an
+	// idle frame.
+	//
+	// This is THE suppression point for the whole mode: guarding the callee
+	// rather than render()'s `if out != ""` means a future caller cannot bypass
+	// it. Unconditional, including when m.out is set: "headless" means "emits no
+	// frame", one rule. A test that wants the bytes calls renderLocked, which
+	// returns them.
+	if m.headless {
+		return
+	}
 	if m.out != nil {
 		_, _ = io.WriteString(m.out, s)
 		return
@@ -7189,17 +7713,39 @@ func main() {
 			fmt.Printf("Version: %s (%s)\n\n", Version, Commit)
 			fmt.Println("Usage: magmux [options]")
 			fmt.Println("       magmux -e 'command1' -e 'command2'")
+			fmt.Println("       magmux -e 'bun test' --label tests -e 'bun dev' --label server")
 			fmt.Println("       magmux -g gridfile.txt")
 			fmt.Println()
 			fmt.Println("Options:")
 			fmt.Println("  -g FILE   Grid file (one command per line, overrides -e)")
 			fmt.Println("  -e CMD    Run CMD in a pane (can be repeated)")
+			fmt.Println("            Every pane needs at least 3 rows and 20 columns; magmux refuses")
+			fmt.Println("            a layout that cannot give every pane that much (about 12 panes")
+			fmt.Println("            on an 80x24 terminal). -c costs one of them.")
+			fmt.Println("  --label NAME  Name the pane the PRECEDING -e created. Echoed back in")
+			fmt.Println("            `list`, `results` and live `snapshot` events, so a client can")
+			fmt.Println("            address panes by name instead of by index. Ignored with a")
+			fmt.Println("            message if no -e precedes it, and dropped by -g.")
 			fmt.Println("  -w        Auto-exit when all panes are done (dead or idle)")
+			fmt.Println("            Needs at least one -e/-g pane. `magmux -w` with no command runs")
+			fmt.Println("            the default shell layout and never auto-exits, and so does")
+			fmt.Println("            `magmux -w -c` with no -e (the panel is not a session); end")
+			fmt.Println("            either with kill -TERM.")
+			fmt.Println("  --headless    Run with no terminal: no raw mode, no alternate screen, and")
+			fmt.Println("            not one byte on stdout. The socket is the whole interface — read")
+			fmt.Println("            `results` for the outcome. Turned on automatically when stdin is")
+			fmt.Println("            not a terminal, so `magmux -w -e CMD < /dev/null` just works.")
+			fmt.Println("            Geometry comes from COLUMNS/LINES, else 80x24.")
 			fmt.Println("  -c        Start with the control panel visible (it always exists;")
 			fmt.Println("            without -c it starts hidden — Ctrl-G p reveals it)")
 			fmt.Println("  --no-status   Start with the status bar hidden (Ctrl-G s toggles)")
 			fmt.Println("  -x SECS   Close SECS after a pilot finishes (default: wait for a keypress)")
-			fmt.Println("  --id NAME Bind /tmp/magmux-NAME.sock instead of the pid socket ([A-Za-z0-9_-])")
+			fmt.Println("  --id NAME Bind magmux-NAME.sock instead of the pid socket ([A-Za-z0-9_-],")
+			fmt.Println("            max 64, not all digits — an all-digit name is ambiguous with")
+			fmt.Println("            a pid socket and the startup reaper could remove it)")
+			fmt.Println("  --sock-dir DIR  Bind the IPC socket in DIR instead of /tmp. Ignored with")
+			fmt.Println("            a message if DIR is missing, is not a directory, or would make")
+			fmt.Println("            the socket path too long for the OS.")
 			fmt.Println("  --theme MODE  light | dark | auto (default: auto, via OSC 11)")
 			fmt.Println("  -v        Show version")
 			fmt.Println("  -h        Show this help")
@@ -7228,7 +7774,14 @@ func main() {
 			fmt.Println("IPC Socket:")
 			fmt.Println("  /tmp/magmux-{pid}.sock — JSON line protocol")
 			fmt.Println("  /tmp/magmux-{name}.sock with --id NAME (known before magmux starts)")
+			fmt.Println("  --sock-dir DIR / MAGMUX_SOCK_DIR move the directory; /tmp is the default")
 			fmt.Println("  Env var MAGMUX_SOCK exported to child processes")
+			fmt.Println()
+			fmt.Println("  On startup magmux removes sockets in that directory whose owning")
+			fmt.Println("  process is gone — the only recovery from a SIGKILL, a crash or a")
+			fmt.Println("  power loss, none of which run the normal teardown. It only ever")
+			fmt.Println("  removes a pid-named socket whose pid it can prove is dead, so a")
+			fmt.Println("  --id socket and a running session are both left alone.")
 			fmt.Println()
 			fmt.Println("Agent Status Monitoring:")
 			fmt.Println("  Send agent hook events via IPC socket:")
@@ -7251,6 +7804,10 @@ func main() {
 			fmt.Println("  {\"type\":\"close_pane\",\"id\":2,\"pane\":1,\"force\":false}")
 			fmt.Println("  {\"type\":\"focus\",\"id\":3,\"pane\":0}")
 			fmt.Println()
+			fmt.Println("  Panes created from -e get ids 0..N-1 in ARGUMENT ORDER; magmux's own")
+			fmt.Println("  panes (the control panel) are appended after them, whether or not -c")
+			fmt.Println("  was passed. So the first pane an agent opens is not necessarily 1.")
+			fmt.Println()
 			fmt.Println("  Pane indices are permanent: closing a pane leaves a tombstone rather")
 			fmt.Println("  than renumbering, so ids go sparse and never move under a caller.")
 			fmt.Println()
@@ -7272,6 +7829,10 @@ func main() {
 			fmt.Println("  MAGMUX_SCROLLBACK  Lines of history kept per pane (default: 1000, 0 off).")
 			fmt.Println("                  Only the primary screen records; the ring fills lazily,")
 			fmt.Println("                  so a pane that never scrolls costs nothing.")
+			fmt.Println("  MAGMUX_SOCK_DIR Directory for the IPC socket (default: /tmp). --sock-dir")
+			fmt.Println("                  wins over it. Set this in an MCP client's own env block")
+			fmt.Println("                  as well: --sock-dir cannot reach a `magmux mcp` that the")
+			fmt.Println("                  client started in its own process tree.")
 			fmt.Println("  MAGMUX_SEL_FG   Selection foreground (256-color index, default: 0)")
 			fmt.Println("  MAGMUX_SEL_BG   Selection background (256-color index, default: 220)")
 			fmt.Println("  MAGMUX_DEBUG    Enable debug logging to /tmp/magmux-debug.log")
@@ -7288,8 +7849,10 @@ func main() {
 	autoExit := false
 	withControl := false
 	noStatus := false
+	headless := false
 	var autoClose time.Duration
 	var sockID string
+	var sockDirArg string
 	var themePref string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -7306,6 +7869,28 @@ func main() {
 					Args: []string{"-l", "-c", args[i]},
 				})
 			}
+		case "--label":
+			if i+1 < len(args) {
+				i++
+				// Binds to the PRECEDING -e by mutating the last element of the
+				// list -e appends to, so "preceding" needs no extra state.
+				//
+				// Deliberate behaviours: two --label after one -e, last wins
+				// silently (as a repeated --id does); a value that looks like a
+				// flag is consumed as the label, identically to -g/-e/-x/--id/
+				// --theme; and --label before any -e is warned and DROPPED, not
+				// deferred — a flag that attaches forwards and backwards has no
+				// readable rule.
+				if len(customCmds) == 0 {
+					// Warned, not fatal: the file's convention for --id and
+					// --theme. A dropped label costs the caller a name and
+					// nothing else, but silence would leave them wondering why
+					// `list` never shows it.
+					fmt.Fprintf(os.Stderr, "magmux: ignoring --label %q (no preceding -e)\n", args[i])
+					break
+				}
+				customCmds[len(customCmds)-1].Label = args[i]
+			}
 		case "-w":
 			autoExit = true
 		case "-c", "--control":
@@ -7316,6 +7901,12 @@ func main() {
 			withControl = true
 		case "--no-status":
 			noStatus = true
+		case "--headless":
+			// Only ever sets it. The flag FORCES the mode; init() can still
+			// turn it on by itself when stdin is not a terminal, and that
+			// auto-degrade lives there rather than here so a test can reach the
+			// mode without spawning a process.
+			headless = true
 		case "-x", "--close-after":
 			if i+1 < len(args) {
 				i++
@@ -7347,9 +7938,49 @@ func main() {
 					// a bad name costs the caller its chosen path and nothing
 					// else. Said out loud, because an agent polling
 					// /tmp/magmux-<name>.sock would otherwise just hang.
-					fmt.Fprintf(os.Stderr, "magmux: ignoring --id %q (allowed: A-Z a-z 0-9 _ -, max 64)\n", args[i])
+					fmt.Fprintf(os.Stderr, "magmux: ignoring --id %q (allowed: A-Z a-z 0-9 _ -, max 64, not all digits)\n", args[i])
 				}
 			}
+		case "--sock-dir":
+			if i+1 < len(args) {
+				i++
+				// Only recorded here. It is RESOLVED after the loop, once
+				// sockID is settled — see below.
+				sockDirArg = args[i]
+			}
+		}
+	}
+
+	// --sock-dir, resolved after the loop and not inside it, because the
+	// sun_path length check has to be made against the path that will REALLY be
+	// bound. Probing with an empty id would happily pass a directory that fits
+	// a 5-digit pid and is 40 bytes too long for a 64-character --id, and
+	// net.Listen reports that as the unhelpful "invalid argument".
+	//
+	// Never fatal: a bad --sock-dir costs the caller its chosen path and
+	// nothing else, exactly as a bad --id does. Said out loud on stderr,
+	// because an agent polling the directory it asked for would otherwise just
+	// hang.
+	var muxSockDir string
+	if sockDirArg != "" {
+		id := sockID
+		if id == "" {
+			id = strconv.Itoa(os.Getpid())
+		}
+		if dir, ok, why := validSockDir(sockDirArg, id); ok {
+			// Three carriers, because there are three audiences. The package
+			// var reaches the four MCP call sites in this process that have no
+			// *Magmux to ask; the field is what this magmux binds; the env var
+			// reaches CHILDREN, including a `magmux mcp` started from inside a
+			// pane. It cannot reach an MCP server the client started in its own
+			// process tree — nothing magmux does at runtime can — which is why
+			// MAGMUX_SOCK_DIR exists as an env var at all and not as a
+			// flag-only feature.
+			sockDir = dir
+			muxSockDir = dir
+			os.Setenv("MAGMUX_SOCK_DIR", dir)
+		} else {
+			fmt.Fprintf(os.Stderr, "magmux: ignoring --sock-dir %q (%s); using %s\n", sockDirArg, why, sockDir)
 		}
 	}
 
@@ -7358,7 +7989,15 @@ func main() {
 	var commands []PaneConfig
 
 	if gridFile != "" {
-		// -g overrides -e
+		// -g overrides -e, and so it also discards anything --label attached to
+		// an -e. Said out loud once, because a label that silently vanishes is
+		// indistinguishable from a label magmux does not support.
+		for _, c := range customCmds {
+			if c.Label != "" {
+				fmt.Fprintf(os.Stderr, "magmux: -g overrides -e, so --label names are ignored\n")
+				break
+			}
+		}
 		absPath, err := filepath.Abs(gridFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
@@ -7408,8 +8047,10 @@ func main() {
 		gridMode:       useGrid,
 		autoExit:       autoExit,
 		hideStatus:     noStatus,
+		headless:       headless,
 		autoCloseAfter: autoClose,
 		sockID:         sockID,
+		sockDir:        muxSockDir,
 		themePref:      themePref,
 		sockDone:       make(chan struct{}),
 		layoutReady:    make(chan struct{}),
@@ -7517,10 +8158,29 @@ func main() {
 		go mux.waitForChild(p)
 	}
 
+	// Registered HERE, after markLayoutReady, and not one line earlier — see
+	// handleSignals for the startup data race that placement exists to avoid.
+	// Grouped with handleSIGWINCH so the two signal.Notify registrations sit
+	// together.
+	mux.handleSignals()
 	mux.handleSIGWINCH()
 
 	go mux.renderLoop()
-	mux.inputLoop()
+	if mux.headless {
+		// inputLoop cannot be the thing that blocks here. Its stdin goroutine
+		// closes stdinCh on the first Read error, and stdin of /dev/null is EOF
+		// on the first read — so inputLoop would return in microseconds, main
+		// would fall through to waitSocketShutdown, and a -w run would exit
+		// before a single pane had produced output. There is also nothing to
+		// route: no keystrokes, no mouse, no chords.
+		//
+		// m.quit is closed by exactly two things that can reach a headless run:
+		// render()'s quitOnce for -w / -x, and the signal loop. See --help for
+		// the two shapes where -w never fires.
+		<-mux.quit
+	} else {
+		mux.inputLoop()
+	}
 
 	// The socket server broadcasts the final `results` event and then closes
 	// each subscriber, giving it a clean EOF *after* that event. That happens
