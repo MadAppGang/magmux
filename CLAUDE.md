@@ -282,7 +282,19 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   panel. The refusal is said in the status bar (`chromeNote`), because a
   keystroke that appears to do nothing is indistinguishable from a broken one.
 
-- **Chrome flags are stated as NEGATIVES (`hideStatus`, `hidden`,
+- **`--no-idle-done` withdraws a CLAIM, it does not change an OBSERVATION.**
+  `inputReady` is still set, and `snapshot` / `results` / the controller state a
+  pilot waits on are byte-identical with the flag on. What it suppresses is
+  magmux asserting the session finished: the ✓ DONE overlay and green tint (both
+  copies — `renderLocked`'s sweep and `applyControllerSnapshot`'s), the grid
+  counter's `done` column, and `-w`, which then waits for the process to exit.
+  Touching `inputReady` itself would break the rule that the live snapshot and
+  the shutdown `results` can never disagree, for the sake of a display flag.
+  Input is deliberately NOT on the list: a keystroke reaches an idle pane with
+  or without the flag, which is why the flag is a comfort and not the fix for
+  issue #333.
+
+- **Chrome flags are stated as NEGATIVES (`hideStatus`, `noIdleDone`, `hidden`,
   `panelFirst`).** Every unit test builds a `Magmux` as a struct literal, so
   the zero value has to be the behaviour that predates the flag — a status row
   reserved by `buildGrid`, a panel on the right. `statusRowsLocked` is the one
@@ -305,15 +317,32 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
 
 ### Controlled-session invariants
 
-- **`send` must bypass `writePTY`, and that is the whole point.** In grid mode
-  `writePTY` suppresses input to a pane that is `dead || inputReady`, so a
-  finished grid can be dismissed with `q`. But `inputReady` is exactly the
-  state a pilot wants to act on — the session finished its turn and is waiting
-  for the next instruction. Pilot sends therefore take `injectPTY`, which
-  skips that guard while still clearing the completion state (tint, overlay,
-  `inputReady`, `hadTextOutput`) the way a real keystroke would. Route a pilot
-  send through `writePTY` and every instruction after the first is silently
-  dropped.
+- **"Done" answers two different questions, and `dead` is the answer to only
+  one of them.** For `-w` and auto-exit, done means "nothing left to wait for",
+  so `allPanesDone` counts `dead || inputReady`. For anything that decides
+  whether a KEY reaches a child, done means "there is nothing to type into",
+  which is `allPanesDead` — a pane that is merely idle is a live agent between
+  turns, blocked on a read. Three sites take the second predicate:
+  `writePTY`'s grid guard, `inputLoop`'s bare-key quit branch, and
+  `keyHintLocked`. All three used the first, and together they made an attached
+  session read-only the moment its agent went quiet (issue #333): the input
+  loop swallowed every plain key because ONE idle pane satisfied
+  `allPanesDone`, `writePTY` would have dropped it anyway, and the chord hints
+  blanked so the bar denied the keyboard existed. A program could steer the
+  pane over the socket the whole time. Keep the two predicates apart, and keep
+  the bar's advertised quit key on the same predicate as the input loop —
+  telling a person to press `q` at a live agent puts a stray `q` in its prompt.
+
+- **`send` and a keystroke are the same act, so they share
+  `clearCompletionLocked`.** `injectPTY` and `writePTY` refuse the same thing
+  (a pane with no live child) and clear the same completion state — `tint`,
+  overlay, `inputReady`, `inputSignal`, `hadTextOutput`, and both idle clocks
+  (`lastTextAt`, `titleIdleAt`). They drifted once: `writePTY` left the clocks
+  standing, so the text-idle sweep re-fired on output that was already on
+  screen and re-settled the pane a frame later. `hadTextOutput = false` is the
+  load-bearing half, because `renderLocked`'s 5s rule needs NEW output before
+  it can call the pane idle again. The one thing that must never take either
+  path is magmux answering a child's own query — see `replyLocked`.
 
 - **The panel's two directions come from different places, and must stay that
   way.** `▶ OUT` rows are recorded from the pilot's own `send`; `◀ IN` rows are

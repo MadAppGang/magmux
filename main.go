@@ -774,9 +774,9 @@ func colorQueryCode(osc string) (string, bool) {
 //
 // The reply goes out through replyLocked on the parser's own goroutine, exactly
 // as the DA and DSR replies below do, and under the same p.mu they hold. NOT
-// through writePTY: that is the human-input path, which refuses a settled pane
-// in grid mode and clears its completion state — see replyLocked for what each
-// of those cost.
+// through writePTY: that is the human-input path, which refuses a dead pane in
+// grid mode and clears the completion state of a settled one — see replyLocked
+// for what each of those cost.
 func (vt *VTParser) answerColorQuery(code string) {
 	c, ok := terminalColor(code)
 	if !ok {
@@ -1814,6 +1814,36 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh %dm", h, m)
 }
 
+// clearCompletionLocked un-sticks a pane magmux had marked done, because
+// something just pushed work into it.
+//
+// It is ONE function because it has two callers on two different paths — a
+// human keystroke (writePTY) and a controller's instruction (injectPTY) — and
+// they must agree on what "no longer done" means. They did not: writePTY left
+// inputSignal, lastTextAt and titleIdleAt standing, so a keystroke into an
+// idle Claude Code pane cleared the ✓ DONE chrome and then the text-idle sweep
+// re-fired on the output that was already there and put it straight back.
+//
+// hadTextOutput going false is the load-bearing half: renderLocked's 5s rule
+// needs new output before it can call the pane idle again. lastTextAt and
+// titleIdleAt restart the two idle clocks that feed it.
+//
+// Caller HOLDS p.mu.
+func (p *Pane) clearCompletionLocked() {
+	if !p.inputReady {
+		return
+	}
+	p.inputReady = false
+	p.inputSignal = ""
+	p.tint = ""
+	p.overlayText = ""
+	p.overlayStyle = ""
+	p.hadTextOutput = false // require new output before re-detecting idle
+	p.lastTextAt = time.Now()
+	p.titleIdleAt = time.Time{}
+	p.dirty = true // the completion chrome just went; repaint it away
+}
+
 // writePTY forwards HUMAN input to the pane's child.
 //
 // Every field it touches belongs to p.mu — the render goroutine reads
@@ -1833,25 +1863,29 @@ func (p *Pane) writePTY(data []byte) {
 		p.mu.Unlock()
 		return
 	}
-	// In grid mode, don't forward input to dead or completed panes: this is what
-	// lets `q` dismiss a finished grid. It is also why magmux's own replies to a
-	// child's queries must NOT come through here — see replyLocked.
-	if p.gridMode && (p.dead || p.inputReady) {
+	// In grid mode, don't forward input to a DEAD pane: this is what lets `q`
+	// dismiss a finished grid. Idle is deliberately NOT in this guard.
+	//
+	// It used to be, and that made a pane a person could not type into while a
+	// program could: `send` reaches an idle pane through injectPTY, which
+	// refuses only a dead one, so the socket could steer a finished turn and
+	// the keyboard could not. --help already promised the two behaved alike
+	// ("clears its done state like a real keystroke"). An idle pane is an
+	// interactive agent resting between turns, with a live process on the far
+	// end of the PTY; there is something there to type into, and the reset
+	// below is what stops the ✓ DONE chrome outliving the keystroke.
+	//
+	// This is also why magmux's own replies to a child's queries must NOT come
+	// through here — see replyLocked.
+	if p.gridMode && p.dead {
 		p.mu.Unlock()
 		return
 	}
 	// User input resets idle state — pane is no longer "done"
-	if p.inputReady {
-		p.inputReady = false
-		p.tint = ""
-		p.overlayText = ""
-		p.overlayStyle = ""
-		p.hadTextOutput = false // require new output before re-detecting idle
-		p.dirty = true          // the completion chrome just went; repaint it away
-		if dbgFile != nil {
-			fmt.Fprintf(dbgFile, "[input] user keystroke → inputReady reset\n")
-		}
+	if p.inputReady && dbgFile != nil {
+		fmt.Fprintf(dbgFile, "[input] user keystroke → inputReady reset\n")
 	}
+	p.clearCompletionLocked()
 	ptmx := p.ptmx
 	p.mu.Unlock()
 
@@ -1864,7 +1898,7 @@ func (p *Pane) writePTY(data []byte) {
 // two must not share a path. Routing replies through writePTY broke both halves
 // of that:
 //
-//  1. writePTY refuses a pane that is dead or awaiting input in grid mode. But
+//  1. writePTY refused a pane that was dead or awaiting input in grid mode. But
 //     awaiting-input is exactly where a long-lived TUI sits, and Claude Code
 //     re-queries OSC 11 on every SIGWINCH — which magmux sends to every pane
 //     each time `Ctrl-G p` reshapes the layout. The question went into a void
@@ -1873,6 +1907,12 @@ func (p *Pane) writePTY(data []byte) {
 //  2. writePTY clears inputReady, the tint, the overlay and hadTextOutput under
 //     "user input resets idle state". A reply is not input, so a settled pane
 //     silently read as working again and lost its ✓ DONE chrome.
+//
+// Issue #333 removed the idle half of reason 1: writePTY now refuses only a
+// dead pane, so a reply routed through it would reach a resting TUI. Reason 2
+// is untouched and is now load-bearing on its own — the merge that reason 1
+// used to also forbid would still corrupt every settled pane that answers a
+// SIGWINCH-triggered color query. Do not merge these paths.
 //
 // Caller HOLDS p.mu. Every caller is the VT parser, which runs inside
 // readLoop's p.mu, so this cannot take the lock and cannot hand it back — the
@@ -2766,13 +2806,26 @@ type Magmux struct {
 	//
 	// Written once before renderLoop starts and never again, so it needs no
 	// lock; treat it as immutable from the moment the render loop exists.
-	out           io.Writer
-	rawState      *term.State
-	quit          chan struct{}
-	quitOnce      sync.Once
-	wg            sync.WaitGroup
-	gridMode      bool       // -g flag was used
-	autoExit      bool       // -w flag: quit automatically when all panes done
+	out      io.Writer
+	rawState *term.State
+	quit     chan struct{}
+	quitOnce sync.Once
+	wg       sync.WaitGroup
+	gridMode bool // -g flag was used
+	autoExit bool // -w flag: quit automatically when all panes done
+	// noIdleDone is --no-idle-done: manual mode, for a human driving a
+	// long-lived agent rather than watching a batch finish.
+	//
+	// It changes what magmux DOES with idle, never whether idle is detected or
+	// reported. inputReady is still set, so `snapshot`, `results` and the
+	// controller state a pilot reads are untouched — the invariant that the
+	// live snapshot and the shutdown results must never disagree does not bend
+	// for a display flag. What it suppresses is magmux CLAIMING the session
+	// finished: no ✓ DONE overlay, no green tint, the counter keeps saying
+	// running, and -w waits for the process to exit instead of for a turn to
+	// end. Input is not in that list, and never should be again — a keystroke
+	// reaches an idle pane with or without this flag (issue #333).
+	noIdleDone    bool
 	sockPath      string     // /tmp/magmux-{pid}.sock, or {name} with --id
 	sockID        string     // --id NAME: bind a named socket instead of the pid one
 	sockClients   []net.Conn // currently-connected socket subscribers (for push events)
@@ -3832,7 +3885,7 @@ func (m *Magmux) pollControllers(force bool) []any {
 		p.mu.Lock()
 		prev := p.controllerSnap
 		p.controllerSnap = snap
-		applyControllerSnapshot(p, snap)
+		applyControllerSnapshot(p, snap, m.noIdleDone)
 		p.mu.Unlock()
 
 		// Broadcast on meaningful change (state transition, new response,
@@ -3886,14 +3939,26 @@ func timeStringOrEmpty(t time.Time) string {
 }
 
 // applyControllerSnapshot translates a Snapshot into pane visual state.
+//
+// noIdleDone suppresses the COMPLETION CHROME only. inputReady is still set,
+// because it is what `snapshot` and `results` report and what a pilot waits on;
+// the flag withdraws magmux's claim that the session finished, not its
+// observation that the turn did. The awaiting-permission tint is deliberately
+// not covered: a permission prompt is a thing the person must act on, not a
+// "done" badge.
+//
 // Caller must hold p.mu.
-func applyControllerSnapshot(p *Pane, s Snapshot) {
+func applyControllerSnapshot(p *Pane, s Snapshot, noIdleDone bool) {
 	switch s.State {
 	case CtrlAwaitingInput:
 		if !p.inputReady {
 			p.inputReady = true
 			p.inputSignal = "ctrl"
 			p.inputReadyAt = time.Now()
+			p.dirty = true // the badge below is optional; the repaint is not
+			if noIdleDone {
+				break
+			}
 			p.tint = "green"
 			p.overlayStyle = "success"
 			lines := []string{"\u2713 DONE"}
@@ -4303,8 +4368,11 @@ func (m *Magmux) inputLoop() {
 				}
 			}
 
-			// Grid mode: when all panes are done (dead or idle), q/Esc/Ctrl-C exits
-			if m.gridMode && m.allPanesDone() {
+			// Grid mode: when every pane's process has EXITED, q/Esc/Ctrl-C
+			// exits. Deliberately allPanesDead, not allPanesDone: an idle pane
+			// still has a child blocked on a read, and stealing its keystrokes
+			// to offer a quit shortcut makes a live session read-only.
+			if m.gridMode && m.allPanesDead() {
 				if b == 0x03 || b == 'q' || b == 0x1b { // Ctrl-C, q, or Esc
 					m.quitOnce.Do(func() { close(m.quit) })
 					return
@@ -5728,9 +5796,55 @@ func (m *Magmux) allPanesDoneLocked() bool {
 		}
 		sessions++
 		p.mu.Lock()
-		busy := !p.dead && !p.inputReady
+		// Under --no-idle-done only an exited process counts, so -w waits for
+		// the session to END rather than for its current turn to.
+		busy := !p.dead && !(p.inputReady && !m.noIdleDone)
 		p.mu.Unlock()
 		if busy {
+			return false
+		}
+	}
+	return sessions > 0
+}
+
+// allPanesDead is allPanesDone's stricter twin: every session pane's PROCESS is
+// gone, not merely resting.
+//
+// The two exist because "done" answers two questions that have different right
+// answers. For -w and auto-exit, done means "there is nothing left to wait
+// for", and an agent idling between turns qualifies. For the input loop, the
+// question is "is there still something to type into", and an idle agent
+// emphatically is: the process is alive and blocked on a read.
+//
+// inputLoop used to ask allPanesDone, so a single idle pane turned every plain
+// key into a candidate for quit and swallowed the rest — a lone `magmux -e
+// claude` was untypeable from the first frame, before writePTY was ever
+// reached. Dismissing a FINISHED grid with `q` was always the point of that
+// branch, and a finished grid is a dead one.
+//
+// Caller must NOT hold treeMu.
+func (m *Magmux) allPanesDead() bool {
+	m.treeMu.RLock()
+	defer m.treeMu.RUnlock()
+	return m.allPanesDeadLocked()
+}
+
+// allPanesDeadLocked is the twin for callers already inside treeMu. See
+// allPanesDoneLocked for why the twin is mandatory rather than a style
+// preference.
+//
+// Caller holds at least treeMu.RLock.
+func (m *Magmux) allPanesDeadLocked() bool {
+	sessions := 0
+	for _, p := range m.allPanes {
+		if p == nil || p.closed || p.isControl {
+			continue
+		}
+		sessions++
+		p.mu.Lock()
+		alive := !p.dead
+		p.mu.Unlock()
+		if alive {
 			return false
 		}
 	}
@@ -6664,11 +6778,18 @@ func keyHintItems(panelVisible, multiPane, canScroll bool) []hintItem {
 }
 
 // keyHintLocked is the hint set for the current layout, or nil when the chord
-// is inert — a finished grid swallows every key but q/Esc/Ctrl-C, so
-// advertising p there would be advertising a key that does nothing.
+// is inert — a grid whose panes have all EXITED swallows every key but
+// q/Esc/Ctrl-C, so advertising p there would be advertising a key that does
+// nothing.
+//
+// The predicate is allPanesDead, not allPanesDone, and the difference is the
+// whole of issue #333: an idle pane is a live agent between turns, the chord
+// still works on it, and blanking the hints told a person their keyboard was
+// gone at the exact moment it was not.
+//
 // Caller holds at least treeMu.RLock.
 func (m *Magmux) keyHintLocked() []hintItem {
-	if m.gridMode && m.allPanesDoneLocked() {
+	if m.gridMode && m.allPanesDeadLocked() {
 		return nil
 	}
 	onScreen := 0
@@ -6827,8 +6948,11 @@ func (m *Magmux) renderLocked() (events []any, out string, quit bool) {
 						now.Sub(p.lastTextAt).Seconds())
 				}
 			}
-			// TUI app waiting for input → tint green + overlay (task complete)
-			if p.inputReady && p.tint == "" {
+			// TUI app waiting for input → tint green + overlay (task complete).
+			// Suppressed under --no-idle-done: a person driving the agent by
+			// hand is looking at its input box, and a ✓ DONE card painted over
+			// it between every turn is chrome in the way of the work.
+			if p.inputReady && p.tint == "" && !m.noIdleDone {
 				p.tint = "green"
 				p.overlayStyle = "success"
 				// Build multi-line popup with duration + last output line
@@ -6854,16 +6978,23 @@ func (m *Magmux) renderLocked() (events []any, out string, quit bool) {
 
 	// Update status bar with done/running counts (grid mode)
 	if m.gridMode {
-		done, running := 0, 0
+		done, running, exited := 0, 0, 0
 		for _, p := range m.livePanesLocked(nil) {
 			if p.isControl {
 				continue // the panel is chrome, not a tracked session
 			}
 			p.mu.Lock()
-			if p.dead || p.inputReady {
+			// Same predicate as allPanesDoneLocked, for the same reason: under
+			// --no-idle-done a resting agent is still a running session, and a
+			// bar reading "1/1 done · ✓ complete" over a session the person is
+			// still working in is the claim the flag exists to withdraw.
+			if p.dead || (p.inputReady && !m.noIdleDone) {
 				done++
 			} else {
 				running++
+			}
+			if p.dead {
+				exited++
 			}
 			p.mu.Unlock()
 		}
@@ -6892,14 +7023,24 @@ func (m *Magmux) renderLocked() (events []any, out string, quit bool) {
 		// their floor on a narrow terminal instead of being pushed off it.
 		var forms []string
 		if allDone {
+			// Which quit key the bar advertises follows the input loop's own
+			// predicate, because the bar is the only place that key is
+			// announced. A bare q quits only once every child has EXITED;
+			// while a pane is merely idle it is a live agent waiting for a
+			// prompt, and telling a person to press q there would put a stray
+			// "q" in their agent's input box.
+			quitLong, quitShort := "ctrl-g q to quit", "ctrl-g q"
+			if allDead := exited == total; allDead {
+				quitLong, quitShort = "q or Esc to quit", "q quit"
+			}
 			forms = []string{
-				fmt.Sprintf("*: %s\tP: %d/%d done\tG: ✓ complete\tM: %s\tD: q or Esc to quit",
-					magmuxLabel(), total, total, elapsed),
-				fmt.Sprintf("*: %s\tP: %d/%d done\tG: ✓ complete\tD: q or Esc to quit",
-					magmuxLabel(), total, total),
-				fmt.Sprintf("P: %d/%d done\tG: ✓ complete\tD: q quit", total, total),
-				fmt.Sprintf("P: %d/%d done\tD: q quit", total, total),
-				"D: q quit",
+				fmt.Sprintf("*: %s\tP: %d/%d done\tG: ✓ complete\tM: %s\tD: %s",
+					magmuxLabel(), total, total, elapsed, quitLong),
+				fmt.Sprintf("*: %s\tP: %d/%d done\tG: ✓ complete\tD: %s",
+					magmuxLabel(), total, total, quitLong),
+				fmt.Sprintf("P: %d/%d done\tG: ✓ complete\tD: %s", total, total, quitShort),
+				fmt.Sprintf("P: %d/%d done\tD: %s", total, total, quitShort),
+				"D: " + quitShort,
 			}
 		} else if total > 0 {
 			forms = []string{
@@ -7198,6 +7339,12 @@ func main() {
 			fmt.Println("  -c        Start with the control panel visible (it always exists;")
 			fmt.Println("            without -c it starts hidden — Ctrl-G p reveals it)")
 			fmt.Println("  --no-status   Start with the status bar hidden (Ctrl-G s toggles)")
+			fmt.Println("  --no-idle-done  Manual mode: an idle pane is a resting session, not a")
+			fmt.Println("            finished one. No ✓ DONE overlay, the counter keeps saying")
+			fmt.Println("            running, and -w waits for the process to exit rather than")
+			fmt.Println("            for a turn to end. Idle is still REPORTED on the socket, so")
+			fmt.Println("            controllers are unaffected. Typing into an idle pane works")
+			fmt.Println("            with or without this flag.")
 			fmt.Println("  -x SECS   Close SECS after a pilot finishes (default: wait for a keypress)")
 			fmt.Println("  --id NAME Bind /tmp/magmux-NAME.sock instead of the pid socket ([A-Za-z0-9_-])")
 			fmt.Println("  --theme MODE  light | dark | auto (default: auto, via OSC 11)")
@@ -7214,7 +7361,9 @@ func main() {
 			fmt.Println("  Ctrl-G q      Quit (always)")
 			fmt.Println("  ↑/↓ PgUp/PgDn Scroll the control panel (when focused); wheel works anywhere")
 			fmt.Println("  End / G       Control panel: resume following the newest exchange")
-			fmt.Println("  q / Esc       Quit (when all panes done, grid mode)")
+			fmt.Println("  q / Esc       Quit (grid mode, once every pane's process has exited)")
+			fmt.Println("                A pane that is merely idle still takes your keystrokes:")
+			fmt.Println("                typing into a finished turn is how you drive it by hand.")
 			fmt.Println("  Ctrl-G Tab    Switch focus to next pane")
 			fmt.Println("  Ctrl-G p      Show / hide the control panel (keeps its history)")
 			fmt.Println("  Ctrl-G s      Show / hide the status bar")
@@ -7288,6 +7437,7 @@ func main() {
 	autoExit := false
 	withControl := false
 	noStatus := false
+	noIdleDone := false
 	var autoClose time.Duration
 	var sockID string
 	var themePref string
@@ -7316,6 +7466,8 @@ func main() {
 			withControl = true
 		case "--no-status":
 			noStatus = true
+		case "--no-idle-done":
+			noIdleDone = true
 		case "-x", "--close-after":
 			if i+1 < len(args) {
 				i++
@@ -7408,6 +7560,7 @@ func main() {
 		gridMode:       useGrid,
 		autoExit:       autoExit,
 		hideStatus:     noStatus,
+		noIdleDone:     noIdleDone,
 		autoCloseAfter: autoClose,
 		sockID:         sockID,
 		themePref:      themePref,
