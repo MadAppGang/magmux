@@ -31,11 +31,15 @@ import (
 	"time"
 )
 
-// sockDir is where magmux binds its sockets (main.go:3091).
-const sockDir = "/tmp"
+// sockDir lives in sockdir.go now, alongside --sock-dir / MAGMUX_SOCK_DIR and
+// the startup reaper; the path itself is minted by Magmux.socketPath.
 
 // sockNamePattern matches both shapes: the pid default and a --id name. The
 // name half is deliberately permissive — it is whatever the human typed.
+//
+// It gates DISCOVERY, which is why it can be permissive. sockdir.go's
+// pidSockPattern gates DELETION and is strictly narrower: there the capture
+// group has to BE a pid, because it is the liveness oracle.
 var sockNamePattern = regexp.MustCompile(`^magmux-(.+)\.sock$`)
 
 // SessionInfo is one candidate socket and what we could learn about it without
@@ -44,8 +48,19 @@ var sockNamePattern = regexp.MustCompile(`^magmux-(.+)\.sock$`)
 // Stale and inaccessible sockets are surfaced rather than hidden: a SIGKILLed
 // magmux leaves its socket file behind, and /tmp is shared between users on
 // macOS, so "there is a file but you cannot use it" is a real and confusing
-// state that the agent should be able to explain to the human. We never unlink
-// a socket — we do not own those files.
+// state that the agent should be able to explain to the human.
+//
+// THE CLIENT NEVER UNLINKS. That is a rule about this file, not about magmux:
+// `magmux mcp` is a short-lived reporter enumerating sessions it did not start,
+// possibly owned by other users, whose whole contract is to DESCRIBE state —
+// including the "there is a file but you cannot use it" state above. A reporter
+// that mutates is a worse reporter.
+//
+// The SERVER's startup reaper (sockdir.go) does unlink, and the two are rules
+// rather than a contradiction. It is in no better position on OWNERSHIP — it
+// does not own those files either — but it is on EVIDENCE and LIFECYCLE: it
+// mints this name shape, it is starting up, and it acts only on a pid it can
+// prove is gone.
 type SessionInfo struct {
 	ID        string
 	SockPath  string

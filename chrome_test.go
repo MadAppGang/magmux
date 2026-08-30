@@ -917,7 +917,17 @@ func TestRenderedStatusBarNeverOverrunsTheTerminal(t *testing.T) {
 // process that still counts, which is exactly a session for these purposes.
 func hintMux(t *testing.T, cols, n int) *Magmux {
 	t.Helper()
-	m := &Magmux{rows: 40, cols: cols, gridMode: true,
+	// Built at a width every pane fits in, then RESIZED down to cols.
+	//
+	// buildGrid refuses a layout it cannot give every pane 3x20 — creation
+	// refuses, because the caller asked for something impossible and can still
+	// be told — while a resize CLAMPS, because a SIGWINCH has nobody to tell
+	// (reshapeChildren, per CLAUDE.md). So "two panes on a 20-column terminal"
+	// is a state only a resize can produce, and it is exactly the state this
+	// row has to survive: a status bar wider than the terminal wraps onto the
+	// pane above it and corrupts the session's output.
+	const wide = 200
+	m := &Magmux{rows: 40, cols: maxInt(cols, wide), gridMode: true,
 		quit: make(chan struct{}), control: newControlPanel(), startedAt: time.Now()}
 	if err := m.buildGrid(ctrlPanes(n)); err != nil {
 		t.Fatalf("buildGrid: %v", err)
@@ -928,6 +938,12 @@ func hintMux(t *testing.T, cols, n int) *Magmux {
 	}
 	m.treeMu.Unlock()
 	m.installHiddenPanel()
+	if cols < m.cols {
+		m.treeMu.Lock()
+		m.cols = cols
+		m.reflowLocked()
+		m.treeMu.Unlock()
+	}
 	return m
 }
 

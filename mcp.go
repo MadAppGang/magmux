@@ -196,12 +196,19 @@ Register it with Claude Code:
 
 It attaches, in priority order, to:
   1. the magmux this process is already running inside ($MAGMUX_SOCK)
-  2. the single reachable /tmp/magmux-*.sock
+  2. the single reachable magmux-*.sock in the socket directory
   3. whatever attach_session is pointed at
 
 Environment:
   MAGMUX_SOCK      socket of the host magmux, exported to every pane
+  MAGMUX_SOCK_DIR  where to look for sockets (default: /tmp)
   MAGMUX_MCP_LOG   log file; without it, logs go to stderr
+
+If you run magmux with --sock-dir, set MAGMUX_SOCK_DIR to the same directory
+in this client's own configuration (its "env" block). --sock-dir reaches
+children of that magmux, so a "magmux mcp" started from inside a pane inherits
+it — but it cannot reach a server the client launched in its own process tree,
+and no runtime mechanism can. The env var is the only channel that spans both.
 
 stdout carries protocol only — never print to it.
 `)

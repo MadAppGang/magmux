@@ -8,8 +8,8 @@ go build -o magmux .
 
 ## Architecture
 
-~4,800 lines of Go across a few files. `main.go` (~3,950 lines) holds the
-terminal core; the tool-controller layer lives beside it.
+`main.go` (~8,350 lines) holds the terminal core; the tool-controller layer,
+the socket layer and the MCP layer live beside it.
 
 `main.go`, in order:
 
@@ -25,6 +25,12 @@ terminal core; the tool-controller layer lives beside it.
    `statusRowsLocked` / `reflowLocked`, and the status bar's panel digest.
    magmux's default is to show none of itself: a lone session pane is a bare
    terminal, because `renderBorder` only ever paints a SPLIT node.
+
+Socket lifecycle:
+
+- `sockdir.go` — where the socket is bound (`--sock-dir` / `MAGMUX_SOCK_DIR`)
+  and the startup sweep that removes pid-named sockets whose owner is provably
+  dead. Free functions, no `*Magmux`, no locks.
 
 Tool controllers:
 
@@ -292,7 +298,10 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   the shutdown `results` can never disagree, for the sake of a display flag.
   Input is deliberately NOT on the list: a keystroke reaches an idle pane with
   or without the flag, which is why the flag is a comfort and not the fix for
-  issue #333.
+  issue #333. The flag reaches `-w` as a PARAMETER of `paneDoneLocked`, never
+  as a second predicate beside it: "done" having two definitions is the defect
+  that function exists to close, and re-opening it here would put the
+  exit-status proof on one path and not the other.
 
 - **Chrome flags are stated as NEGATIVES (`hideStatus`, `noIdleDone`, `hidden`,
   `panelFirst`).** Every unit test builds a `Magmux` as a struct literal, so
@@ -315,11 +324,155 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   legal when built, goes negative. Clamp there, not in `OpenPane` — creation is
   not the only moment geometry changes.
 
+- **CREATION refuses; RESHAPE clamps. `buildGrid`/`buildColumn` are creation.**
+  `buildColumn`'s `botH := h - topH - 1` and `buildGrid`'s
+  `w2 := m.cols - w1 - 1` had no floor either, and at the headless 80×24 that
+  is reachable from the command line: ~32 `-e` panes give a zero-height pane
+  and ~64 a negative one. A zero-row `Screen` **captures as empty**, so a
+  scenario reports no output rather than an error — the same
+  misattributed-diagnostics shape as the exit-status race below. The floor is
+  `minPaneRows`/`minPaneCols`, the SAME constants `OpenPane` and `splitFits`
+  use and **no second copy**: "usable" cannot mean one thing for an agent's
+  `open_pane`, another for `Ctrl-G p`, and a third for `-e`. The refusal
+  happens before `newPaneFor`, so no child is spawned for a layout already
+  known to be impossible, and `errPanesDontFit` names the count AND the
+  geometry, because "no room" without either does not tell a caller whether to
+  drop a pane or find a bigger window. `buildLayout` (the bare `magmux`
+  layout) stays exempt: magmux chose that pane count itself, so there is no
+  caller to have made a mistake. Practical consequence, and it is a real
+  behaviour change for interactive users: **13+ `-e` panes on 80×24, and 2+ on
+  a 40-column terminal, now exit 1 with a message.** The count that fits is
+  whatever `topH := h*topN/len(cmds)` produces, so the tests assert the
+  PROPERTY — *`buildGrid` either errors, or every leaf is at least 3×20* — and
+  never a table of thresholds.
+
+- **`layoutSpec` exists because the base case cannot name what the caller
+  asked for.** `buildColumn`'s `len(cmds)==1` branch knows only its own
+  one-element slice and its own box, so left to itself it reports "cannot lay
+  out 1 panes in 40x1" for a 40-pane request — true of the recursion, useless
+  to the human. The count and the terminal ride down from `buildGrid`.
+
+### Headless invariants (`--headless`, and stdin that is not a tty)
+
+- **`headless` is written in `init()` and nowhere else, and only ever set.**
+  `--headless` forces it on the struct literal; `init()` also turns it on when
+  `!term.IsTerminal(m.stdinFile().Fd())`, which is what makes
+  `magmux -w -e CMD < /dev/null` work with no flag (it used to exit 1 with
+  "raw mode: operation not supported by device"). Resolving it in `init()`
+  rather than `main()` is what makes the mode reachable from a test that never
+  spawns a process: `&Magmux{stdin: pipeReader}` + `init()` degrades. It is
+  stated as a POSITIVE that is FALSE by default for the same reason
+  `hideStatus`/`panelFirst` are negatives — every unit test builds a `Magmux`
+  as a struct literal, so the zero value must be today's behaviour, and an
+  `interactive bool` would invert that and silently make every literal
+  headless.
+
+- **`renderLoop` MUST keep running headless. Only `writeTerm` is suppressed.**
+  Not starting the render loop is the obvious fix and it is the wrong one: it
+  kills `pollControllers`, the snapshot broadcast and `-w`'s auto-exit at once
+  — `renderLocked` is where `quit` is computed. The frame is BUILT and thrown
+  away. `writeTerm` is the single funnel and the guard is unconditional,
+  including when `m.out` is set: "headless" means "emits no frame", one rule.
+  Guarding the callee rather than `render()`'s `if out != ""` is deliberate, so
+  a future caller cannot bypass it.
+
+- **Zero bytes on stdout is closed by ENUMERATION, not by assertion.** There
+  are exactly four writers in `main.go` and the fourth is unreachable:
+  the alt-screen sequence in `init()` (inside the tty branch), `restore()`'s
+  disable sequence (early return), `writeTerm` (early return), and
+  `putClipboard`'s OSC 52 — reached only from `parseSGRMouse` ← `tryParseEscape`
+  ← `inputLoop`, which does not run headless. **It gets no guard on purpose**:
+  one would imply the path is live and invite someone to make it so. The fifth
+  site is not on stdout at all — `detectThemeColor` writes its OSC 11 query to
+  **FD 0**, which `!term.IsTerminal(fd)` does NOT cover under a `--headless`
+  forced from a real tty, so `initTheme`'s guard carries `m.headless ||`
+  explicitly. `initTheme` itself still runs: `--theme`/`MAGMUX_THEME` still
+  choose a palette, and the palette is what children are told about the
+  background.
+
+- **Headless blocks on `<-mux.quit`, never on `inputLoop`.** `inputLoop`'s
+  stdin goroutine closes `stdinCh` on the first read error, and `/dev/null` is
+  EOF on the first read — so `inputLoop` would return in microseconds, `main`
+  would fall through to `waitSocketShutdown`, and a `-w` run would exit before
+  a single pane had produced output.
+
+- **`-w` needs a SESSION, and the two shapes where it never fires are
+  documented rather than fixed.** `allPanesDoneLocked` ends `return sessions > 0`
+  after skipping `p.isControl`, so `magmux --headless -w` with no `-e`/`-g`
+  (`gridMode` false) and `magmux --headless -w -c` with no `-e` (`sessions == 0`)
+  both run until signalled. There is no `quit` socket verb. That is a
+  legitimate mode — a controller-driven session should not exit on its own —
+  but it is indistinguishable from a hang, so it is in `--help` and in the
+  README, and `kill -TERM` is the way out.
+
+- **`handleSIGWINCH` returns before `signal.Notify` headless.** A pipe-stdin
+  process is never sent SIGWINCH, but a FORCED `--headless` on a real tty can
+  be, and it is still ignored on purpose: headless geometry is synthetic and
+  stable, and reflowing panes under a controller because a human dragged a
+  window is a surprise nobody asked for.
+
+- **Geometry is `COLUMNS`/`LINES`, else 80×24, and the bounds are not
+  paranoia.** `newScreen(h, w)` allocates `h*w` Cells, so `COLUMNS=99999999` is
+  an OOM with a stack trace instead of an error, and `COLUMNS=0` gives every
+  pane a zero-width screen whose every capture is empty with no error anywhere.
+  Both arrive from the environment, the input class nobody validates. Reading
+  them first has a deliberate consequence: magmux exports exactly those two to
+  its own children, so a headless magmux started INSIDE a magmux pane inherits
+  that pane's size. That is the right answer and it is surprising, hence tested.
+
+- **The pty positive control is mandatory and is not optional scaffolding.**
+  If auto-degrade ever misfires, every end-to-end test in this repo keeps
+  passing against a magmux that never paints a byte — they all assert on the
+  socket. `TestPTYRunStillPaintsStdout` is the one test that fails. It must
+  keep DRAINING the pty master for the whole run, too: stopping once the
+  assertion is satisfied fills the pty buffer, blocks magmux in
+  `os.Stdout.WriteString`, and SIGTERM cannot then get it past `restore()`.
+
+### The `-w` exit-status race (`dead` ≠ `reaped`)
+
+- **`p.dead` has two independent writers and only ONE of them knows the exit
+  status.** `readLoop` sets `dead` alone when the PTY closes; `reapChild` sets
+  `dead`, `reaped` and `exitCode` under a SINGLE `p.mu` acquisition when
+  `cmd.Wait` returns, on a different goroutine. `-w`'s gate used to test
+  `!p.dead && !p.inputReady`, which `readLoop`'s write satisfies on its own —
+  so `magmux -w -e 'exit 7'` could broadcast `{"state":"completed","exitCode":0}`
+  and close every subscriber before the real status existed anywhere. A run
+  that FAILED, recorded as having PASSED. Headless is what makes it critical:
+  there is no ✗ FAIL tombstone and no human, so `results` is the only report.
+
+- **`paneDoneLocked` is the ONE definition of "finished", and `reaped` gates
+  the DEAD branch only.** `inputReady` still counts on its own, or `-w` would
+  never fire for a Claude Code pane — an idle agent never exits, it finished
+  its TURN. The fix is read-side ONLY: `reaped == true` already IMPLIES
+  `exitCode` is final, because of that single-lock write, so nothing about
+  `waitForChild` or the write ordering changes.
+
+- **`Pane.deadAt`'s zero value is what makes the fix safe.** `time.Since(zero
+  time)` is centuries, so `reapGrace` expires instantly and every existing
+  `Pane{dead:true}` literal is still "done", exactly as today. A test that
+  wants to exercise the race must set `deadAt: time.Now()` explicitly. Both
+  writers stamp it under `p.mu` guarded by `IsZero()`, so it is the moment the
+  pane FIRST went dead and neither writer can move it. `reapGrace` (2s) bounds
+  the wait so a `cmd.Wait` that never returns — a SIGSTOPped child, or a
+  grandchild holding the PTY — cannot convert "wrong answer" into "no answer",
+  which would be a worse trade. A pane with `p.cmd == nil` is done immediately:
+  `reapChild` returns early on one, so `reaped` never becomes true.
+
+- **`buildPaneResultsLocked` needs the same honesty, separately.** Even with
+  `-w` fixed, the connect-time aggregate can still be built in the window
+  between the PTY closing and `cmd.Wait` returning. `p.dead && !p.reaped &&
+  p.cmd != nil` reports `"running"` — the state it had an instant ago — rather
+  than inventing a success. `exitCode` and `dead` keep their keys: removing one
+  is a schema change, and a consumer keying on `state` never reads `exitCode`
+  for a `running` pane.
+
 ### Controlled-session invariants
 
 - **"Done" answers two different questions, and `dead` is the answer to only
   one of them.** For `-w` and auto-exit, done means "nothing left to wait for",
-  so `allPanesDone` counts `dead || inputReady`. For anything that decides
+  and `allPanesDone` asks `paneDoneLocked` — the one definition, where an idle
+  turn counts unless `--no-idle-done` withdrew the claim, and a DEAD pane counts
+  only once `reaped` proves its exit status. For anything that decides
   whether a KEY reaches a child, done means "there is nothing to type into",
   which is `allPanesDead` — a pane that is merely idle is a live agent between
   turns, blocked on a read. Three sites take the second predicate:

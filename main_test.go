@@ -40,6 +40,37 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// stopMagmux ends a test's magmux the way an orchestrator would: SIGTERM, which
+// the signal handler turns into the ordinary m.quit teardown — results,
+// shutdown, every subscriber flushed and closed, and finally os.Remove of the
+// socket. SIGKILL is kept only as a fallback for a magmux that is genuinely
+// wedged, which is the one case where the status quo is the right answer.
+//
+// The previous UNCONDITIONAL SIGKILL is why the test suite itself leaked: two
+// `go test ./...` runs added 23 sockets to /tmp. SIGKILL is uncatchable, so
+// those teardowns also could not exercise the signal handler at all — and a
+// handler with no real-process test is a handler nobody has run.
+//
+// cmd.Process.Wait() rather than cmd.Wait() is kept from the existing sites:
+// several of them have PTY stdio that cmd.Wait would try to copy. It also means
+// this must not be used at a site that already has a goroutine in cmd.Wait();
+// the two wedged-magmux sites signal inline instead, and say so.
+func stopMagmux(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	if cmd.Process == nil {
+		return
+	}
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() { _, _ = cmd.Process.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	}
+}
+
 // magmuxBinForTest returns the shared prebuilt binary, or builds a fallback.
 func magmuxBinForTest(t *testing.T) string {
 	t.Helper()
@@ -136,6 +167,12 @@ func TestAutoExitNonTUIPane(t *testing.T) {
 	}
 	defer master.Close()
 	defer slave.Close()
+	// A freshly opened PTY reports 0x0. This test ran magmux at that size for
+	// its whole life: every pane had a zero-row Screen and every capture came
+	// back empty, so nothing about the emulator was really being exercised.
+	// buildGrid now refuses a layout it cannot give a usable pane, which is what
+	// surfaced it — the same reason startRPCMagmux has always set a size.
+	setWinSize(master, 24, 100)
 
 	// Spawn magmux with -e (single command) and -w (auto-exit on done).
 	// The shell pane echoes once and sleeps 1s — a classic non-TUI workload.
@@ -172,9 +209,18 @@ func TestAutoExitNonTUIPane(t *testing.T) {
 
 	select {
 	case <-time.After(deadline):
-		// Bug present — kill and fail.
-		_ = cmd.Process.Signal(syscall.SIGKILL)
-		<-exitCh
+		// Bug present — stop it and fail. NOT stopMagmux: the goroutine above
+		// already owns cmd.Wait, and two concurrent waits on one process race
+		// for the status. Same escalation by hand — SIGTERM so a magmux that is
+		// merely slow still tears its socket down, then SIGKILL if even that
+		// does not land.
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-exitCh:
+		case <-time.After(2 * time.Second):
+			_ = cmd.Process.Signal(syscall.SIGKILL)
+			<-exitCh
+		}
 		t.Fatalf("magmux did not auto-exit within %v with -w on a non-TUI pane (regression: issue #1)", deadline)
 	case err := <-exitCh:
 		// Expect clean exit (status 0). magmux returns 0 when -w fires cleanly.
@@ -222,6 +268,9 @@ func TestSocketSubscriberContract(t *testing.T) {
 	}
 	defer master.Close()
 	defer slave.Close()
+	// A freshly opened PTY reports 0x0; without this magmux runs with zero-sized
+	// panes. See TestAutoExitNonTUIPane.
+	setWinSize(master, 24, 100)
 
 	// One pane that lives ~1.5s, then exits cleanly; -w auto-exits magmux after.
 	// The window is long enough to connect a subscriber and observe the full
@@ -235,10 +284,7 @@ func TestSocketSubscriberContract(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start magmux: %v", err)
 	}
-	defer func() {
-		_ = cmd.Process.Signal(syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
-	}()
+	defer stopMagmux(t, cmd)
 
 	// Drain the PTY master so magmux's writes never block.
 	go func() {
@@ -357,6 +403,9 @@ func TestSocketResultsDeliveredAtAnyConnectTime(t *testing.T) {
 			}
 			defer master.Close()
 			defer slave.Close()
+			// A freshly opened PTY reports 0x0; without this magmux runs with
+			// zero-sized panes. See TestAutoExitNonTUIPane.
+			setWinSize(master, 24, 100)
 
 			cmd := exec.Command(binPath, "-e", `sh -c "echo hi; sleep 0.3"`, "-w")
 			cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
@@ -364,10 +413,7 @@ func TestSocketResultsDeliveredAtAnyConnectTime(t *testing.T) {
 			if err := cmd.Start(); err != nil {
 				t.Fatalf("start magmux: %v", err)
 			}
-			defer func() {
-				_ = cmd.Process.Signal(syscall.SIGKILL)
-				_, _ = cmd.Process.Wait()
-			}()
+			defer stopMagmux(t, cmd)
 			go func() {
 				buf := make([]byte, 4096)
 				for {
@@ -465,9 +511,10 @@ func TestSocketReaderAcceptsLargeLine(t *testing.T) {
 	}
 	killed := false
 	defer func() {
+		// Only when the test bailed before its own cmd.Wait; otherwise the
+		// process is already reaped and there is nothing to signal.
 		if !killed {
-			_ = cmd.Process.Signal(syscall.SIGKILL)
-			_, _ = cmd.Process.Wait()
+			stopMagmux(t, cmd)
 		}
 	}()
 
@@ -620,9 +667,10 @@ func TestSocketIDFlagBindsNamedSocket(t *testing.T) {
 	}
 	killed := false
 	defer func() {
+		// Only when the test bailed before its own cmd.Wait; otherwise the
+		// process is already reaped and there is nothing to signal.
 		if !killed {
-			_ = cmd.Process.Signal(syscall.SIGKILL)
-			_, _ = cmd.Process.Wait()
+			stopMagmux(t, cmd)
 		}
 	}()
 
@@ -749,6 +797,9 @@ func TestControllerSnapshotReachesAwaitingInput(t *testing.T) {
 	}
 	defer master.Close()
 	defer slave.Close()
+	// A freshly opened PTY reports 0x0; without this magmux runs with zero-sized
+	// panes. See TestAutoExitNonTUIPane.
+	setWinSize(master, 24, 100)
 
 	// "claude " in the command attaches ClaudeCodeController; the printf emits
 	// the OSC 9 notification; the sleep keeps the pane alive long enough for
@@ -763,10 +814,7 @@ func TestControllerSnapshotReachesAwaitingInput(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start magmux: %v", err)
 	}
-	defer func() {
-		_ = cmd.Process.Signal(syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
-	}()
+	defer stopMagmux(t, cmd)
 
 	go func() {
 		buf := make([]byte, 4096)
@@ -1284,10 +1332,7 @@ func TestOSCBackgroundQueryAnsweredEndToEnd(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start magmux: %v", err)
 	}
-	defer func() {
-		_ = cmd.Process.Signal(syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
-	}()
+	defer stopMagmux(t, cmd)
 
 	go func() {
 		buf := make([]byte, 4096)
@@ -1524,10 +1569,7 @@ func TestClaudeCodeOpeningSequenceRendersEndToEnd(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start magmux: %v", err)
 	}
-	defer func() {
-		_ = cmd.Process.Signal(syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
-	}()
+	defer stopMagmux(t, cmd)
 
 	// magmux's own rendering has to be drained or it blocks on a full PTY, and
 	// it is also the only place a startup error would appear — so keep it.

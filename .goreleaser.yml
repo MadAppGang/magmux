@@ -50,4 +50,7 @@ brews:
     install: |
       bin.install "magmux"
     test: |
-      assert_match version.to_s, shell_output("#{bin}/magmux --version 2>&1", 1)
+      # No expected-status argument: `magmux --version` exits 0. The formula
+      # used to pass 1 here, so `brew test magmux` failed against every release
+      # that ever shipped — shell_output raises when the status does not match.
+      assert_match version.to_s, shell_output("#{bin}/magmux --version 2>&1")
