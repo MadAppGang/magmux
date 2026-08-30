@@ -63,10 +63,7 @@ func TestSendVerbReachesPane(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start magmux: %v", err)
 	}
-	defer func() {
-		_ = cmd.Process.Signal(syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
-	}()
+	defer stopMagmux(t, cmd)
 
 	go func() {
 		buf := make([]byte, 4096)
@@ -183,6 +180,9 @@ func TestControlPaneDoesNotBlockAutoExit(t *testing.T) {
 	}
 	defer master.Close()
 	defer slave.Close()
+	// A freshly opened PTY reports 0x0; without this magmux runs with zero-sized
+	// panes. See TestAutoExitNonTUIPane.
+	setWinSize(master, 24, 100)
 
 	cmd := exec.Command(binPath, "-c", "-w", "-e", `sh -c "echo hi; sleep 0.5"`)
 	cmd.Stdin = slave
@@ -207,8 +207,17 @@ func TestControlPaneDoesNotBlockAutoExit(t *testing.T) {
 
 	select {
 	case <-time.After(8 * time.Second):
-		_ = cmd.Process.Signal(syscall.SIGKILL)
-		<-exitCh
+		// NOT stopMagmux: the goroutine above already owns cmd.Wait, and two
+		// concurrent waits on one process race for the status. Same escalation
+		// by hand — SIGTERM so a magmux that is merely slow still tears its
+		// socket down, then SIGKILL if even that does not land.
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-exitCh:
+		case <-time.After(2 * time.Second):
+			_ = cmd.Process.Signal(syscall.SIGKILL)
+			<-exitCh
+		}
 		t.Fatal("magmux with -c never auto-exited: the control pane is being counted as an unfinished session")
 	case err := <-exitCh:
 		if err != nil {

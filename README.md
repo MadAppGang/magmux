@@ -32,6 +32,14 @@ magmux -e 'claude' -e 'opencode'
 
 # A session driven from outside, with the control panel watching
 magmux -c -e 'claude'
+
+# Named panes, so a client can address them by name instead of by index
+magmux -e 'bun test --watch' --label tests -e 'bun dev' --label server
+
+# No terminal at all: CI, a benchmark harness, an agent. Reads `results`
+# off the socket and exits with every pane's real exit status.
+magmux --headless -w -e 'bun test' -e 'go test ./...'
+magmux -w -e 'bun test' < /dev/null      # the same thing; headless is automatic
 ```
 
 magmux shows nothing of itself by default. `magmux -e 'claude'` is a bare
@@ -43,12 +51,16 @@ the same for the status bar.
 | Flag | |
 |---|---|
 | `-e CMD` | run CMD in a pane (repeatable) |
+| `--label NAME` | name the pane the preceding `-e` created |
 | `-g FILE` | grid file, one command per line |
-| `-w` | exit once every pane is done |
+| `-w` | exit once every pane is done ([needs at least one `-e`/`-g`](#headless)) |
+| `--headless` | [run with no terminal](#headless); automatic when stdin is not a tty |
 | `-c` | start with the [control panel](#the-control-panel) visible |
 | `--no-status` | start with the status bar hidden |
+| `--no-idle-done` | an idle pane is resting, not finished: no ✓ DONE, and `-w` waits for exit |
 | `-x SECS` | close SECS after a driver finishes (default: wait for a keypress) |
-| `--id NAME` | bind `/tmp/magmux-NAME.sock` instead of the pid socket |
+| `--id NAME` | bind `magmux-NAME.sock` instead of the pid socket (not all digits) |
+| `--sock-dir DIR` | bind the IPC socket in DIR instead of `/tmp` |
 
 Subcommands: [`magmux mcp`](#magmux-mcp) runs magmux as an MCP server.
 
@@ -87,6 +99,69 @@ With 3 commands, magmux creates this layout:
 │   Status bar                        │
 └─────────────────────────────────────┘
 ```
+
+**Every pane needs at least 3 rows and 20 columns**, and magmux **refuses** a
+layout that cannot give every pane that much rather than producing panes too
+small to show a prompt and a line of output. A column of `k` panes needs
+`4k - 1` rows (3 each plus a border between), and `-e` fills two columns, so the
+practical ceiling is about **12 panes on an 80×24 terminal** and 24 on 80×50. On
+a terminal narrower than 41 columns only a single pane is possible, since
+`2 × 20 + 1` will not fit.
+
+The refusal names the count, the geometry and the floor:
+
+```
+$ magmux --headless -e 'echo 1' … 40 times …
+magmux: cannot lay out 40 panes in 80x23: every pane needs at least 3 rows and
+20 columns (use fewer -e commands, a larger terminal, or set COLUMNS/LINES)
+```
+
+Two asymmetries worth knowing. `-c` **costs a pane** — the panel is appended to
+the layout, so 12 panes succeed and 12 panes with `-c` refuse; without `-c` the
+panel lives outside the tree and costs nothing. And the bare `magmux` layout
+(no `-e`, no `-g`) is exempt: magmux chose that pane count itself, so there is
+no caller to have made a mistake and three cramped shells beat refusing to
+start.
+
+The same floor governs `Ctrl-G p` and an agent's `open_pane`, deliberately —
+"usable" cannot mean one thing for a flag and another for a socket verb.
+
+## Headless
+
+`--headless` runs magmux with **no terminal at all**: no raw mode, no alternate
+screen, no OSC 11 probe, and **not one byte on stdout**. The socket is the whole
+interface. It is what makes magmux usable from CI, from a benchmark harness, or
+from an agent that has no tty to give it — and it is the reason several magmuxes
+can run at once, since a run no longer needs a pty each.
+
+It turns on **automatically when stdin is not a terminal**, so the shape that
+used to fail —
+
+```
+$ magmux -w -e 'echo hi' < /dev/null
+magmux: raw mode: operation not supported by device
+```
+
+— now just works, with no flag. Pass `--headless` explicitly to force the mode
+from inside a real terminal.
+
+What does *not* change: the render loop still runs (it is what drives controller
+polling, the `snapshot` broadcast and `-w`'s auto-exit — only the *write* is
+suppressed), every pane still spawns, `results` has exactly the shape it always
+had, and the control panel still exists and still reports `state: "panel"`.
+
+Geometry comes from `COLUMNS`/`LINES`, else 80×24. That means a headless magmux
+started **inside** a magmux pane inherits that pane's size, since those are the
+two variables magmux exports to its own children — deliberate, so the nested
+run's captures line up with the space a human is looking at.
+
+**`-w` needs a session to wait for.** `magmux --headless -w` with no `-e`/`-g`
+falls into the default shell layout and never auto-exits, and neither does
+`magmux --headless -w -c` with no `-e`, because the control panel is not a
+session. Both are legitimate — a controller-driven run should not exit on its
+own — but they are indistinguishable from a hang, so end them with `kill -TERM`,
+which magmux turns into its ordinary teardown (`results`, then `shutdown`, then
+EOF for every subscriber).
 
 ## Features
 
@@ -155,6 +230,7 @@ Key design: child processes see `TERM=screen-256color`, which limits escape sequ
 | `MAGMUX_SCROLLBACK` | `1000` | Lines of [history](#scrollback) kept per pane; `0` turns it off |
 | `MAGMUX_SEL_FG` | `0` (black) | Selection foreground (256-color index) |
 | `MAGMUX_SEL_BG` | `220` (yellow) | Selection background (256-color index) |
+| `MAGMUX_SOCK_DIR` | `/tmp` | Directory for the [IPC socket](#ipc-socket-protocol). `--sock-dir` wins over it |
 | `MAGMUX_DEBUG` | (unset) | Enable debug logging to `/tmp/magmux-debug.log` |
 
 ## IPC Socket Protocol
@@ -169,9 +245,35 @@ its child PID and derives the path directly.
 
 `--id NAME` binds `/tmp/magmux-<name>.sock` instead — the path is then known
 *before* magmux starts, which is what lets a caller that did not fork magmux
-find it. `NAME` is restricted to `[A-Za-z0-9_-]{1,64}`; an invalid one is
-ignored with a line on stderr and the pid socket binds as usual. The pid
-default is unchanged, and `--id` **replaces** it rather than adding to it.
+find it. `NAME` is restricted to `[A-Za-z0-9_-]{1,64}` **and may not be all
+digits**; an invalid one is ignored with a line on stderr and the pid socket
+binds as usual. The pid default is unchanged, and `--id` **replaces** it rather
+than adding to it.
+
+The all-digits restriction is deliberate and worth the sentence: the startup
+sweep below identifies a socket as reapable *by its name being a pid*, so a live
+`--id 1234` would be indistinguishable from the socket of a dead process 1234 —
+and almost always removable.
+
+**Directory.** `--sock-dir DIR`, or `MAGMUX_SOCK_DIR`, moves the socket out of
+`/tmp`; the flag wins. A directory that is missing, is not a directory, or would
+push the path past the OS limit on socket paths (~104 bytes on macOS) is ignored
+with a line on stderr, and `/tmp` is used. `--sock-dir` also exports
+`MAGMUX_SOCK_DIR` to children, so a `magmux mcp` started inside a pane finds the
+right directory — but it cannot reach an MCP server the *client* launched in its
+own process tree. For that, set `MAGMUX_SOCK_DIR` in the client's own `env`
+block; it is the only channel that spans both process trees.
+
+**Startup sweep.** magmux removes stale sockets in that directory as it starts:
+the ordinary teardown unlinks the socket, but `SIGKILL`, a panic, an OOM kill
+and a power loss all skip it, so without a sweep those files accumulate forever.
+It only removes a socket named `magmux-<pid>.sock` whose `<pid>` it can prove is
+gone (`kill(pid, 0)` reporting `ESRCH`, checked twice, and only on a real socket
+inode). A running session, a socket owned by another user, and any `--id` socket
+are all left alone — an `--id` name has no liveness oracle, so it is never
+touched. `SIGTERM`, `SIGINT` and `SIGHUP` now run the normal teardown, so a
+session ended that way removes its own socket and still delivers `results`; a
+second signal exits immediately.
 
 **Framing.** JSON Lines: one JSON object per line, terminated by `\n` (UTF-8).
 The stream is bidirectional but subscribers typically only read. Unknown event
@@ -195,7 +297,7 @@ types and unknown fields should be ignored for forward compatibility.
 | `type` | Shape | When |
 |---|---|---|
 | `snapshot` (connect) | `panes`: array of pane-state objects (see below) | once, immediately on connect |
-| `snapshot` (per-pane) | `pane` (int), `controller`, `state`, `project`, `model`, `prompt`, `response`, `tool`, `startedAt`, `completedAt` | on meaningful per-pane change |
+| `snapshot` (per-pane) | `pane` (int), `controller`, `state`, `project`, `model`, `prompt`, `response`, `tool`, `startedAt`, `completedAt`, and `label` when the pane has one | on meaningful per-pane change |
 | `exit` | `pane` (int), `exitCode` (int), `duration`, `lastLine`, `response`, `prompt`, `tool`, `model` | when a pane's process exits |
 | `results` | `panes`: array of pane-state objects, `endedAt` (RFC3339) | once, at shutdown, before EOF |
 | `shutdown` | (no extra fields) | once, after `results`, right before close |
@@ -239,7 +341,7 @@ carries a **`panes`** array; the per-pane live event carries a singular **`pane`
 | `focused` | bool | whether this pane currently has keyboard focus |
 | `rows` `cols` | int | the pane's screen geometry — without the width there is no telling a wrapped line from a hard one |
 | `altMode` | bool | whether the pane's app is on the alternate screen (vim, htop, a TUI agent) |
-| `label` | string | the name given at `open_pane` (omitted when empty) |
+| `label` | string | the name given at `open_pane` or by `-e CMD --label NAME` (omitted when empty) |
 | `cmd` | string | the pane's command line, if known (omitted otherwise) |
 | `cwd` | string | the pane's working directory, if known (omitted otherwise) |
 | `pid` | int | the pane process's pid, if running (omitted otherwise) |
@@ -249,12 +351,31 @@ The last nine are additive; the forward-compat clause above already covers
 them, and every one is omitted rather than reported as a zero when it cannot be
 sourced.
 
+**Pane ids follow argument order.** Panes created from `-e` receive ids
+`0..N-1` in the order the flags were given, and magmux's own panes — the control
+panel — are appended **after** them, whether or not `-c` was passed. So `-e A -e
+B` gives you pane 0 and pane 1, and the first pane an agent opens is *not*
+necessarily 1.
+
 **Pane ids are sparse.** `close_pane` tombstones the slot and nothing ever
 renumbers, so ids can have gaps and `results` can contain entries with
 `"state":"closed"`. A client treating the `panes` array as a dense positional
 list will address the wrong session after the first close: the `pane` field was
 always the authoritative index, and now it matters. Tombstones are reported
 rather than omitted precisely so the hole is visible.
+
+**Or don't count at all.** `-e CMD --label NAME` names a pane at startup, and
+the name comes back on `results`, on the `list` verb and on every live
+`snapshot` event — so a client can resolve `"tests"` once and never reason about
+indices again. `--label` binds to the `-e` immediately before it; with no
+preceding `-e` it is dropped with a line on stderr, and `-g` discards labels
+along with the `-e` commands it overrides.
+
+**`exitCode` is only meaningful once the status has been collected.** A pane
+whose PTY has closed but whose `cmd.Wait` has not yet returned reports
+`"state":"running"`, not `"completed"` — magmux will not claim a success it
+cannot back. The final `results` under `-w` always waits for the real status, so
+`exitCode` there is the child's own.
 
 ### Request/response
 
@@ -677,8 +798,12 @@ shell, build or dev-server pane has no transcript, so its scrollback is.**
    the agent drives its siblings in the window the human is already looking at,
    and the human watches the whole time. (An agent may never drive its own
    pane — it would be waiting for a turn it is itself inside. That is refused.)
-2. **A discovered session.** One reachable `/tmp/magmux-*.sock`, or whatever
-   `attach_session` is pointed at.
+2. **A discovered session.** One reachable `magmux-*.sock` in the socket
+   directory (`/tmp`, or `MAGMUX_SOCK_DIR`), or whatever `attach_session` is
+   pointed at. If the magmux you want was started with `--sock-dir`, set
+   `MAGMUX_SOCK_DIR` to the same directory in this client's own `env` block —
+   `--sock-dir` reaches magmux's children, but nothing magmux does at runtime
+   can reach a server the client launched itself.
 3. **Inside tmux.** `request_session` tells the client to use **its own** tmux
    MCP tooling to split a pane and run `magmux --id NAME -c -e '<cmd>'` there,
    then call `attach_session`.

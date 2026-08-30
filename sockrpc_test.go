@@ -61,8 +61,7 @@ func startRPCMagmux(t *testing.T, args ...string) *rpcMagmux {
 		}
 	}()
 	t.Cleanup(func() {
-		_ = cmd.Process.Signal(syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
+		stopMagmux(t, cmd)
 		master.Close()
 		slave.Close()
 	})
