@@ -23,5 +23,6 @@
     "statusline@magus": "3.0.0",
     "setup@magus": "1.1.1",
     "style@magus": "1.0.0"
-  }
+  },
+  "outputStyle": "composed"
 }
