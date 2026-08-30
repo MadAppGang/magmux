@@ -7,13 +7,19 @@ package main
 // needs both halves: an external agent reads the session's state off the
 // socket and must be able to push the next instruction back in.
 //
-// That is what `send` is. The subtlety is that the state a pilot wants to
-// act on — the pane has finished its turn and is waiting — is exactly the
-// state `writePTY` refuses to write to, because in grid mode an idle pane is
-// considered "done" and user keystrokes are suppressed so a finished grid
-// can be dismissed with `q`. So a pilot send cannot go through writePTY; it
-// takes the inject path below, which clears the idle state the way a real
-// keystroke would and then writes regardless.
+// That is what `send` is. The state a pilot wants to act on — the pane has
+// finished its turn and is waiting — used to be the one state `writePTY`
+// refused to write to, because in grid mode an idle pane counted as "done" and
+// keystrokes were suppressed so a finished grid could be dismissed with `q`.
+// That asymmetry was the bug in issue #333: a program could steer a resting
+// agent and the person at the same keyboard could not. Both paths now refuse
+// exactly one thing, a pane whose child has exited, and share
+// clearCompletionLocked for the state a write un-sticks.
+//
+// `send` still has its own entry point rather than calling writePTY, because
+// the two differ in what they REPORT: injectPTY returns whether the bytes
+// reached the PTY, which is what a socket reply needs and what a keystroke has
+// nobody to tell.
 
 import (
 	"fmt"
@@ -78,10 +84,12 @@ func keyBytes(name string) ([]byte, bool) {
 
 // injectPTY writes to the pane's PTY on behalf of an external controller.
 //
-// Unlike writePTY it does not refuse an idle pane — steering an idle session
-// is the entire point — but it clears the same completion state a real
-// keystroke would, so the pane stops reading as "done" the moment work is
-// pushed into it. Returns false if the pane cannot accept input at all.
+// It refuses only a pane with no process to write to, and clears the same
+// completion state a real keystroke does, so the pane stops reading as "done"
+// the moment work is pushed into it. writePTY now has the same predicate: a
+// pane a program can steer is a pane a person can type into, and the two paths
+// share clearCompletionLocked so they cannot drift again. Returns false if the
+// pane cannot accept input at all.
 //
 // Caller must NOT hold p.mu.
 func (p *Pane) injectPTY(data []byte) bool {
@@ -90,20 +98,9 @@ func (p *Pane) injectPTY(data []byte) bool {
 		p.mu.Unlock()
 		return false
 	}
-	if p.inputReady {
-		// Mirror writePTY: an instruction restarts the turn, so the pane is
-		// no longer awaiting input and its completion chrome must go. Reset
-		// hadTextOutput too, or the text-idle heuristic can immediately
-		// re-fire on the pre-existing output and call the pane done again.
-		p.inputReady = false
-		p.inputSignal = ""
-		p.tint = ""
-		p.overlayText = ""
-		p.overlayStyle = ""
-		p.hadTextOutput = false
-		p.lastTextAt = time.Now()
-		p.titleIdleAt = time.Time{}
-	}
+	// An instruction restarts the turn, so the pane is no longer awaiting
+	// input and its completion chrome must go.
+	p.clearCompletionLocked()
 	p.dirty = true
 	ptmx := p.ptmx
 	p.mu.Unlock()
