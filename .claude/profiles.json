@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "profiles": {
+    "default": {
+      "name": "Default",
+      "marketplaces": {
+        "magus": {
+          "source": "github",
+          "repo": "MadAppGang/magus"
+        }
+      },
+      "plugins": {
+        "claudish@magus": "latest",
+        "mnemex@magus": "latest",
+        "go@magus": "latest",
+        "browser-use@magus": "latest",
+        "terminal@magus": "latest",
+        "kanban@magus": "latest",
+        "setup@magus": "latest",
+        "style@magus": "latest",
+        "code-analysis@magus": "latest",
+        "multimodel@magus": "latest",
+        "dev@magus": "latest"
+      },
+      "createdAt": "2026-08-30T12:47:28.667Z",
+      "mcpServers": {
+        "linear-server": {
+          "type": "http",
+          "url": "https://mcp.linear.app/mcp"
+        }
+      }
+    }
+  }
+}
