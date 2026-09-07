@@ -16,6 +16,16 @@ package main
 //     "what colour is body text" has exactly one answer per run and adding a
 //     second theme costs a struct literal rather than eleven package vars.
 //
+// The palette is resolved ONCE at startup, first answer wins:
+//
+//	--theme > MAGMUX_THEME > TERM_THEME > OSC 11 probe > COLORFGBG > dark
+//
+// "auto" is no opinion at EVERY level, --theme and MAGMUX_THEME included: it
+// falls through to the next source rather than forcing the probe. (This is a
+// change from the earlier rule, where `--theme auto` beat a set MAGMUX_THEME
+// and probed.) See resolveTheme for the walk and themeWord for what counts as
+// an answer.
+//
 // Fallback is always dark: an unanswered query, a malformed reply, a
 // non-terminal stdin and TERM=dumb all land on the palette magmux has always
 // shipped, so the failure mode is "unchanged", never "unreadable".
@@ -485,25 +495,105 @@ func scaleHex(s string) (uint8, bool) {
 
 // ── Preference ────────────────────────────────────────────────────────────────
 
-// themeSetting normalises the requested mode. The flag wins over the
-// environment, and anything unrecognised is "auto" — a typo must not be able
-// to pin the wrong palette silently.
-func themeSetting(flagVal, envVal string) string {
-	for _, v := range []string{flagVal, envVal} {
-		switch strings.ToLower(strings.TrimSpace(v)) {
-		case "light":
-			return "light"
-		case "dark":
-			return "dark"
-		case "auto":
-			return "auto"
-		}
+// themeSource is which step of the resolution order answered. It exists so the
+// debug line can say who decided, and so a test can assert on it instead of on
+// a side effect. The zero value is "nothing answered; dark", so a zero
+// themeResolution reads the way every Magmux{} test literal expects.
+type themeSource int
+
+const (
+	themeSourceDefault   themeSource = iota // nothing answered; dark
+	themeSourceFlag                         // --theme
+	themeSourceEnv                          // MAGMUX_THEME
+	themeSourceTermTheme                    // TERM_THEME
+	themeSourceProbe                        // OSC 11 reply from the terminal
+	themeSourceColorFGBG                    // COLORFGBG
+)
+
+func (s themeSource) String() string {
+	switch s {
+	case themeSourceFlag:
+		return "--theme"
+	case themeSourceEnv:
+		return "MAGMUX_THEME"
+	case themeSourceTermTheme:
+		return "TERM_THEME"
+	case themeSourceProbe:
+		return "OSC 11"
+	case themeSourceColorFGBG:
+		return "COLORFGBG"
 	}
-	return "auto"
+	return "default"
 }
 
-// validThemeSetting reports whether v is a mode a user could have meant, so
-// main can say so on stderr instead of silently falling back to auto.
+// themeInputs is every non-tty input to the order, as raw strings. resolveTheme
+// takes them as a value so it reads no environment itself: the os.Getenv calls
+// live in themeEnv and nowhere else, and a table test can cover the full order
+// without touching the process environment.
+type themeInputs struct {
+	flag      string // --theme, "" if not given
+	env       string // MAGMUX_THEME
+	termTheme string // TERM_THEME
+	colorFGBG string // COLORFGBG
+}
+
+// themeEnv reads the three environment-valued inputs. It is a variable so a
+// test that drives init() can pin them without touching the process
+// environment; production reads os.Getenv and only os.Getenv — no file is
+// ever opened for TERM_THEME or COLORFGBG. The flag is not here: initTheme
+// fills it from m.themePref.
+var themeEnv = func() themeInputs {
+	return themeInputs{
+		env:       os.Getenv("MAGMUX_THEME"),
+		termTheme: os.Getenv("TERM_THEME"),
+		colorFGBG: os.Getenv("COLORFGBG"),
+	}
+}
+
+// themeProbeResult is what the OSC 11 step hands back. ok is false when the
+// terminal did not answer or answered something unparseable; leftover is every
+// byte read that was not the reply, and is returned whether or not ok is set.
+type themeProbeResult struct {
+	kind     themeKind
+	color    rgb
+	ok       bool
+	leftover []byte
+}
+
+// themeResolution is the answer. probedOK is true iff source ==
+// themeSourceProbe, and only then is probed meaningful. leftover is non-nil
+// only if the probe ran; probeRan says whether it did, so the debug line can
+// tell "skipped" from "no answer".
+type themeResolution struct {
+	kind     themeKind
+	source   themeSource
+	probed   rgb
+	probedOK bool
+	leftover []byte
+	probeRan bool
+}
+
+// themeWord reads one of the three word-valued inputs (--theme, MAGMUX_THEME,
+// TERM_THEME). Trimmed, case-insensitive. Only "light" and "dark" are answers;
+// "auto", "" and anything else are "no opinion" and the caller moves on.
+//
+// It deliberately does NOT distinguish auto from garbage: the chain treats both
+// as fall-through. The distinction matters only for the --theme warning, which
+// validThemeSetting makes at flag-parse time.
+func themeWord(v string) (themeKind, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "light":
+		return themeLight, true
+	case "dark":
+		return themeDark, true
+	}
+	return themeDark, false
+}
+
+// validThemeSetting reports whether v is a mode a user could have meant. Its
+// ONLY caller is the --theme flag parser, which warns on stderr for anything
+// else; MAGMUX_THEME and TERM_THEME are never warned about (the latter is not
+// magmux's variable to police), and the chain itself never consults this.
 func validThemeSetting(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "light", "dark", "auto":
@@ -512,18 +602,68 @@ func validThemeSetting(v string) bool {
 	return false
 }
 
-// resolveTheme applies the preference. probe is called ONLY for "auto": an
-// explicit setting is the escape hatch for a terminal that answers OSC 11
-// wrongly, so it must not write to that terminal or read from it at all.
-func resolveTheme(pref string, probe func() (themeKind, []byte)) (themeKind, []byte) {
-	switch pref {
-	case "light":
-		return themeLight, nil
-	case "dark":
-		return themeDark, nil
+// classifyColorFGBG reads rxvt/konsole/iTerm2's COLORFGBG ("fg;bg" or
+// "fg;x;bg", ANSI colour indexes) and classifies the LAST field, which is the
+// background. Index 0-6 and 8 are dark, 7 and 9-15 light; anything else —
+// "default", an index outside 0-15, the wrong number of fields — is no opinion.
+func classifyColorFGBG(v string) (themeKind, bool) {
+	parts := strings.Split(strings.TrimSpace(v), ";")
+	if len(parts) != 2 && len(parts) != 3 {
+		return themeDark, false
 	}
-	if probe == nil {
-		return themeDark, nil
+	n, err := strconv.Atoi(strings.TrimSpace(parts[len(parts)-1]))
+	if err != nil {
+		return themeDark, false
 	}
-	return probe()
+	switch {
+	case n >= 0 && n <= 6, n == 8:
+		return themeDark, true
+	case n == 7, n >= 9 && n <= 15:
+		return themeLight, true
+	}
+	return themeDark, false
+}
+
+// resolveTheme walks the order and stops at the first answer. It is pure: it
+// reads no environment and touches no tty. The probe is invoked only when
+// steps 1-3 gave no opinion, and only when it is non-nil; a nil probe means
+// "cannot ask" (headless, non-tty, TERM=dumb) and the walk continues to
+// COLORFGBG. The last step always answers, so source is never left unset.
+//
+// The order IS the slice literal below, read top to bottom. There is no second
+// copy of it anywhere.
+func resolveTheme(in themeInputs, probe func() themeProbeResult) themeResolution {
+	var res themeResolution
+	type themeStep struct {
+		source themeSource
+		answer func() (themeKind, bool)
+	}
+	steps := []themeStep{
+		{themeSourceFlag, func() (themeKind, bool) { return themeWord(in.flag) }},
+		{themeSourceEnv, func() (themeKind, bool) { return themeWord(in.env) }},
+		{themeSourceTermTheme, func() (themeKind, bool) { return themeWord(in.termTheme) }},
+		{themeSourceProbe, func() (themeKind, bool) {
+			if probe == nil {
+				return themeDark, false
+			}
+			pr := probe()
+			res.probeRan = true
+			// Kept even when the probe did not answer: these are keystrokes.
+			res.leftover = pr.leftover
+			if !pr.ok {
+				return themeDark, false
+			}
+			res.probed, res.probedOK = pr.color, true
+			return pr.kind, true
+		}},
+		{themeSourceColorFGBG, func() (themeKind, bool) { return classifyColorFGBG(in.colorFGBG) }},
+		{themeSourceDefault, func() (themeKind, bool) { return themeDark, true }},
+	}
+	for _, st := range steps {
+		if k, ok := st.answer(); ok {
+			res.kind, res.source = k, st.source
+			return res
+		}
+	}
+	panic("unreachable: the default step always answers")
 }

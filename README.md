@@ -132,7 +132,10 @@ The same floor governs `Ctrl-G p` and an agent's `open_pane`, deliberately —
 screen, no OSC 11 probe, and **not one byte on stdout**. The socket is the whole
 interface. It is what makes magmux usable from CI, from a benchmark harness, or
 from an agent that has no tty to give it — and it is the reason several magmuxes
-can run at once, since a run no longer needs a pty each.
+can run at once, since a run no longer needs a pty each. Only the probe is
+skipped: `--theme`, `MAGMUX_THEME`, `TERM_THEME` and `COLORFGBG` still pick the
+palette children are told about over OSC 11, so a headless run can be told it
+is on a light terminal.
 
 It turns on **automatically when stdin is not a terminal**, so the shape that
 used to fail —
@@ -225,8 +228,15 @@ Key design: child processes see `TERM=screen-256color`, which limits escape sequ
 
 ## Configuration
 
+The palette is resolved once at startup, first answer wins: `--theme`,
+`MAGMUX_THEME`, `TERM_THEME`, the OSC 11 probe (interactive tty only),
+`COLORFGBG`, then dark. `auto` is "no opinion" at every level and falls through.
+
 | Env Variable | Default | Description |
 |---|---|---|
+| `MAGMUX_THEME` | `auto` | `light`, `dark` or `auto`. Second in the order: `--theme` wins over it, and it beats everything below. Set it when a terminal answers OSC 11 wrongly |
+| `TERM_THEME` | (unset) | `light` or `dark`, as set by the terminal or shell. When it answers, magmux does not probe the terminal at all. Any other value (including `auto`) is ignored without a warning |
+| `COLORFGBG` | (unset) | `fg;bg` or `fg;x;bg` colour indexes (rxvt, konsole, iTerm2). Consulted only when the probe was skipped or did not answer; background 0-6 or 8 is dark, 7 or 9-15 is light |
 | `MAGMUX_SCROLLBACK` | `1000` | Lines of [history](#scrollback) kept per pane; `0` turns it off |
 | `MAGMUX_SEL_FG` | `0` (black) | Selection foreground (256-color index) |
 | `MAGMUX_SEL_BG` | `220` (yellow) | Selection background (256-color index) |

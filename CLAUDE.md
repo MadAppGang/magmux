@@ -386,9 +386,14 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   site is not on stdout at all — `detectThemeColor` writes its OSC 11 query to
   **FD 0**, which `!term.IsTerminal(fd)` does NOT cover under a `--headless`
   forced from a real tty, so `initTheme`'s guard carries `m.headless ||`
-  explicitly. `initTheme` itself still runs: `--theme`/`MAGMUX_THEME` still
-  choose a palette, and the palette is what children are told about the
-  background.
+  explicitly. `initTheme` itself still runs: `--theme`, `MAGMUX_THEME`,
+  `TERM_THEME` and `COLORFGBG` still choose a palette (in that order, first
+  answer wins, `auto` is no opinion at every level), and the palette is what
+  children are told about the background. The guard is hoisted OUT of the
+  probe closure: a skipped probe is a nil callback to `resolveTheme`, which is
+  what lets the walk reach `COLORFGBG` headless instead of stopping at dark.
+  `TERM_THEME` and `COLORFGBG` are read through `themeEnv` with `os.Getenv`
+  only — no file is ever opened for them.
 
 - **Headless blocks on `<-mux.quit`, never on `inputLoop`.** `inputLoop`'s
   stdin goroutine closes `stdinCh` on the first read error, and `/dev/null` is
