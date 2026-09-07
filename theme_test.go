@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -188,31 +189,31 @@ func TestDetectThemePreservesNonReplyBytes(t *testing.T) {
 // written, nothing read.
 func TestThemeOverrideSkipsProbe(t *testing.T) {
 	probed := 0
-	probe := func() (themeKind, []byte) {
+	probe := func() themeProbeResult {
 		probed++
-		return themeDark, nil
+		return themeProbeResult{kind: themeDark, ok: true}
 	}
 
 	t.Run("env light", func(t *testing.T) {
 		t.Setenv("MAGMUX_THEME", "light")
 		probed = 0
-		kind, rest := resolveTheme(themeSetting("", os.Getenv("MAGMUX_THEME")), probe)
-		if kind != themeLight {
-			t.Errorf("MAGMUX_THEME=light gave %s", kind)
+		res := resolveTheme(themeInputs{env: os.Getenv("MAGMUX_THEME")}, probe)
+		if res.kind != themeLight {
+			t.Errorf("MAGMUX_THEME=light gave %s", res.kind)
 		}
 		if probed != 0 {
 			t.Errorf("probed the terminal %d times despite an explicit setting", probed)
 		}
-		if len(rest) != 0 {
-			t.Errorf("an unprobed terminal produced %q of leftover input", rest)
+		if len(res.leftover) != 0 {
+			t.Errorf("an unprobed terminal produced %q of leftover input", res.leftover)
 		}
 	})
 
 	t.Run("env dark", func(t *testing.T) {
 		t.Setenv("MAGMUX_THEME", "dark")
 		probed = 0
-		if kind, _ := resolveTheme(themeSetting("", os.Getenv("MAGMUX_THEME")), probe); kind != themeDark {
-			t.Errorf("MAGMUX_THEME=dark gave %s", kind)
+		if res := resolveTheme(themeInputs{env: os.Getenv("MAGMUX_THEME")}, probe); res.kind != themeDark {
+			t.Errorf("MAGMUX_THEME=dark gave %s", res.kind)
 		}
 		if probed != 0 {
 			t.Errorf("probed the terminal %d times despite an explicit setting", probed)
@@ -222,7 +223,7 @@ func TestThemeOverrideSkipsProbe(t *testing.T) {
 	t.Run("flag beats env", func(t *testing.T) {
 		t.Setenv("MAGMUX_THEME", "dark")
 		probed = 0
-		if kind, _ := resolveTheme(themeSetting("light", os.Getenv("MAGMUX_THEME")), probe); kind != themeLight {
+		if res := resolveTheme(themeInputs{flag: "light", env: os.Getenv("MAGMUX_THEME")}, probe); res.kind != themeLight {
 			t.Error("--theme light did not override MAGMUX_THEME=dark")
 		}
 		if probed != 0 {
@@ -230,11 +231,13 @@ func TestThemeOverrideSkipsProbe(t *testing.T) {
 		}
 	})
 
+	// Five calls in four subtests: two of them here. No termTheme and no
+	// colorFGBG in the inputs, so the developer's shell cannot leak in.
 	t.Run("auto probes, and a typo falls back to auto", func(t *testing.T) {
 		t.Setenv("MAGMUX_THEME", "")
 		probed = 0
-		resolveTheme(themeSetting("", ""), probe)
-		resolveTheme(themeSetting("banana", "chartreuse"), probe)
+		resolveTheme(themeInputs{}, probe)
+		resolveTheme(themeInputs{flag: "banana", env: "chartreuse"}, probe)
 		if probed != 2 {
 			t.Errorf("auto probed %d times, want 2", probed)
 		}
@@ -243,21 +246,204 @@ func TestThemeOverrideSkipsProbe(t *testing.T) {
 		}
 	})
 
-	// And the real probe must not be reached at all when stdin cannot answer.
-	// (initTheme's guard; asserted here as the contract it implements.)
-	t.Run("prefs normalise", func(t *testing.T) {
-		for in, want := range map[string]string{
-			"":       "auto",
-			"LIGHT":  "light",
-			" dark ": "dark",
-			"auto":   "auto",
-			"nope":   "auto",
+	// themeWord is the one normaliser. Only light and dark are answers; auto,
+	// empty and garbage are all the same "no opinion".
+	t.Run("words normalise", func(t *testing.T) {
+		for in, want := range map[string]struct {
+			kind themeKind
+			ok   bool
+		}{
+			"":       {themeDark, false},
+			"LIGHT":  {themeLight, true},
+			" dark ": {themeDark, true},
+			"auto":   {themeDark, false},
+			"nope":   {themeDark, false},
 		} {
-			if got := themeSetting(in, ""); got != want {
-				t.Errorf("themeSetting(%q) = %q, want %q", in, got, want)
+			got, ok := themeWord(in)
+			if ok != want.ok || (ok && got != want.kind) {
+				t.Errorf("themeWord(%q) = (%s, %v), want (%s, %v)", in, got, ok, want.kind, want.ok)
 			}
 		}
 	})
+}
+
+// TestResolveThemeOrder is the whole order as one table:
+//
+//	--theme > MAGMUX_THEME > TERM_THEME > OSC 11 probe > COLORFGBG > dark
+//
+// Pure — no environment, no tty. Each row says who answered, not just what.
+func TestResolveThemeOrder(t *testing.T) {
+	latte := rgb{0xEF, 0xF1, 0xF5}
+	mocha := rgb{0x1E, 0x1E, 0x2E}
+	type probeStub int
+	const (
+		probeNone   probeStub = iota // nil: cannot ask
+		probeLight                   // answers light
+		probeDark                    // answers dark
+		probeSilent                  // ran, no answer, but read a keystroke
+	)
+	cases := []struct {
+		name           string
+		flag, env      string
+		termTheme      string
+		probe          probeStub
+		colorFGBG      string
+		wantKind       themeKind
+		wantSource     themeSource
+		wantProbeCalls int
+	}{
+		{"flag beats all", "light", "dark", "dark", probeLight, "15;0", themeLight, themeSourceFlag, 0},
+		{"flag auto is no opinion", "auto", "dark", "light", probeLight, "", themeDark, themeSourceEnv, 0},
+		{"flag garbage falls to env", "banana", "light", "", probeNone, "", themeLight, themeSourceEnv, 0},
+		{"env auto falls to TERM_THEME", "", "auto", "light", probeDark, "15;0", themeLight, themeSourceTermTheme, 0},
+		{"TERM_THEME is case-insensitive and skips the probe", "", "", "DARK", probeLight, "0;15", themeDark, themeSourceTermTheme, 0},
+		{"TERM_THEME is trimmed", "", "", " Light\t", probeDark, "", themeLight, themeSourceTermTheme, 0},
+		{"TERM_THEME auto probes", "", "", "auto", probeLight, "", themeLight, themeSourceProbe, 1},
+		{"TERM_THEME garbage probes, probe beats COLORFGBG", "", "", "system", probeDark, "0;15", themeDark, themeSourceProbe, 1},
+		{"silent probe falls to COLORFGBG", "", "", "", probeSilent, "0;15", themeLight, themeSourceColorFGBG, 1},
+		{"nil probe falls to COLORFGBG light", "", "", "", probeNone, "0;15", themeLight, themeSourceColorFGBG, 0},
+		{"nil probe falls to COLORFGBG dark", "", "", "", probeNone, "15;0", themeDark, themeSourceColorFGBG, 0},
+		{"silent probe, garbage COLORFGBG, default", "", "", "", probeSilent, "garbage", themeDark, themeSourceDefault, 1},
+		{"nothing at all", "", "", "", probeNone, "", themeDark, themeSourceDefault, 0},
+		{"auto at all three word levels falls to COLORFGBG", "AUTO", "AUTO", "AUTO", probeNone, "0;15", themeLight, themeSourceColorFGBG, 0},
+		{"answered probe beats a contradicting COLORFGBG", "", "", "", probeLight, "15;0", themeLight, themeSourceProbe, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			calls := 0
+			var probe func() themeProbeResult
+			switch c.probe {
+			case probeLight:
+				probe = func() themeProbeResult {
+					calls++
+					return themeProbeResult{kind: themeLight, color: latte, ok: true}
+				}
+			case probeDark:
+				probe = func() themeProbeResult {
+					calls++
+					return themeProbeResult{kind: themeDark, color: mocha, ok: true}
+				}
+			case probeSilent:
+				probe = func() themeProbeResult {
+					calls++
+					return themeProbeResult{ok: false, leftover: []byte("q")}
+				}
+			}
+			in := themeInputs{flag: c.flag, env: c.env, termTheme: c.termTheme, colorFGBG: c.colorFGBG}
+			res := resolveTheme(in, probe)
+			if res.kind != c.wantKind || res.source != c.wantSource {
+				t.Errorf("got %s via %s, want %s via %s", res.kind, res.source, c.wantKind, c.wantSource)
+			}
+			if calls != c.wantProbeCalls {
+				t.Errorf("probe called %d times, want %d", calls, c.wantProbeCalls)
+			}
+			if res.probeRan != (calls > 0) {
+				t.Errorf("probeRan=%v with %d calls", res.probeRan, calls)
+			}
+			if res.probedOK != (res.source == themeSourceProbe) {
+				t.Errorf("probedOK=%v but source=%s", res.probedOK, res.source)
+			}
+			if res.probedOK {
+				want := latte
+				if c.probe == probeDark {
+					want = mocha
+				}
+				if res.probed != want {
+					t.Errorf("probed colour %v, want %v", res.probed, want)
+				}
+			}
+			switch {
+			case c.probe == probeSilent && calls > 0:
+				// Keystrokes survive a probe that fell through.
+				if string(res.leftover) != "q" {
+					t.Errorf("leftover %q, want the keystroke %q", res.leftover, "q")
+				}
+			case calls == 0:
+				if res.leftover != nil {
+					t.Errorf("leftover %q from a probe that never ran", res.leftover)
+				}
+			}
+		})
+	}
+}
+
+// TestClassifyColorFGBG: rxvt/konsole's "fg;bg" or "fg;x;bg". The last field is
+// the background; 0-6 and 8 are dark, 7 and 9-15 light; everything else is no
+// opinion.
+func TestClassifyColorFGBG(t *testing.T) {
+	cases := []struct {
+		in   string
+		kind themeKind
+		ok   bool
+	}{
+		{"15;0", themeDark, true},
+		{"0;15", themeLight, true},
+		{"7;0", themeDark, true},
+		{"0;7", themeLight, true},
+		{"0;8", themeDark, true},
+		{"0;9", themeLight, true},
+		{"0;6", themeDark, true},
+		{"0;7;15", themeLight, true},
+		{"15;default;8", themeDark, true},
+		{"15;default;0", themeDark, true},
+		{"0;default;15", themeLight, true},
+		{" 0;15 ", themeLight, true},
+		{"0; 15", themeLight, true},
+		{"default;default", themeDark, false},
+		{"0;16", themeDark, false},
+		{"0;255", themeDark, false},
+		{"0;-1", themeDark, false},
+		{"0", themeDark, false},
+		{"0;1;2;3", themeDark, false},
+		{"", themeDark, false},
+		{";", themeDark, false},
+		{"0;", themeDark, false},
+		{"garbage", themeDark, false},
+	}
+	for _, c := range cases {
+		got, ok := classifyColorFGBG(c.in)
+		if ok != c.ok || (ok && got != c.kind) {
+			t.Errorf("classifyColorFGBG(%q) = (%s, %v), want (%s, %v)", c.in, got, ok, c.kind, c.ok)
+		}
+	}
+}
+
+// TestTermThemeSkipsProbe proves FR1 at the byte level: with TERM_THEME set,
+// the probe closure is never invoked, so nothing is written to the terminal
+// and the reply a would-be terminal had ready is still sitting in the pipe.
+func TestTermThemeSkipsProbe(t *testing.T) {
+	t.Setenv("TERM_THEME", "dark")
+	const latteReply = "\x1b]11;rgb:efef/f1f1/f5f5\x1b\\"
+	in := feedPipe(t, latteReply)
+	var out bytes.Buffer
+	probe := func() themeProbeResult {
+		k, c, ok, rest := probeThemeColor(&out, in, 150*time.Millisecond)
+		return themeProbeResult{kind: k, color: c, ok: ok, leftover: rest}
+	}
+	res := resolveTheme(themeInputs{termTheme: os.Getenv("TERM_THEME")}, probe)
+	if res.kind != themeDark || res.source != themeSourceTermTheme {
+		t.Fatalf("got %s via %s, want dark via TERM_THEME", res.kind, res.source)
+	}
+	if out.Len() != 0 {
+		t.Errorf("TERM_THEME set, yet %d bytes were written to the terminal: %q", out.Len(), out.String())
+	}
+	if res.leftover != nil {
+		t.Errorf("leftover %q from a probe that must not have run", res.leftover)
+	}
+	if res.probeRan {
+		t.Error("probeRan is set")
+	}
+	// The reply is unread: the pipe is readable and gives back the Latte reply
+	// intact, which it could not if the probe had consumed it.
+	ready, err := waitReadable(int(in.Fd()), time.Now().Add(50*time.Millisecond))
+	if err != nil || !ready {
+		t.Fatalf("the terminal's reply is no longer in the pipe (ready=%v err=%v)", ready, err)
+	}
+	buf := make([]byte, 64)
+	n, _ := in.Read(buf)
+	if string(buf[:n]) != latteReply {
+		t.Errorf("pipe held %q, want the untouched reply %q", buf[:n], latteReply)
+	}
 }
 
 // ── contrast ─────────────────────────────────────────────────────────────────
@@ -1067,5 +1253,379 @@ func TestOSC11ShapedInputOutsideTheWindowIsForwarded(t *testing.T) {
 					got, osc11Reply)
 			}
 		})
+	}
+}
+
+// ── resolution order: the gaps the table does not state on its own ───────────
+
+// TestThemeWord is the section-3.1 normalisation table for the three
+// word-valued inputs. Only light and dark are answers; auto, empty and garbage
+// are all one "no opinion". Without the feature, auto came back ok==true as a
+// third value (the old themeSetting), and this reports themeWord("auto") =
+// (_, true).
+func TestThemeWord(t *testing.T) {
+	cases := []struct {
+		in   string
+		kind themeKind
+		ok   bool
+	}{
+		{"light", themeLight, true},
+		{"Light", themeLight, true},
+		{" LIGHT ", themeLight, true},
+		{"dark", themeDark, true},
+		{"DARK", themeDark, true},
+		{"dark\t", themeDark, true},
+		{"auto", themeDark, false},
+		{"AUTO", themeDark, false},
+		{"", themeDark, false},
+		{"system", themeDark, false},
+		{"banana", themeDark, false},
+		{"1", themeDark, false},
+		{"lightish", themeDark, false},
+		{"light dark", themeDark, false},
+	}
+	for _, c := range cases {
+		got, ok := themeWord(c.in)
+		if ok != c.ok || (ok && got != c.kind) {
+			t.Errorf("themeWord(%q) = (%s, %v), want (%s, %v)", c.in, got, ok, c.kind, c.ok)
+		}
+	}
+}
+
+// TestResolveThemeNeverCallsProbeWhenAWordAnswered is FR1's "the probe must
+// not run" stated independently of the order table: for each word level a
+// probe that fails the test outright. Without the TERM_THEME step the third
+// case reports "probe invoked although TERM_THEME=dark answered".
+func TestResolveThemeNeverCallsProbeWhenAWordAnswered(t *testing.T) {
+	cases := []struct {
+		name string
+		in   themeInputs
+		want themeSource
+		kind themeKind
+	}{
+		{"--theme dark", themeInputs{flag: "dark"}, themeSourceFlag, themeDark},
+		{"MAGMUX_THEME=light", themeInputs{env: "light"}, themeSourceEnv, themeLight},
+		{"TERM_THEME=dark", themeInputs{termTheme: "dark"}, themeSourceTermTheme, themeDark},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			probe := func() themeProbeResult {
+				t.Errorf("probe invoked although %s answered", c.name)
+				return themeProbeResult{kind: themeLight, ok: true, leftover: []byte("q")}
+			}
+			res := resolveTheme(c.in, probe)
+			if res.kind != c.kind || res.source != c.want {
+				t.Errorf("got %s via %s, want %s via %s", res.kind, res.source, c.kind, c.want)
+			}
+			if res.probeRan {
+				t.Error("probeRan is set")
+			}
+			if res.probedOK {
+				t.Error("probedOK is set for a word-sourced resolution")
+			}
+			if res.leftover != nil {
+				t.Errorf("leftover %q from a probe that must not have run", res.leftover)
+			}
+		})
+	}
+}
+
+// TestResolveThemeDefaultSourceIsZeroValue pins the vocabulary the debug line
+// is built from, and that a zero themeResolution reads as "dark, nobody
+// answered" — which is what every &Magmux{} struct literal in this package
+// silently relies on. Without the feature the constants do not exist or the
+// strings differ, and the debug-line test could not name a source.
+func TestResolveThemeDefaultSourceIsZeroValue(t *testing.T) {
+	var zero themeResolution
+	if zero.source != themeSourceDefault {
+		t.Errorf("zero themeResolution has source %s, want default", zero.source)
+	}
+	if zero.kind != themeDark {
+		t.Errorf("zero themeResolution has kind %s, want dark", zero.kind)
+	}
+	for src, want := range map[themeSource]string{
+		themeSourceDefault:   "default",
+		themeSourceFlag:      "--theme",
+		themeSourceEnv:       "MAGMUX_THEME",
+		themeSourceTermTheme: "TERM_THEME",
+		themeSourceProbe:     "OSC 11",
+		themeSourceColorFGBG: "COLORFGBG",
+	} {
+		if got := src.String(); got != want {
+			t.Errorf("themeSource(%d).String() = %q, want %q", int(src), got, want)
+		}
+	}
+}
+
+// TestColorFGBGConsultedOnlyWhenProbeCannotAnswer is the placement rule of
+// section 3.2 on its own: a measured colour beats an index, and the index is
+// read only when the probe was skipped or came back empty. Without the
+// feature (b) and (c) report "dark via default" — an unanswered probe used to
+// be dark unconditionally — and (a) reports light via COLORFGBG if the index
+// were placed before the probe.
+func TestColorFGBGConsultedOnlyWhenProbeCannotAnswer(t *testing.T) {
+	mocha := rgb{0x2B, 0x30, 0x3B}
+	in := themeInputs{colorFGBG: "0;15"} // says light
+
+	t.Run("answered probe wins over COLORFGBG", func(t *testing.T) {
+		calls := 0
+		res := resolveTheme(in, func() themeProbeResult {
+			calls++
+			return themeProbeResult{kind: themeDark, color: mocha, ok: true}
+		})
+		if res.kind != themeDark || res.source != themeSourceProbe {
+			t.Errorf("got %s via %s, want dark via OSC 11", res.kind, res.source)
+		}
+		if calls != 1 || !res.probeRan || !res.probedOK || res.probed != mocha {
+			t.Errorf("calls=%d probeRan=%v probedOK=%v probed=%v", calls, res.probeRan, res.probedOK, res.probed)
+		}
+	})
+
+	t.Run("silent probe falls to COLORFGBG", func(t *testing.T) {
+		calls := 0
+		res := resolveTheme(in, func() themeProbeResult {
+			calls++
+			return themeProbeResult{ok: false, leftover: []byte("q")}
+		})
+		if res.kind != themeLight || res.source != themeSourceColorFGBG {
+			t.Errorf("got %s via %s, want light via COLORFGBG", res.kind, res.source)
+		}
+		if calls != 1 || !res.probeRan {
+			t.Errorf("calls=%d probeRan=%v, want the probe to have run once", calls, res.probeRan)
+		}
+		if res.probedOK {
+			t.Error("probedOK set for a probe that did not answer")
+		}
+		if string(res.leftover) != "q" {
+			t.Errorf("leftover %q, want the keystroke %q", res.leftover, "q")
+		}
+	})
+
+	t.Run("nil probe falls to COLORFGBG", func(t *testing.T) {
+		res := resolveTheme(in, nil)
+		if res.kind != themeLight || res.source != themeSourceColorFGBG {
+			t.Errorf("got %s via %s, want light via COLORFGBG", res.kind, res.source)
+		}
+		if res.probeRan || res.probedOK {
+			t.Errorf("probeRan=%v probedOK=%v with a nil probe", res.probeRan, res.probedOK)
+		}
+		if res.leftover != nil {
+			t.Errorf("leftover %q with a nil probe", res.leftover)
+		}
+	})
+}
+
+// ── debug line ───────────────────────────────────────────────────────────────
+
+// themeDebugLine assembles the line initTheme logs, from the same pieces
+// (section 4.3): "theme: <kind> via <source> (probe <state>; N bytes of
+// input preserved; background rgb:...)". The pieces are what the test owns;
+// the fully assembled line is also captured from initTheme through dbgFile
+// in TestThemeDebugLineNamesSource's last subtest.
+func themeDebugLine(res themeResolution, back rgb) string {
+	return fmt.Sprintf("theme: %s via %s (probe %s; %d bytes of input preserved; background %s)",
+		res.kind, res.source, probeState(res), len(res.leftover), xColorString(back))
+}
+
+// TestThemeDebugLineNamesSource: the line names who decided, and never says
+// the theme was not detected — "probe skipped" is a fact about the probe, not
+// about the theme. Without the feature there is no source in the line, or a
+// TERM_THEME run reads as not detected, and the must-not-contain assertions
+// report it.
+func TestThemeDebugLineNamesSource(t *testing.T) {
+	latte := rgb{0xEF, 0xF1, 0xF5}
+	cases := []struct {
+		name     string
+		res      themeResolution
+		contains []string
+	}{
+		{"dark via TERM_THEME, probe skipped",
+			themeResolution{kind: themeDark, source: themeSourceTermTheme},
+			[]string{"dark via TERM_THEME", "probe skipped", "0 bytes of input preserved"}},
+		{"light via OSC 11, probe answered, one keystroke kept",
+			themeResolution{kind: themeLight, source: themeSourceProbe, probed: latte, probedOK: true, probeRan: true, leftover: []byte("q")},
+			[]string{"light via OSC 11", "probe answered", "1 bytes of input preserved"}},
+		{"light via COLORFGBG, probe ran and did not answer",
+			themeResolution{kind: themeLight, source: themeSourceColorFGBG, probeRan: true},
+			[]string{"light via COLORFGBG", "probe no answer"}},
+		{"dark via default, probe skipped",
+			themeResolution{kind: themeDark, source: themeSourceDefault},
+			[]string{"dark via default", "probe skipped"}},
+		{"dark via default, probe ran",
+			themeResolution{kind: themeDark, source: themeSourceDefault, probeRan: true},
+			[]string{"probe no answer"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			line := themeDebugLine(c.res, latte)
+			assertThemeLine(t, line, c.contains)
+		})
+	}
+
+	// The real line, as initTheme writes it, captured through dbgFile: a
+	// headless TERM_THEME=dark run must be reported as dark via TERM_THEME
+	// with the probe skipped, and never as a theme nobody detected.
+	t.Run("initTheme writes the line through dbgFile", func(t *testing.T) {
+		t.Setenv("MAGMUX_THEME", "")
+		t.Setenv("TERM_THEME", "dark")
+		t.Setenv("COLORFGBG", "0;15")
+		defer useTheme(currentTheme)()
+
+		f, err := os.CreateTemp(t.TempDir(), "dbg")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		prev := dbgFile
+		dbgFile = f
+		defer func() { dbgFile = prev }()
+
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Close()
+		defer w.Close()
+		m := &Magmux{stdin: r, headless: true}
+		m.initTheme(int(r.Fd()))
+
+		data, err := os.ReadFile(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var line string
+		for _, l := range strings.Split(string(data), "\n") {
+			if i := strings.Index(l, "theme: "); i >= 0 {
+				line = l[i:]
+			}
+		}
+		if line == "" {
+			t.Fatalf("initTheme logged no \"theme: \" line through dbgFile; log was %q", data)
+		}
+		assertThemeLine(t, line, []string{"dark via TERM_THEME", "probe skipped", "0 bytes of input preserved"})
+	})
+}
+
+// assertThemeLine is the shared shape check for the debug line.
+func assertThemeLine(t *testing.T, line string, contains []string) {
+	t.Helper()
+	if !strings.HasPrefix(line, "theme: ") {
+		t.Errorf("line %q does not begin with \"theme: \"", line)
+	}
+	if !strings.Contains(line, "background rgb:") {
+		t.Errorf("line %q does not name the background", line)
+	}
+	for _, want := range contains {
+		if !strings.Contains(line, want) {
+			t.Errorf("line %q lacks %q", line, want)
+		}
+	}
+	for _, banned := range []string{"undetec" + "ted", "could not " + "detect"} {
+		if strings.Contains(line, banned) {
+			t.Errorf("line %q says %q; the source that answered is the whole story", line, banned)
+		}
+	}
+}
+
+// TestNoCouldNotDetectString is VC-10 run under go test rather than by a
+// one-off grep: no file in the package prints a "could not ..." detection
+// warning (the needle is split below so this file does not match itself).
+// It reports the file and line of any offender.
+func TestNoCouldNotDetectString(t *testing.T) {
+	needles := []string{"could not " + "detect", "undetec" + "ted"}
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("glob *.go: %v (%d files)", err, len(files))
+	}
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, l := range strings.Split(string(data), "\n") {
+			for _, n := range needles {
+				if strings.Contains(strings.ToLower(l), n) {
+					t.Errorf("%s:%d contains %q", f, i+1, n)
+				}
+			}
+		}
+	}
+}
+
+// ── FR7: the environment, and only the environment ───────────────────────────
+
+// TestThemeEnvReadsNoFile is VC-11 at the source level: theme.go opens no
+// file, and neither theme.go nor main.go mentions a ".env" outside a comment.
+// The files are read as TEXT for a grep, nothing more. Reports the offending
+// line if a .env loader or a file read ever lands on the theme path.
+func TestThemeEnvReadsNoFile(t *testing.T) {
+	stripComment := func(l string) string {
+		if i := strings.Index(l, "//"); i >= 0 {
+			return l[:i]
+		}
+		return l
+	}
+	for _, f := range []string{"theme.go", "main.go"} {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, l := range strings.Split(string(data), "\n") {
+			code := stripComment(l)
+			// A ".env" FILE: quoted or path-joined. (A field named env, as in
+			// in.env, is not a file.)
+			for _, needle := range []string{`".env`, `/.env`, `.env"`} {
+				if strings.Contains(code, needle) {
+					t.Errorf("%s:%d names a .env file outside a comment: %q", f, i+1, l)
+				}
+			}
+			if f != "theme.go" {
+				continue
+			}
+			for _, bad := range []string{"os.Open", "os.ReadFile", "ioutil.ReadFile", "godotenv", "bufio.NewScanner"} {
+				if strings.Contains(code, bad) {
+					t.Errorf("theme.go:%d uses %s; the theme path must read the process env only: %q", i+1, bad, l)
+				}
+			}
+			if strings.Contains(code, "TERM_THEME") || strings.Contains(code, "COLORFGBG") {
+				if !strings.Contains(code, "os.Getenv(") && !strings.Contains(code, `"`) {
+					t.Errorf("theme.go:%d reads TERM_THEME/COLORFGBG without os.Getenv: %q", i+1, l)
+				}
+			}
+		}
+	}
+}
+
+// TestThemeEnvSeamReadsProcessEnv proves FR7 positively: the seam hands back
+// the raw process environment (untrimmed — normalisation is themeWord's job),
+// and initTheme reads through the seam and nowhere else. Without the seam this
+// does not compile; with an initTheme that calls os.Getenv directly, the
+// second half reports "dark from the process env" although the seam said light.
+func TestThemeEnvSeamReadsProcessEnv(t *testing.T) {
+	t.Setenv("MAGMUX_THEME", "auto")
+	t.Setenv("TERM_THEME", " Dark ")
+	t.Setenv("COLORFGBG", "0;15")
+
+	got := themeEnv()
+	want := themeInputs{env: "auto", termTheme: " Dark ", colorFGBG: "0;15"}
+	if got != want {
+		t.Errorf("themeEnv() = %+v, want %+v", got, want)
+	}
+
+	old := themeEnv
+	themeEnv = func() themeInputs { return themeInputs{termTheme: "light"} }
+	defer func() { themeEnv = old }()
+	defer useTheme(currentTheme)()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	m := &Magmux{stdin: r, headless: true}
+	m.initTheme(int(r.Fd()))
+	if currentTheme != themeLight {
+		t.Errorf("theme is %s: initTheme read the process env (TERM_THEME=%q) instead of the seam", currentTheme, os.Getenv("TERM_THEME"))
 	}
 }

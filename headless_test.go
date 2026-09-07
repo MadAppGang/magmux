@@ -209,6 +209,13 @@ func TestInitAutoDegradesOnPipedStdin(t *testing.T) {
 	defer r.Close()
 	defer w.Close()
 
+	// init() resolves the theme, which now reads the developer's shell: a
+	// COLORFGBG left by rxvt/konsole would pick light where dark is expected.
+	t.Setenv("MAGMUX_THEME", "")
+	t.Setenv("TERM_THEME", "")
+	t.Setenv("COLORFGBG", "")
+	defer useTheme(currentTheme)()
+
 	m := &Magmux{stdin: r}
 	if err := m.init(); err != nil {
 		t.Fatalf("init with a piped stdin must succeed, got %v", err)
@@ -236,6 +243,11 @@ func TestInitHeadlessFlagIsNeverCleared(t *testing.T) {
 	}
 	defer r.Close()
 	defer w.Close()
+
+	t.Setenv("MAGMUX_THEME", "")
+	t.Setenv("TERM_THEME", "")
+	t.Setenv("COLORFGBG", "")
+	defer useTheme(currentTheme)()
 
 	m := &Magmux{stdin: r, headless: true}
 	if err := m.init(); err != nil {
@@ -305,6 +317,10 @@ func TestHeadlessSizeBounds(t *testing.T) {
 func TestHeadlessInheritsPaneGeometry(t *testing.T) {
 	t.Setenv("LINES", "17")
 	t.Setenv("COLUMNS", "63")
+	t.Setenv("MAGMUX_THEME", "")
+	t.Setenv("TERM_THEME", "")
+	t.Setenv("COLORFGBG", "")
+	defer useTheme(currentTheme)()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)

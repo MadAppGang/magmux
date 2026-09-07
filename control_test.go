@@ -1157,7 +1157,7 @@ func TestControlPanelDump(t *testing.T) {
 	if os.Getenv("MAGMUX_PANEL_DUMP") == "" {
 		t.Skip("set MAGMUX_PANEL_DUMP=1 to print a frame for screenshotting")
 	}
-	if themeSetting("", os.Getenv("MAGMUX_THEME")) == "light" {
+	if k, ok := themeWord(os.Getenv("MAGMUX_THEME")); ok && k == themeLight {
 		defer useTheme(themeLight)()
 	}
 	// No padding and no background: the panel is judged on the terminal it is

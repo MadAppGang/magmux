@@ -2933,8 +2933,11 @@ type Magmux struct {
 	// worse than one that lingers.
 	autoCloseAfter time.Duration
 	closeAt        time.Time // when the armed countdown fires; zero if not armed
-	// themePref is --theme ("", "auto", "light" or "dark"). Empty falls back
-	// to MAGMUX_THEME, which falls back to auto-detection. See theme.go.
+	// themePref is --theme ("", "auto", "light" or "dark"). Only light and
+	// dark are answers; "" and "auto" are no opinion and fall through, in
+	// order, to MAGMUX_THEME, TERM_THEME, the OSC 11 probe, COLORFGBG and then
+	// dark. (Earlier, `--theme auto` beat a set MAGMUX_THEME and probed; it no
+	// longer does — unset the variable instead.) See theme.go.
 	themePref string
 	// pendingInput is input that arrived DURING startup and has not been
 	// handled yet — bytes the OSC 11 theme probe read off stdin that were not
@@ -2956,9 +2959,11 @@ type Magmux struct {
 	// blocked reading it.
 	stdin *os.File
 	// themeAskedAt is when the OSC 11 background query was written to the
-	// terminal, or the zero time if it never was (--theme/MAGMUX_THEME said
-	// which palette to use, or stdin is not a tty). It opens the window in
-	// which inputLoop swallows a late reply; see themeReplyWindow.
+	// terminal, or the zero time if it never was (--theme, MAGMUX_THEME or
+	// TERM_THEME said which palette to use, or stdin is not a tty, or magmux is
+	// headless). It opens the window in which inputLoop swallows a late reply;
+	// see themeReplyWindow. COLORFGBG cannot set it: that source is consulted
+	// only after the probe was skipped or went unanswered.
 	//
 	// Same discipline as pendingInput: written in init(), read by inputLoop on
 	// the same goroutine, and nothing else touches it.
@@ -3557,9 +3562,10 @@ func (m *Magmux) init() error {
 		// turns "too small to be usable" into an error rather than that silence.
 		m.rows, m.cols = headlessSize()
 		m.quit = make(chan struct{})
-		// Still called: --theme / MAGMUX_THEME still choose a palette, and the
-		// palette is what children are told about the background. Only the PROBE
-		// is skipped, by initTheme's own guard.
+		// Still called: --theme / MAGMUX_THEME / TERM_THEME / COLORFGBG still
+		// choose a palette, and the palette is what children are told about
+		// the background. Only the PROBE is skipped, by initTheme's own guard,
+		// which hands resolveTheme a nil probe so the walk reaches COLORFGBG.
 		m.initTheme(fd)
 		return nil
 	}
@@ -3594,50 +3600,72 @@ func (m *Magmux) init() error {
 	return nil
 }
 
-// initTheme resolves --theme / MAGMUX_THEME, probing the terminal only when
-// neither says. Any keystrokes the probe swallowed are parked in
-// m.pendingInput for inputLoop; see the field's comment for why that matters.
+// initTheme resolves the palette once, in the order stated in theme.go:
+// --theme, MAGMUX_THEME, TERM_THEME, the OSC 11 probe, COLORFGBG, dark. It
+// gathers the inputs and decides whether a probe is POSSIBLE; the walk itself
+// is resolveTheme, and the write half is applyTheme. Any keystrokes the probe
+// swallowed are parked in m.pendingInput for inputLoop; see the field's
+// comment for why that matters.
 func (m *Magmux) initTheme(fd int) {
-	pref := themeSetting(m.themePref, os.Getenv("MAGMUX_THEME"))
-	// The colour the probe read, if it read one. It outlives the classification
-	// because children ask the same question magmux just asked, and are owed the
-	// real answer rather than the palette's stand-in for it.
-	var probed rgb
-	var probedOK bool
-	kind, leftover := resolveTheme(pref, func() (themeKind, []byte) {
-		// Nothing to ask and nobody to answer: a piped stdin has no
-		// background colour, and a dumb terminal has no OSC at all. Both
-		// would otherwise cost every run the probe timeout for nothing.
-		//
-		// m.headless is the third case and is NOT implied by the first two:
-		// --headless forced from a real tty passes term.IsTerminal, and the
-		// probe writes its query to FD 0. That is a byte on the terminal from
-		// a mode whose whole contract is that it emits none, which is why
-		// this guard is listed as its own site rather than folded into the
-		// stdout enumeration.
-		if m.headless || !term.IsTerminal(fd) || os.Getenv("TERM") == "dumb" {
-			return themeDark, nil
+	in := themeEnv()
+	in.flag = m.themePref
+	// Nothing to ask and nobody to answer: a piped stdin has no background
+	// colour, and a dumb terminal has no OSC at all. Both would otherwise cost
+	// every run the probe timeout for nothing.
+	//
+	// m.headless is the third case and is NOT implied by the first two:
+	// --headless forced from a real tty passes term.IsTerminal, and the probe
+	// writes its query to FD 0. That is a byte on the terminal from a mode
+	// whose whole contract is that it emits none, which is why this guard is
+	// listed as its own site rather than folded into the stdout enumeration.
+	//
+	// The guard is OUTSIDE the closure, so "cannot ask" is a nil probe and the
+	// walk carries on to COLORFGBG instead of stopping at dark.
+	var probe func() themeProbeResult
+	if !(m.headless || !term.IsTerminal(fd) || os.Getenv("TERM") == "dumb") {
+		probe = func() themeProbeResult {
+			// Recorded before the probe writes, and only on the path that
+			// actually writes: a word-valued answer (--theme, MAGMUX_THEME,
+			// TERM_THEME) never asks the terminal anything, so inputLoop must
+			// not then go looking for a reply.
+			m.themeAskedAt = time.Now()
+			k, c, ok, rest := detectThemeColor(m.stdinFile(), themeProbeTimeout)
+			return themeProbeResult{kind: k, color: c, ok: ok, leftover: rest}
 		}
-		// Recorded before the probe writes, and only on the path that
-		// actually writes: an explicit --theme never asks the terminal
-		// anything, so inputLoop must not then go looking for an answer.
-		m.themeAskedAt = time.Now()
-		k, c, ok, rest := detectThemeColor(m.stdinFile(), themeProbeTimeout)
-		probed, probedOK = c, ok
-		return k, rest
-	})
-	setTheme(kind)
+	}
+	m.applyTheme(resolveTheme(in, probe))
+}
+
+// applyTheme is initTheme's write half, split out so a test can run it on a
+// resolution it built by hand and then ask a pane what colour the terminal is.
+func (m *Magmux) applyTheme(res themeResolution) {
+	setTheme(res.kind)
 	// After setTheme, which resets the reported colours to the palette's
-	// assumptions. An explicit --theme never probes, so it keeps those — a
-	// coherent guess, which is all a child needs.
-	if probedOK {
-		setDetectedBackground(probed)
+	// assumptions. Only a probe that answered carries a measured colour; every
+	// other source keeps the palette's stand-in — a coherent guess, which is
+	// all a child needs.
+	if res.probedOK {
+		setDetectedBackground(res.probed)
 	}
-	m.pendingInput = append(m.pendingInput, leftover...)
+	m.pendingInput = append(m.pendingInput, res.leftover...)
 	if dbgFile != nil {
-		fmt.Fprintf(dbgFile, "theme: pref=%s -> %s (%d bytes of input preserved, background %s)\n",
-			pref, kind, len(leftover), xColorString(termBack))
+		// Names the source that answered. "probe skipped" is a statement about
+		// the probe, never about the theme: when TERM_THEME decided, the line
+		// says so and claims nothing about detection.
+		fmt.Fprintf(dbgFile, "theme: %s via %s (probe %s; %d bytes of input preserved; background %s)\n",
+			res.kind, res.source, probeState(res), len(res.leftover), xColorString(termBack))
 	}
+}
+
+// probeState is the debug line's word for what the OSC 11 step did.
+func probeState(res themeResolution) string {
+	switch {
+	case !res.probeRan:
+		return "skipped"
+	case res.probedOK:
+		return "answered"
+	}
+	return "no answer"
 }
 
 func (m *Magmux) restore() {
@@ -7898,7 +7926,11 @@ func main() {
 			fmt.Println("  --sock-dir DIR  Bind the IPC socket in DIR instead of /tmp. Ignored with")
 			fmt.Println("            a message if DIR is missing, is not a directory, or would make")
 			fmt.Println("            the socket path too long for the OS.")
-			fmt.Println("  --theme MODE  light | dark | auto (default: auto, via OSC 11)")
+			fmt.Println("  --theme MODE  light | dark | auto (default: auto). Resolution order:")
+			fmt.Println("            --theme, MAGMUX_THEME, TERM_THEME, OSC 11 probe (interactive")
+			fmt.Println("            tty only), COLORFGBG, then dark. auto means \"no opinion here\":")
+			fmt.Println("            no CLI value forces the probe over a set MAGMUX_THEME; unset")
+			fmt.Println("            the variable instead.")
 			fmt.Println("  -v        Show version")
 			fmt.Println("  -h        Show this help")
 			fmt.Println()
@@ -7976,10 +8008,16 @@ func main() {
 			fmt.Println("    }]}]}}")
 			fmt.Println()
 			fmt.Println("Environment:")
-			fmt.Println("  MAGMUX_THEME    light | dark | auto (default: auto). magmux asks the")
-			fmt.Println("                  terminal for its background colour (OSC 11) and picks a")
-			fmt.Println("                  palette; set this when a terminal answers wrongly.")
-			fmt.Println("                  --theme wins over it.")
+			fmt.Println("  MAGMUX_THEME    light | dark | auto. Second in the order: --theme beats it,")
+			fmt.Println("                  and it beats TERM_THEME, the OSC 11 probe and COLORFGBG.")
+			fmt.Println("                  Set it when a terminal answers OSC 11 wrongly.")
+			fmt.Println("  TERM_THEME      light | dark, as set by the terminal or shell. Third in the")
+			fmt.Println("                  order; when it answers, magmux does not probe the terminal")
+			fmt.Println("                  at all. Any other value (including auto) is ignored without")
+			fmt.Println("                  a warning: the variable is not magmux's to police.")
+			fmt.Println("  COLORFGBG       fg;bg or fg;x;bg colour indexes (rxvt, konsole, iTerm2).")
+			fmt.Println("                  Consulted only when the probe was skipped or did not answer.")
+			fmt.Println("                  Background 0-6 or 8 is dark, 7 or 9-15 is light.")
 			fmt.Println("  MAGMUX_SCROLLBACK  Lines of history kept per pane (default: 1000, 0 off).")
 			fmt.Println("                  Only the primary screen records; the ring fills lazily,")
 			fmt.Println("                  so a pane that never scrolls costs nothing.")

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // testMagmuxBin is the path to a magmux binary built once for the whole test
@@ -1647,5 +1650,349 @@ func TestClaudeCodeOpeningSequenceRendersEndToEnd(t *testing.T) {
 	}
 	if lines := strings.Split(text, "\n"); len(lines) < 3 {
 		t.Fatalf("pane capture has %d line(s), want at least 3:\n%q", len(lines), text)
+	}
+}
+
+// TestTermThemeSkipsProbeOnATTY is FR1 at the initTheme level, on a real pty
+// where term.IsTerminal is true and the probe WOULD run: TERM_THEME=dark must
+// select dark against a terminal that would answer light, write no OSC 11
+// query, and leave themeAskedAt zero so inputLoop never opens its
+// late-reply window.
+func TestTermThemeSkipsProbeOnATTY(t *testing.T) {
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Skipf("openPTY: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+
+	t.Setenv("TERM_THEME", "dark")
+	t.Setenv("MAGMUX_THEME", "")
+	t.Setenv("COLORFGBG", "")
+	t.Setenv("TERM", "xterm")
+	defer useTheme(currentTheme)()
+
+	// A terminal that answers light the moment it is asked anything.
+	got := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, _ := master.Read(buf)
+		if n > 0 {
+			master.Write([]byte("\x1b]11;rgb:efef/f1f1/f5f5\x1b\\"))
+		}
+		got <- append([]byte(nil), buf[:n]...)
+	}()
+
+	m := &Magmux{stdin: slave}
+	m.initTheme(int(slave.Fd()))
+
+	if currentTheme != themeDark {
+		t.Errorf("theme is %s, want dark from TERM_THEME", currentTheme)
+	}
+	if !m.themeAskedAt.IsZero() {
+		t.Error("themeAskedAt is set: the probe wrote to the terminal despite TERM_THEME")
+	}
+	if len(m.pendingInput) != 0 {
+		t.Errorf("pendingInput %q from a probe that must not have run", m.pendingInput)
+	}
+	select {
+	case b := <-got:
+		t.Errorf("the terminal received %q; TERM_THEME must skip the probe entirely", b)
+	case <-time.After(200 * time.Millisecond):
+		// Nothing arrived at the terminal. Unblock the reader.
+		slave.Write([]byte("x"))
+	}
+}
+
+// TestOSCColorQueryFollowsResolvedTheme is the consistency rule: whichever
+// source picked the palette, a child that asks OSC 11 is told a background
+// that classifies to the same theme — the measured colour when the probe
+// answered, the palette's assumedBack otherwise.
+func TestOSCColorQueryFollowsResolvedTheme(t *testing.T) {
+	probedDark := rgb{0x2B, 0x30, 0x3B}
+	latte := rgb{0xEF, 0xF1, 0xF5}
+	cases := []struct {
+		name       string
+		in         themeInputs
+		probe      func() themeProbeResult
+		wantKind   themeKind
+		wantSource themeSource
+	}{
+		{"TERM_THEME=light", themeInputs{termTheme: "light"}, nil, themeLight, themeSourceTermTheme},
+		// A terminal that WOULD answer light: the probe must never be reached,
+		// and no stray measured colour may leak into the child's answer.
+		{"TERM_THEME=dark", themeInputs{termTheme: "dark"}, func() themeProbeResult {
+			return themeProbeResult{kind: themeLight, color: latte, ok: true}
+		}, themeDark, themeSourceTermTheme},
+		{"COLORFGBG=0;15", themeInputs{colorFGBG: "0;15"}, nil, themeLight, themeSourceColorFGBG},
+		{"probe answered dark", themeInputs{}, func() themeProbeResult {
+			return themeProbeResult{kind: themeDark, color: probedDark, ok: true}
+		}, themeDark, themeSourceProbe},
+		{"default", themeInputs{}, nil, themeDark, themeSourceDefault},
+		{"--theme light beats TERM_THEME=dark", themeInputs{flag: "light", termTheme: "dark"}, nil, themeLight, themeSourceFlag},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			defer useTheme(currentTheme)()
+			res := resolveTheme(c.in, c.probe)
+			if res.kind != c.wantKind || res.source != c.wantSource {
+				t.Fatalf("resolved %s via %s, want %s via %s", res.kind, res.source, c.wantKind, c.wantSource)
+			}
+			if res.source != themeSourceProbe && (res.probedOK || res.probeRan) {
+				t.Fatalf("%s answered, yet probeRan=%v probedOK=%v", res.source, res.probeRan, res.probedOK)
+			}
+			m := &Magmux{}
+			m.applyTheme(res)
+
+			p, r := queryPane(t)
+			p.vt.write([]byte("\x1b]11;?\x07"))
+			reply := readReply(t, r)
+			body := strings.TrimSuffix(strings.TrimPrefix(reply, "\x1b]11;"), "\x07")
+			if body == reply {
+				t.Fatalf("child was answered %q, not an OSC 11 reply", reply)
+			}
+			kind, c11, ok := classifyOSC11(body)
+			if !ok {
+				t.Fatalf("child was answered an unparseable background %q", body)
+			}
+			if kind != res.kind {
+				t.Errorf("child was told a %s background %q; magmux resolved %s via %s", kind, body, res.kind, res.source)
+			}
+			want := pal.assumedBack
+			if res.probedOK {
+				want = res.probed
+			}
+			if c11 != want {
+				t.Errorf("child was told %v, want %v (probedOK=%v)", c11, want, res.probedOK)
+			}
+			// The light palette's assumedBack IS Latte, so "no stray measured
+			// colour" is only distinguishable when a probe stub stood ready to
+			// answer Latte and a word said dark.
+			if c.probe != nil && !res.probedOK && c11 == latte {
+				t.Errorf("child was told the Latte colour %v although the probe was not the source (%s)", c11, res.source)
+			}
+			if c, ok := parseXColor(body); !ok || c != c11 {
+				t.Errorf("parseXColor(%q) = %v,%v; classifyOSC11 saw %v", body, c, ok, c11)
+			}
+		})
+	}
+}
+
+// TestTermThemeAutoStillProbesOnATTY is the converse of
+// TestTermThemeSkipsProbeOnATTY: a TERM_THEME that is auto or a word magmux
+// does not know is no opinion, so on a real pty the probe runs exactly as if
+// the variable were unset, and a terminal that answers light gets light.
+// Without the feature — any non-empty TERM_THEME treated as an answer or as
+// dark — the terminal never sees "\x1b]11;?" and currentTheme is dark.
+//
+// The no-warning half of FR2 is not asserted here: initTheme has no capturable
+// stderr, and resolveTheme is pure, so the rule holds by construction.
+func TestTermThemeAutoStillProbesOnATTY(t *testing.T) {
+	for _, val := range []string{"auto", "solarized"} {
+		t.Run("TERM_THEME="+val, func(t *testing.T) {
+			master, slave, err := openPTY()
+			if err != nil {
+				t.Skipf("openPTY: %v", err)
+			}
+			defer master.Close()
+			defer slave.Close()
+
+			t.Setenv("TERM_THEME", val)
+			t.Setenv("MAGMUX_THEME", "")
+			t.Setenv("COLORFGBG", "15;0") // says dark: an answered probe must beat it
+			t.Setenv("TERM", "xterm")
+			defer useTheme(currentTheme)()
+
+			// init() puts the terminal in raw mode before initTheme runs; a
+			// canonical-mode slave would hold the reply until a newline.
+			raw, err := term.MakeRaw(int(slave.Fd()))
+			if err != nil {
+				t.Skipf("MakeRaw: %v", err)
+			}
+			defer term.Restore(int(slave.Fd()), raw)
+
+			// A terminal that answers light the moment it is asked.
+			saw := make(chan []byte, 1)
+			go func() {
+				var got []byte
+				buf := make([]byte, 64)
+				deadline := time.Now().Add(3 * time.Second)
+				for time.Now().Before(deadline) && !bytes.Contains(got, []byte("\x1b]11;?")) {
+					n, err := master.Read(buf)
+					got = append(got, buf[:n]...)
+					if err != nil {
+						break
+					}
+				}
+				if bytes.Contains(got, []byte("\x1b]11;?")) {
+					master.Write([]byte("\x1b]11;rgb:efef/f1f1/f5f5\x1b\\"))
+				}
+				saw <- got
+			}()
+
+			m := &Magmux{stdin: slave}
+			m.initTheme(int(slave.Fd()))
+
+			// If nothing was written the reader is still blocked; unblock it.
+			var got []byte
+			select {
+			case got = <-saw:
+			case <-time.After(500 * time.Millisecond):
+				slave.Write([]byte("x"))
+				got = <-saw
+			}
+			if !bytes.Contains(got, []byte("\x1b]11;?")) {
+				t.Errorf("terminal received %q; TERM_THEME=%q is no opinion and the probe must run", got, val)
+			}
+			if currentTheme != themeLight {
+				t.Errorf("theme is %s, want light from the terminal's OSC 11 reply", currentTheme)
+			}
+			if m.themeAskedAt.IsZero() {
+				t.Error("themeAskedAt is zero although the probe ran")
+			}
+		})
+	}
+}
+
+// TestColorFGBGHeadlessEndToEnd is the only place COLORFGBG is proven through
+// the real os.Getenv path: headless, the probe is nil, and the index the
+// shell inherited from rxvt/konsole decides. Without the feature headless
+// always resolved to dark and the first subtest reports "theme is dark".
+func TestColorFGBGHeadlessEndToEnd(t *testing.T) {
+	for _, c := range []struct {
+		colorFGBG string
+		want      themeKind
+	}{
+		{"0;15", themeLight},
+		{"15;0", themeDark},
+		{"", themeDark},
+	} {
+		t.Run("COLORFGBG="+c.colorFGBG, func(t *testing.T) {
+			t.Setenv("MAGMUX_THEME", "")
+			t.Setenv("TERM_THEME", "")
+			t.Setenv("COLORFGBG", c.colorFGBG)
+			defer useTheme(currentTheme)()
+
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			defer w.Close()
+
+			m := &Magmux{stdin: r, headless: true}
+			m.initTheme(int(r.Fd()))
+			if currentTheme != c.want {
+				t.Errorf("theme is %s, want %s with COLORFGBG=%q headless", currentTheme, c.want, c.colorFGBG)
+			}
+			if !m.themeAskedAt.IsZero() {
+				t.Error("themeAskedAt is set: a headless magmux probed its stdin")
+			}
+			if len(m.pendingInput) != 0 {
+				t.Errorf("pendingInput %q from a probe that must not have run", m.pendingInput)
+			}
+		})
+	}
+}
+
+// TestApplyThemeResetsProbedBackground: applyTheme must be a reset as well as
+// a set. A probed light resolution leaves the measured colour in termBack; a
+// later word-sourced dark resolution in the same process must answer children
+// with the dark palette's assumedBack, not the stale measurement. Without the
+// reset (applyTheme only calling setDetectedBackground when probedOK) the
+// second query is answered with Latte.
+func TestApplyThemeResetsProbedBackground(t *testing.T) {
+	defer useTheme(currentTheme)()
+	latte := rgb{0xEF, 0xF1, 0xF5}
+
+	m := &Magmux{}
+	m.applyTheme(themeResolution{kind: themeLight, source: themeSourceProbe, probed: latte, probedOK: true, probeRan: true})
+	if got := queryBackground(t); got != latte {
+		t.Fatalf("after a probed light resolution the child is told %v, want the measured %v", got, latte)
+	}
+
+	m.applyTheme(themeResolution{kind: themeDark, source: themeSourceTermTheme})
+	got := queryBackground(t)
+	if got == latte {
+		t.Fatalf("after TERM_THEME=dark the child is still told the probed Latte colour %v", got)
+	}
+	if got != pal.assumedBack {
+		t.Errorf("child is told %v, want the dark palette's assumedBack %v", got, pal.assumedBack)
+	}
+	if k, _, ok := classifyOSC11(xColorString(got)); !ok || k != themeDark {
+		t.Errorf("child's background %v classifies as %s, want dark", got, k)
+	}
+}
+
+// queryBackground asks a fresh pane OSC 11 and returns the colour magmux
+// answered with.
+func queryBackground(t *testing.T) rgb {
+	t.Helper()
+	p, r := queryPane(t)
+	p.vt.write([]byte("\x1b]11;?\x07"))
+	reply := readReply(t, r)
+	body := strings.TrimSuffix(strings.TrimPrefix(reply, "\x1b]11;"), "\x07")
+	c, ok := parseXColor(body)
+	if !ok {
+		t.Fatalf("child was answered %q, not an OSC 11 colour", reply)
+	}
+	return c
+}
+
+// TestHelpDocumentsThemeEnvironment is FR8 / VC-9 against the built binary:
+// TERM_THEME and COLORFGBG are listed under Environment, and the --theme
+// paragraph states the full order in order and tells the user to unset
+// MAGMUX_THEME rather than expect a CLI value to override it. Without the
+// feature neither variable appears in -h.
+func TestHelpDocumentsThemeEnvironment(t *testing.T) {
+	bin := magmuxBinForTest(t)
+	out, err := exec.Command(bin, "-h").CombinedOutput()
+	if err != nil {
+		t.Fatalf("-h exited non-zero: %v\n%s", err, out)
+	}
+	help := string(out)
+
+	// Environment section: from the "Environment" header to the next
+	// unindented "Header:" line, or the end of the text.
+	envAt := strings.Index(help, "\nEnvironment")
+	if envAt < 0 {
+		t.Fatalf("-h has no Environment section:\n%s", help)
+	}
+	section := help[envAt+1:]
+	for i, l := range strings.Split(section, "\n") {
+		if i > 0 && len(l) > 0 && l[0] != ' ' && l[0] != '\t' && strings.HasSuffix(strings.TrimSpace(l), ":") {
+			section = strings.Join(strings.Split(section, "\n")[:i], "\n")
+			break
+		}
+	}
+	for _, v := range []string{"TERM_THEME", "COLORFGBG"} {
+		if !strings.Contains(section, "\n  "+v) {
+			t.Errorf("%s is not listed under Environment; that section reads:\n%s", v, section)
+		}
+	}
+
+	// The --theme paragraph: from "--theme" to the next option ("  -v").
+	themeAt := strings.Index(help, "  --theme")
+	if themeAt < 0 {
+		t.Fatalf("-h has no --theme option:\n%s", help)
+	}
+	para := help[themeAt:]
+	if end := strings.Index(para, "\n  -"); end >= 0 {
+		para = para[:end]
+	}
+	// Sequential search: each word must appear AFTER the previous one. ("dark"
+	// also appears in "light | dark | auto", so a first-occurrence index
+	// would not prove the order sentence.)
+	pos := 0
+	for _, word := range []string{"MAGMUX_THEME", "TERM_THEME", "OSC 11", "COLORFGBG", "dark"} {
+		at := strings.Index(para[pos:], word)
+		if at < 0 {
+			t.Errorf("--theme help does not name %s after the previous step (the order is MAGMUX_THEME, TERM_THEME, OSC 11, COLORFGBG, dark):\n%s", word, para)
+			break
+		}
+		pos += at + len(word)
+	}
+	if !strings.Contains(para, "unset") {
+		t.Errorf("--theme help does not tell the user to unset MAGMUX_THEME:\n%s", para)
 	}
 }
