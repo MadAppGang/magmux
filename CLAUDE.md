@@ -650,14 +650,24 @@ build time via `-X main.Version={{.Version}}`, so **the tag is the version**.
 `magmux --version` on a snapshot build reports `X.Y.Z-SNAPSHOT-<sha>`, which is
 how to tell a real release binary from a local one.
 
-Known debt: `.goreleaser.yml` uses TWO deprecated keys — `brews` and
-`archives.format` — so `goreleaser check` exits 2 while `goreleaser release`
-still succeeds. CI pins `version: "~> v2"`, which floats, so the day GoReleaser
-removes either one, releases break with no prior warning and this note is the
-only warning anyone gets. The migrations are `brews` → `homebrew_casks` and
-`archives.format` → `archives.formats: [tar.gz]`. Run `goreleaser check` before
-trusting this list: it is the thing that knows, and it will name a third key the
-day one appears.
+Known debt, and it is a V3-UPGRADE BLOCKER rather than a ticking one:
+`.goreleaser.yml` uses two deprecated keys, `brews` (deprecated v2.10/v2.16) and
+`archives.format` (v2.6). `goreleaser check` exits 2 on them while `goreleaser
+release` succeeds and has done for several releases, v0.10.0 and v0.11.0
+included.
+
+It cannot break on its own. GoReleaser removes deprecated options **only on
+major versions**, and CI pins `version: "~> v2"` — latest v2.x, which never
+reaches v3. So the pin is the protection, not the exposure. The failure mode is
+narrow and loud: whoever bumps that pin to `~> v3` must migrate both keys in the
+same change, or the first release after the bump fails immediately. The
+migrations are `brews` → `homebrew_casks` and `archives.format` →
+`archives.formats: [tar.gz]`.
+
+The practical cost until then is that `goreleaser check` cannot be used as a CI
+gate, because it exits non-zero on a config that releases fine. Run it by hand
+before trusting this list: it is the thing that knows, and it will name a third
+key the day one appears.
 
 ## VT Parser Coverage
 
