@@ -23,7 +23,10 @@ builds:
 
 archives:
   - id: magmux
-    format: tar.gz
+    # `formats` (plural, a list) replaces the deprecated singular `format`.
+    # A pure rename: the artifact name, extension and contents are unchanged,
+    # so every published checksum and every Homebrew url keeps its shape.
+    formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
