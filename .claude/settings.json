@@ -19,10 +19,9 @@
     "kanban@magus": "1.6.0",
     "dev@magus": "6.0.1",
     "claudish@magus": "2.0.1",
-    "go@magus": "0.1.2",
+    "go@magus": "0.1.3",
     "statusline@magus": "3.0.0",
-    "setup@magus": "1.1.1",
-    "style@magus": "1.0.0"
+    "setup@magus": "1.2.1"
   },
   "outputStyle": "composed"
 }
