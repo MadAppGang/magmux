@@ -664,10 +664,18 @@ repo and not here.
 
 Two consequences worth knowing before touching this again:
 
-- **The `postflight` quarantine hook is load-bearing.** Measured, not assumed:
-  installing the cask without it leaves `com.apple.quarantine` on the binary,
-  and `magmux --version` prints nothing and exits — Gatekeeper kills it while
-  `brew install` still reports success. Homebrew warns that `postflight` is
+- **The `postflight` quarantine hook is load-bearing, and it is the cask's
+  fault, not Go's or macOS's.** Homebrew quarantines whatever it downloads —
+  the cached tarball carries `com.apple.quarantine` before extraction — and
+  CASKS then propagate it onto the payload (`Quarantine.propagate`,
+  `cask/download.rb:129`), which formulas never do; every call site is under
+  `cask/`. Gatekeeper enforces the attribute on any Mach-O executable, `.app`
+  bundle or not, and refuses it because the binary is unsigned. Measured, not
+  assumed: installing the cask without the hook leaves the attribute set, and
+  `magmux --version` prints nothing and exits while `brew install` still
+  reports success. The permanent fix is signing + notarizing in CI, which
+  needs a paid Apple Developer account; until then the hook is the whole of
+  the mitigation. Homebrew warns that `postflight` is
   deprecated in favour of `postflight_steps`; that string comes from
   GoReleaser's template, so it is theirs to fix, and a visible warning is the
   better half of that trade.

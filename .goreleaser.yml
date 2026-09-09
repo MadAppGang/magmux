@@ -71,8 +71,21 @@ homebrew_casks:
     hooks:
       post:
         install: |
-          # LOAD-BEARING, and measured rather than assumed. The binaries are
-          # not signed or notarized, so macOS quarantines them on download.
+          # LOAD-BEARING, and measured rather than assumed.
+          #
+          # The quarantine is not something a Go binary attracts, and it is
+          # nothing to do with .app bundles — Gatekeeper enforces
+          # com.apple.quarantine on any Mach-O executable. Two separate steps
+          # produce it, and only the second is ours:
+          #   1. Homebrew quarantines whatever it DOWNLOADS. The tarball in
+          #      ~/Library/Caches/Homebrew/downloads already carries the
+          #      attribute before anything is extracted.
+          #   2. CASKS then copy it onto the extracted payload
+          #      (Quarantine.propagate, cask/download.rb:129). FORMULAS never
+          #      call it — every call site is under cask/. That difference is
+          #      the whole reason this hook did not exist before v0.12.0.
+          # Being unsigned is not why the attribute is applied; it is why
+          # Gatekeeper then REFUSES the quarantined file.
           # Installing the cask with this hook removed, on a real machine:
           # com.apple.quarantine was set on the staged binary and
           # `magmux --version` printed NOTHING and exited — Gatekeeper killed
