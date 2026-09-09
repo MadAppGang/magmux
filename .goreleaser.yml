@@ -40,20 +40,52 @@ changelog:
       - "^test:"
       - "^ci:"
 
-brews:
+# Casks, not formulas. GoReleaser deprecated `brews` because the formulas it
+# generated were a hack: they declared a source build and then installed a
+# pre-compiled binary. That was the only way to reach Linuxbrew when it was
+# written; Homebrew has shipped a Linux Caskroom since
+# (Library/Homebrew/extend/os/linux/cask/caskroom.rb), so a cask now covers
+# both platforms and is what a downloaded binary should have been all along.
+#
+# This MOVES the artifact in the tap, Formula/magmux.rb -> Casks/magmux.rb.
+# Anyone who installed the old formula is migrated by tap_migrations.json in
+# the tap repository; without that file their `brew upgrade` would silently
+# find nothing and leave them pinned forever.
+#
+# One capability is lost and is not replaceable: casks have no `test` stanza,
+# so `brew test magmux` no longer runs `magmux --version`. The formula's test
+# was itself the subject of a fixed bug, so it is worth saying plainly that
+# nothing now checks the published binary from Homebrew's side. The release
+# pipeline's own smoke test is the remaining check.
+homebrew_casks:
   - name: magmux
+    binaries:
+      - magmux
     repository:
       owner: MadAppGang
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    directory: Formula
+    directory: Casks
     homepage: https://github.com/MadAppGang/magmux
     description: Minimal terminal multiplexer written in Go. Zero third-party dependencies.
-    license: MIT
-    install: |
-      bin.install "magmux"
-    test: |
-      # No expected-status argument: `magmux --version` exits 0. The formula
-      # used to pass 1 here, so `brew test magmux` failed against every release
-      # that ever shipped — shell_output raises when the status does not match.
-      assert_match version.to_s, shell_output("#{bin}/magmux --version 2>&1")
+    hooks:
+      post:
+        install: |
+          # LOAD-BEARING, and measured rather than assumed. The binaries are
+          # not signed or notarized, so macOS quarantines them on download.
+          # Installing the cask with this hook removed, on a real machine:
+          # com.apple.quarantine was set on the staged binary and
+          # `magmux --version` printed NOTHING and exited — Gatekeeper killed
+          # it silently, which is the worst shape a failure can take because
+          # `brew install` still reported success. With the hook, the attribute
+          # is absent and the binary runs. The old formula sidestepped this
+          # entirely by using bin.install on an already-extracted file.
+          #
+          # GoReleaser renders this as Homebrew's `postflight`, which Homebrew
+          # now warns is deprecated in favour of `postflight_steps`. That
+          # warning is GoReleaser's template to fix, not ours, and it is a
+          # warning rather than a failure — removing the hook to silence it
+          # would trade a visible warning for a silent broken install.
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/magmux"]
+          end

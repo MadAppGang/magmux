@@ -650,32 +650,31 @@ build time via `-X main.Version={{.Version}}`, so **the tag is the version**.
 `magmux --version` on a snapshot build reports `X.Y.Z-SNAPSHOT-<sha>`, which is
 how to tell a real release binary from a local one.
 
-Known debt: ONE deprecated GoReleaser key remains, `brews`. `archives.format`
-was renamed to `archives.formats: [tar.gz]` after v0.11.0 — a pure rename,
-verified to produce byte-identical artifact names and formula URLs.
+Homebrew ships a CASK, not a formula, since v0.12.0. `goreleaser check` is
+clean — no deprecated keys remain, so it CAN now be used as a CI gate.
 
-It cannot break on its own. GoReleaser removes deprecated options **only on
-major versions**, and CI pins `version: "~> v2"` — latest v2.x, which never
-reaches v3. The pin is the protection, not the exposure. The failure mode is
-narrow and loud: whoever bumps that pin to `~> v3` must migrate `brews` in the
-same change, or the first release after the bump fails immediately.
+The move was not a rename. It changed the artifact and its location in the tap
+(`Formula/magmux.rb` -> `Casks/magmux.rb`), and three things in
+`MadAppGang/homebrew-tap` had to change together: the cask was added, the old
+formula deleted, and `tap_migrations.json` added mapping `magmux` to
+`madappgang/tap` so an existing `brew upgrade` finds the cask instead of
+silently finding nothing. GoReleaser writes the cask on each release; it does
+NOT maintain the other two, so they are one-time state that lives in the tap
+repo and not here.
 
-**`brews` → `homebrew_casks` is NOT a rename, and that is why it is still here.**
-It changes the artifact from a Formula to a Cask, which moves it in the tap
-(`Formula/magmux.rb` → `Casks/magmux.rb`). Anyone who already ran
-`brew install madappgang/tap/magmux` has the formula, and their next
-`brew upgrade` finds nothing there unless a `tap_migrations.json` is added to
-the tap and the old formula is deleted — a change in a DIFFERENT repository,
-which is why it cannot ride along in a magmux release commit. Whether Casks
-work under Homebrew on Linux is also unresolved (magmux ships linux/amd64 and
-linux/arm64), and Casks are commonly macOS-only; confirm that before migrating,
-because dropping Linux tap installs would be a silent regression for the half
-of the matrix that cannot report it.
+Two consequences worth knowing before touching this again:
 
-The practical cost until then: `goreleaser check` cannot be a CI gate, because
-it exits non-zero on a config that releases fine. Run it by hand before
-trusting this list — it is the thing that knows, and it will name a new key the
-day one appears.
+- **The `postflight` quarantine hook is load-bearing.** Measured, not assumed:
+  installing the cask without it leaves `com.apple.quarantine` on the binary,
+  and `magmux --version` prints nothing and exits — Gatekeeper kills it while
+  `brew install` still reports success. Homebrew warns that `postflight` is
+  deprecated in favour of `postflight_steps`; that string comes from
+  GoReleaser's template, so it is theirs to fix, and a visible warning is the
+  better half of that trade.
+- **Casks have no `test` stanza, so `brew test magmux` is gone.** The formula
+  ran `magmux --version` and its test was itself the subject of a fixed bug.
+  Nothing now checks the published binary from Homebrew's side; the release
+  pipeline's own download-and-run smoke test is the remaining check.
 
 ## VT Parser Coverage
 
