@@ -18,6 +18,26 @@
 # Instructions arrive on stdin, so a `send` over the socket drives it.
 set -u
 
+# This script writes a Claude Code transcript into $HOME/.claude/projects/,
+# and it is only safe because showcase.sh repoints HOME at a scratch directory
+# first. Run directly, it would write into the REAL ~/.claude — and not
+# harmlessly: the staged transcript would be the newest file in the developer's
+# own project directory, which is exactly what controller_claude.go's mtime and
+# content-matching discovery looks for. A live pane in the same cwd could be
+# handed the staged turns, and a mis-discovered transcript strands a controller
+# in `starting` silently and forever.
+#
+# So refuse rather than trust the caller. demo/README.md promises this
+# isolation; this check is what makes the promise true instead of merely
+# documented.
+if [ "${MAGMUX_DEMO_HOME:-}" != "1" ]; then
+  echo "demo/staged-agent.sh: refusing to run directly." >&2
+  echo "  It files a Claude Code transcript under \$HOME/.claude/projects/ and" >&2
+  echo "  needs HOME repointed at a scratch directory first." >&2
+  echo "  Run demo/showcase.sh (or 'task demo'), which sets that up." >&2
+  exit 1
+fi
+
 PROJ="$HOME/.claude/projects/$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')"
 mkdir -p "$PROJ"
 TR="$PROJ/staged.jsonl"

@@ -650,10 +650,14 @@ build time via `-X main.Version={{.Version}}`, so **the tag is the version**.
 `magmux --version` on a snapshot build reports `X.Y.Z-SNAPSHOT-<sha>`, which is
 how to tell a real release binary from a local one.
 
-Known debt: `.goreleaser.yml` still uses the deprecated `brews` key, so
-`goreleaser check` exits 2 while `goreleaser release` succeeds. CI pins
-`version: "~> v2"`, which floats — the day GoReleaser removes `brews`, releases
-break with no prior warning. Migrating to `homebrew_casks` is the fix.
+Known debt: `.goreleaser.yml` uses TWO deprecated keys — `brews` and
+`archives.format` — so `goreleaser check` exits 2 while `goreleaser release`
+still succeeds. CI pins `version: "~> v2"`, which floats, so the day GoReleaser
+removes either one, releases break with no prior warning and this note is the
+only warning anyone gets. The migrations are `brews` → `homebrew_casks` and
+`archives.format` → `archives.formats: [tar.gz]`. Run `goreleaser check` before
+trusting this list: it is the thing that knows, and it will name a third key the
+day one appears.
 
 ## VT Parser Coverage
 

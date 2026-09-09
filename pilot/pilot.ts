@@ -105,27 +105,23 @@ const PALETTES: Record<string, Palette> = {
     err: "\x1b[31m",
     grey: "\x1b[2m",
     text: "\x1b[39m",
-    // Basic ANSI BACKGROUNDS (44, 42, 43, 41) with bright-white ink. The
-    // terminal maps each to a shade of its own theme, and white on any of
-    // them is legible in both, so the chip needs no knowledge of the page.
-    //
-    // Reverse video (SGR 7) was the first attempt and is not used: it would
-    // let the terminal invert its own two colours, which is tidier in theory,
-    // but it renders as plain bold text anywhere SGR 7 is unimplemented and
-    // there is then no chip at all. An explicit background always paints one.
-    // BRIGHT backgrounds (100-107) with BLACK ink. All four bright hues are
-    // light enough that black reads on every one of them; white is not — it
-    // fails on bright yellow, which is the chip that says NUDGE. One ink for
-    // five chips means the worst pairing decides, so it has to be the safe one.
     // The chips are TRUECOLOR even here, and that is not an inconsistency
     // with the terminal-relative text above — it follows from the same rule.
     // Body text sits on the page, so it must defer to a background it was
     // never told. A chip paints its OWN ground, so the only contrast that
-    // matters is ink against chip, which is fully known. Deferring here
-    // instead bought nothing and cost the guarantee: indexed backgrounds are
-    // rendered bright by some terminals and dim by others, and bold is widely
-    // taken as "use the bright variant", so black ink came out grey on a
-    // yellow that came out olive.
+    // matters is ink against chip, which is fully known.
+    //
+    // Three deferring alternatives were tried first and are NOT used:
+    //   - SGR 7 (reverse video), letting the terminal invert its own two
+    //     colours: renders as plain bold text wherever SGR 7 is unimplemented,
+    //     leaving no chip at all;
+    //   - basic backgrounds (44/42/43/41) with bright-white ink: white fails
+    //     on yellow;
+    //   - bright backgrounds (100-107) with black ink: bold is widely taken as
+    //     "use the bright variant" of an INDEXED colour, so the black came out
+    //     grey — and the yellow came out olive on renderers that ignore the
+    //     bright range.
+    // Each failed the same way: it deferred a decision that was already known.
     ink: "\x1b[38;2;250;250;250m",
     bgOut: "\x1b[48;2;21;101;177m",
     bgIn: "\x1b[48;2;22;120;62m",
@@ -148,9 +144,25 @@ const C = resolvePalette(process.env.MAGMUX_THEME);
 const stamp = () => new Date().toTimeString().slice(0, 8);
 
 // The pane is narrow and shares a window with the session it is driving, so
-// the width is read once and every body is wrapped to it. COLUMNS is what
-// magmux exports for exactly this; 72 is a sane floor for a pipe.
-const COLS = Math.max(Number(process.env.COLUMNS) || 0, 40) || 72;
+// the width is read once and every body is wrapped to it.
+//
+// Three sources, in descending order of how directly they state the pane's
+// width. COLUMNS is what magmux exports to a pane child, so inside magmux it
+// is exact. Outside magmux there usually is none — COLUMNS is a SHELL
+// variable and neither bash nor zsh exports it, so a pilot started with
+// `--sock` pointed at a magmux sees nothing — and stdout's own width is the
+// next best answer. 72 is the floor for a pipe, which has no width at all.
+//
+// The clamp is applied LAST and bounds BOTH ends. An earlier version read
+// `Math.max(Number(process.env.COLUMNS) || 0, 40) || 72`, where the `|| 72`
+// could never fire because Math.max(x, 40) is always truthy — so the real
+// fallback was 40, and a standalone pilot wrapped every body at 35 columns.
+// The upper bound is the same reason magmux bounds COLUMNS itself: the value
+// arrives from the environment, the input class nobody validates.
+const COLS = Math.min(
+  Math.max(Number(process.env.COLUMNS) || process.stdout.columns || 72, 40),
+  400,
+);
 
 // badge renders a status chip: ink on a saturated block.
 //

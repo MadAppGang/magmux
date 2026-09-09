@@ -32,8 +32,13 @@ jobs:
           # fail silently. Blank lines are held back until the next non-blank
           # line arrives, which trims the leading and trailing blanks around
           # the section while preserving the ones between its subsections.
+          # index(), not a regex: the version is interpolated into the pattern,
+          # and a tag carrying semver build metadata (v1.0.0+build) would make
+          # `+` a quantifier and match nothing — failing the job with "no
+          # section for v1.0.0+build", which points at the changelog instead of
+          # at this line. A literal comparison cannot be wrong about that.
           awk -v v="$version" '
-            $0 ~ "^## \\[" v "\\]" { inside = 1; next }
+            index($0, "## [" v "]") == 1 { inside = 1; next }
             inside && /^## \[/ { exit }
             inside {
               if (NF == 0) { if (started) pending = pending "\n"; next }

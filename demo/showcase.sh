@@ -68,5 +68,7 @@ done
 # inject into the next run.
 trap 'kill $DRIVER 2>/dev/null; wait $DRIVER 2>/dev/null' EXIT INT TERM
 
-env HOME="$STATE/home" PATH="$STATE/bin:$PATH" \
+# MAGMUX_DEMO_HOME is the staged agent's proof that HOME was repointed. It is
+# set HERE, next to the repointing itself, so the two cannot drift apart.
+env HOME="$STATE/home" PATH="$STATE/bin:$PATH" MAGMUX_DEMO_HOME=1 \
   "$MAGMUX" --id "$SOCK_ID" -c --theme "$THEME" "${args[@]}"
