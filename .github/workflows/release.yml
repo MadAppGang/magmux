@@ -20,11 +20,40 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The release notes are the CHANGELOG entry for this tag, not a dump of
+      # commit subjects. It FAILS if the section is missing: an empty notes
+      # file would publish a release nobody can read, and nothing downstream
+      # would report it. A failed job here is visible and re-runnable once the
+      # entry is added, which is the cheaper of the two outcomes.
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # One awk, so there is no `tac` dependency and no second process to
+          # fail silently. Blank lines are held back until the next non-blank
+          # line arrives, which trims the leading and trailing blanks around
+          # the section while preserving the ones between its subsections.
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { inside = 1; next }
+            inside && /^## \[/ { exit }
+            inside {
+              if (NF == 0) { if (started) pending = pending "\n"; next }
+              started = 1
+              printf "%s%s\n", pending, $0
+              pending = ""
+            }
+          ' CHANGELOG.md > /tmp/release-notes.md
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section for tag $GITHUB_REF_NAME"
+            exit 1
+          fi
+          echo "Release notes ($(wc -c < /tmp/release-notes.md) bytes):"
+          cat /tmp/release-notes.md
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
-          args: release --clean
+          args: release --clean --release-notes=/tmp/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

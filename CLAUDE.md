@@ -395,6 +395,21 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   `TERM_THEME` and `COLORFGBG` are read through `themeEnv` with `os.Getenv`
   only — no file is ever opened for them.
 
+- **A child is TOLD the resolved theme, as `MAGMUX_THEME=light|dark`.** A TUI
+  does not need it: it queries OSC 11 and `answerColorQuery` replies from the
+  same resolution. A child that is not a TUI cannot ask, and `pilot/pilot.ts`
+  is the case that proved it — a plain script writing ANSI, which hardcoded one
+  background's palette (`text` was `rgb(205,214,244)`, a near-white lavender)
+  and drew every body line illegibly on the other. The export is appended
+  AFTER `os.Environ()` and `os/exec` keeps the last occurrence of a duplicated
+  key, so magmux's own resolution beats a `MAGMUX_THEME` inherited from the
+  shell — otherwise `--theme light` under a dark shell tells every child the
+  opposite of what magmux is drawing. `cfg.Env` still goes last and still
+  overrides. A NESTED magmux inherits it, and `MAGMUX_THEME` sits second in
+  the chain, above the probe: the inner magmux is looking at a PTY, so the
+  outer one's reading is better evidence than anything it can probe.
+  `TestChildIsToldTheResolvedTheme` pins all four cases.
+
 - **Headless blocks on `<-mux.quit`, never on `inputLoop`.** `inputLoop`'s
   stdin goroutine closes `stdinCh` on the first read error, and `/dev/null` is
   EOF on the first read — so `inputLoop` would return in microseconds, `main`
@@ -617,10 +632,28 @@ the documented socket, and nothing in the Go binary depends on it.
 
 Uses GoReleaser. To release:
 
-1. Tag: `git tag -a v0.1.0 -m "Initial release"`
-2. Push: `git push origin main --tags`
-3. CI builds binaries for darwin/linux (arm64/amd64)
-4. GoReleaser creates GitHub Release + updates Homebrew formula
+1. **Add the `## [X.Y.Z]` section to `CHANGELOG.md` first.** The release job
+   extracts that section and passes it to GoReleaser as `--release-notes`, and
+   it FAILS if the section is missing. That is deliberate: an empty notes file
+   would publish an unreadable release and nothing downstream would report it,
+   whereas a failed job is visible and re-runnable once the entry is added.
+   The tag must already be pushed for the job to run, so the cost of forgetting
+   is a re-run, not a burned version.
+2. Tag the MERGE commit: `git tag -a v0.1.0 -m "..." <merge-sha>`
+3. Push the tag as an explicit ref: `git push origin refs/tags/v0.1.0` —
+   never `--tags`, which pushes every local tag the machine has accumulated.
+4. CI builds binaries for darwin/linux (arm64/amd64)
+5. GoReleaser creates the GitHub Release + updates the Homebrew formula
+
+There is no version string to edit anywhere: `.goreleaser.yml` injects it at
+build time via `-X main.Version={{.Version}}`, so **the tag is the version**.
+`magmux --version` on a snapshot build reports `X.Y.Z-SNAPSHOT-<sha>`, which is
+how to tell a real release binary from a local one.
+
+Known debt: `.goreleaser.yml` still uses the deprecated `brews` key, so
+`goreleaser check` exits 2 while `goreleaser release` succeeds. CI pins
+`version: "~> v2"`, which floats — the day GoReleaser removes `brews`, releases
+break with no prior warning. Migrating to `homebrew_casks` is the fix.
 
 ## VT Parser Coverage
 
