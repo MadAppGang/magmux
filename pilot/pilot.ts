@@ -34,24 +34,190 @@ import { MagmuxBridge, type TurnResult } from "./magmux.ts";
 // The pilot usually runs in its own pane, so its stdout is part of the UI.
 // Same semantic palette as the control panel: blue = pilot, green = session.
 
-const C = {
-  reset: "\x1b[0m",
-  dim: "\x1b[2m",
-  bold: "\x1b[1m",
-  out: "\x1b[38;2;52;152;219m",
-  in: "\x1b[38;2;46;204;113m",
-  warn: "\x1b[38;2;255;180;84m",
-  err: "\x1b[38;2;255;107;107m",
-  grey: "\x1b[38;2;108;112;134m",
-  text: "\x1b[38;2;205;214;244m",
+// The palette follows the background magmux resolved, which it hands every
+// child as MAGMUX_THEME=light|dark.
+//
+// It used to be truecolor picked for a dark background, and `text` was
+// rgb(205,214,244) — a near-white lavender. Every body line in the pane (the
+// goal, and every instruction the pilot sends) is drawn with `text`, so on a
+// light terminal the most important content on the screen was the least
+// legible thing on it.
+//
+// A TUI would not have had this problem: it asks the terminal directly with an
+// OSC 11 query, and magmux answers from the same resolution. The pilot is a
+// plain script writing ANSI to a pipe, so it cannot ask — hence the variable.
+//
+// UNSET is a real case, not an error: the pilot runs outside magmux too, with
+// --sock pointed at one. Then it names no colour it cannot justify — the
+// default foreground (39) and dim (2), which are readable on whatever
+// background the terminal actually has, and the basic ANSI accents (31-34),
+// which every terminal theme maps to a shade legible against its own
+// background.
+type Palette = Record<
+  "reset" | "dim" | "bold" | "out" | "in" | "warn" | "err" | "grey" | "text" |
+  "ink" | "bgOut" | "bgIn" | "bgWarn" | "bgErr" | "bgMuted",
+  string
+>;
+
+const BASE = { reset: "\x1b[0m", dim: "\x1b[2m", bold: "\x1b[1m" };
+
+const PALETTES: Record<string, Palette> = {
+  dark: {
+    ...BASE,
+    out: "\x1b[38;2;52;152;219m",
+    in: "\x1b[38;2;46;204;113m",
+    warn: "\x1b[38;2;255;180;84m",
+    err: "\x1b[38;2;255;107;107m",
+    grey: "\x1b[38;2;108;112;134m",
+    text: "\x1b[38;2;205;214;244m",
+    // Badge ink is the DARK end on a dark theme: the chip is a saturated
+    // block, so the text on it has to contrast with the chip, not with the
+    // page. Getting this backwards is how a badge turns into a smudge.
+    ink: "\x1b[38;2;24;24;37m",
+    bgOut: "\x1b[48;2;52;152;219m",
+    bgIn: "\x1b[48;2;46;204;113m",
+    bgWarn: "\x1b[48;2;255;180;84m",
+    bgErr: "\x1b[48;2;255;107;107m",
+    bgMuted: "\x1b[48;2;108;112;134m",
+  },
+  // Same hues, taken down to shades that hold contrast on a light background
+  // rather than washing out against it.
+  light: {
+    ...BASE,
+    out: "\x1b[38;2;21;101;177m",
+    in: "\x1b[38;2;22;120;62m",
+    warn: "\x1b[38;2;166;90;12m",
+    err: "\x1b[38;2;178;38;38m",
+    grey: "\x1b[38;2;108;112;134m",
+    text: "\x1b[38;2;41;44;59m",
+    ink: "\x1b[38;2;250;250;250m",
+    bgOut: "\x1b[48;2;21;101;177m",
+    bgIn: "\x1b[48;2;22;120;62m",
+    bgWarn: "\x1b[48;2;166;90;12m",
+    bgErr: "\x1b[48;2;178;38;38m",
+    bgMuted: "\x1b[48;2;120;124;140m",
+  },
+  unknown: {
+    ...BASE,
+    out: "\x1b[34m",
+    in: "\x1b[32m",
+    warn: "\x1b[33m",
+    err: "\x1b[31m",
+    grey: "\x1b[2m",
+    text: "\x1b[39m",
+    // The chips are TRUECOLOR even here, and that is not an inconsistency
+    // with the terminal-relative text above — it follows from the same rule.
+    // Body text sits on the page, so it must defer to a background it was
+    // never told. A chip paints its OWN ground, so the only contrast that
+    // matters is ink against chip, which is fully known.
+    //
+    // Three deferring alternatives were tried first and are NOT used:
+    //   - SGR 7 (reverse video), letting the terminal invert its own two
+    //     colours: renders as plain bold text wherever SGR 7 is unimplemented,
+    //     leaving no chip at all;
+    //   - basic backgrounds (44/42/43/41) with bright-white ink: white fails
+    //     on yellow;
+    //   - bright backgrounds (100-107) with black ink: bold is widely taken as
+    //     "use the bright variant" of an INDEXED colour, so the black came out
+    //     grey — and the yellow came out olive on renderers that ignore the
+    //     bright range.
+    // Each failed the same way: it deferred a decision that was already known.
+    ink: "\x1b[38;2;250;250;250m",
+    bgOut: "\x1b[48;2;21;101;177m",
+    bgIn: "\x1b[48;2;22;120;62m",
+    bgWarn: "\x1b[48;2;166;90;12m",
+    bgErr: "\x1b[48;2;178;38;38m",
+    bgMuted: "\x1b[48;2;90;94;110m",
+  },
 };
 
+// Only "light" and "dark" are answers. "auto", "" and anything else mean no
+// opinion, matching how magmux itself reads the same variable — one word for
+// one meaning across the two processes.
+function resolvePalette(v: string | undefined): Palette {
+  const word = (v ?? "").trim().toLowerCase();
+  return PALETTES[word === "light" || word === "dark" ? word : "unknown"];
+}
+
+const C = resolvePalette(process.env.MAGMUX_THEME);
+
 const stamp = () => new Date().toTimeString().slice(0, 8);
-const log = (color: string, glyph: string, head: string, body = "") => {
-  process.stdout.write(
-    `${C.grey}${stamp()}${C.reset} ${color}${glyph} ${head}${C.reset}\n` +
-      (body ? `  ${C.text}${body}${C.reset}\n` : ""),
-  );
+
+// The pane is narrow and shares a window with the session it is driving, so
+// the width is read once and every body is wrapped to it.
+//
+// Three sources, in descending order of how directly they state the pane's
+// width. COLUMNS is what magmux exports to a pane child, so inside magmux it
+// is exact. Outside magmux there usually is none — COLUMNS is a SHELL
+// variable and neither bash nor zsh exports it, so a pilot started with
+// `--sock` pointed at a magmux sees nothing — and stdout's own width is the
+// next best answer. 72 is the floor for a pipe, which has no width at all.
+//
+// The clamp is applied LAST and bounds BOTH ends. An earlier version read
+// `Math.max(Number(process.env.COLUMNS) || 0, 40) || 72`, where the `|| 72`
+// could never fire because Math.max(x, 40) is always truthy — so the real
+// fallback was 40, and a standalone pilot wrapped every body at 35 columns.
+// The upper bound is the same reason magmux bounds COLUMNS itself: the value
+// arrives from the environment, the input class nobody validates.
+const COLS = Math.min(
+  Math.max(Number(process.env.COLUMNS) || process.stdout.columns || 72, 40),
+  400,
+);
+
+// badge renders a status chip: ink on a saturated block.
+//
+// A pilot pane is scanned between glances at the session beside it, so what it
+// has to answer in one look is "which of these lines is an instruction, which
+// is a result, and did anything fail". Coloured text answers that only after
+// it is read. A filled chip answers it as a shape.
+const badge = (label: string, bgCol: string) =>
+  `${bgCol}${C.ink}${C.bold} ${label} ${C.reset}`;
+
+// wrap breaks a body to the pane, never mid-word where it can be helped.
+function wrap(text: string, width: number): string[] {
+  const out: string[] = [];
+  for (const para of text.split("\n")) {
+    let line = "";
+    for (const word of para.split(/\s+/).filter(Boolean)) {
+      if (!line) line = word;
+      else if (line.length + 1 + word.length <= width) line += " " + word;
+      else {
+        out.push(line);
+        line = word;
+      }
+    }
+    out.push(line);
+  }
+  return out.length ? out : [""];
+}
+
+// log writes one entry: a head row, then the body under a direction-tinted
+// rule.
+//
+// The rule is the whole point of the shape. The stream interleaves two
+// provenances — instructions this pilot SENT and turns magmux OBSERVED — and
+// before it, a body was an unmarked block of grey that belonged to whichever
+// head happened to precede it. Now the body is visibly attached to its head
+// and carries its colour down the left, so a wall of blue with no green in it
+// reads as "the session has stopped answering" without a word being read.
+const GUTTER = "  \u258e "; // two spaces, a left one-quarter block, a space
+const log = (color: string, glyph: string, head: string, body = "", tail = "") => {
+  let s = `${C.grey}${stamp()}${C.reset} ${color}${glyph}${C.reset} ${head}`;
+  if (tail) s += ` ${C.grey}${tail}${C.reset}`;
+  s += "\n";
+  if (body) {
+    for (const line of wrap(body, COLS - GUTTER.length - 1)) {
+      s += `${color}${GUTTER}${C.reset}${C.text}${line}${C.reset}\n`;
+    }
+  }
+  process.stdout.write(s);
+};
+
+// rule draws a full-width separator, so the run's phases do not run together.
+const rule = (label = "") => {
+  const text = label ? ` ${label} ` : "";
+  const bar = "\u2500".repeat(Math.max(COLS - text.length - 1, 0));
+  process.stdout.write(`${C.grey}${text}${bar}${C.reset}\n`);
 };
 
 // ── args ──────────────────────────────────────────────────────────────────
@@ -203,7 +369,8 @@ async function main() {
   const bridge = new MagmuxBridge(args.sock, { pane: args.pane });
   await bridge.connect();
 
-  log(C.out, "◆", `pilot connected to pane ${args.pane}`, args.goal);
+  rule("PILOT");
+  log(C.out, badge("GOAL", C.bgOut), `${C.grey}driving pane${C.reset} ${args.pane}`, args.goal);
 
   // Pick the model before announcing, so the panel can show which model is
   // doing the driving.
@@ -227,7 +394,7 @@ async function main() {
   const modelName = `${model.provider}/${model.id}`;
 
   bridge.announce(args.goal, args.steps, modelName);
-  log(C.grey, "·", `pilot model ${modelName}`);
+  log(C.grey, "·", `${C.grey}model${C.reset} ${modelName}`);
 
   // Wait for the session to be ready for its first instruction. Sending into
   // a still-booting session would land the text in a TUI that has not drawn
@@ -235,11 +402,11 @@ async function main() {
   log(C.grey, "·", "waiting for the session to come up…");
   if (!(await bridge.waitUntilReady())) {
     bridge.finish("session never became ready", true);
-    log(C.err, "✗", "session never reached awaiting_input");
+    log(C.err, badge("NO SESSION", C.bgErr), "never reached awaiting_input");
     bridge.close();
     process.exit(1);
   }
-  log(C.in, "◀", "session ready");
+  log(C.in, badge("READY", C.bgIn), `${C.grey}session is accepting input${C.reset}`);
 
   let sent = 0;
   let limitHit = false;
@@ -289,7 +456,7 @@ async function main() {
       }
       sent++;
       const label = params.label ?? (args.steps ? `step ${sent}/${args.steps}` : `step ${sent}`);
-      log(C.out, "▶", label, params.instruction);
+      log(C.out, badge(label, C.bgOut), "", params.instruction);
 
       const result = await bridge.runInstruction(params.instruction, label);
       renderTurn(result);
@@ -361,9 +528,24 @@ async function main() {
   }
   log(C.grey, "·", `tools: ${toolNames.join(", ")}`);
 
+  // A request the provider REFUSED is recorded by pi as a finished assistant
+  // message carrying stopReason "error" — session.prompt() returns normally and
+  // throws nothing. Watching only text_delta therefore misses it completely,
+  // and the run then presents as a model that would not call its tools: three
+  // empty turns, two nudges, and the summary "the pilot stopped without calling
+  // finish". Diagnosed once against an ANTHROPIC_API_KEY with no credit
+  // balance, where the truth was a 400 on every single request and the pilot
+  // never had a turn to misbehave in.
+  let providerError = "";
   session.subscribe((event) => {
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       process.stdout.write(C.grey + event.assistantMessageEvent.delta + C.reset);
+      return;
+    }
+    const msg = (event as { message?: { stopReason?: string; errorMessage?: string } }).message;
+    if (msg?.stopReason === "error" && msg.errorMessage && !providerError) {
+      providerError = describeProviderError(msg.errorMessage);
+      log(C.err, badge("PROVIDER", C.bgErr), "refused the request", providerError);
     }
   });
 
@@ -398,8 +580,11 @@ async function main() {
     for (let attempt = 0; ; attempt++) {
       await session.prompt(prompt);
       if (done) break;
+      // Nudging a provider that refused the request buys nothing but two more
+      // refusals and a summary that blames the model for the account.
+      if (providerError) break;
       if (attempt >= NUDGE_LIMIT) break;
-      log(C.warn, "!", "pilot replied without calling a tool — nudging");
+      log(C.warn, badge("NUDGE", C.bgWarn), "replied without calling a tool");
       prompt =
         `You did not call a tool, so nothing happened. Your reply is not visible ` +
         `to the session. Call send_to_session now with the next instruction, or ` +
@@ -410,7 +595,9 @@ async function main() {
   }
 
   let summary = done ?? {
-    summary: "the pilot stopped without calling finish",
+    summary: providerError
+      ? `the pilot could not reach its model: ${providerError}`
+      : "the pilot stopped without calling finish",
     success: false,
   };
   // An agent that ran out of steps wanted to keep going, so whatever it says
@@ -427,10 +614,13 @@ async function main() {
     };
   }
   bridge.finish(summary.summary, !summary.success);
+  // The closing statement is the one line someone scrolls back to find, so it
+  // gets a rule above it and the run's only full-width chip.
+  rule();
   log(
     summary.success ? C.in : C.err,
-    summary.success ? "✓" : "✗",
-    summary.success ? "finished" : "failed",
+    badge(summary.success ? "FINISHED" : "FAILED", summary.success ? C.bgIn : C.bgErr),
+    `${C.grey}${sent} instruction${sent === 1 ? "" : "s"} sent${C.reset}`,
     summary.summary,
   );
 
@@ -442,6 +632,32 @@ async function main() {
 }
 
 /** Turn a TurnResult into the text the pilot model reads. */
+// describeProviderError turns pi's raw errorMessage into one readable line.
+//
+// The raw value is the HTTP status followed by the provider's JSON body, e.g.
+// `400 {"type":"error","error":{"type":"invalid_request_error","message":"Your
+// credit balance is too low..."},"request_id":"req_011C..."}`. The sentence a
+// human needs is buried two levels in, and printing the whole body pushes it
+// off the pane it has to be read in. Falls back to the raw string whenever the
+// shape is not what we expect — a provider we have never seen must still be
+// able to say what went wrong.
+function describeProviderError(raw: string): string {
+  const brace = raw.indexOf("{");
+  const status = brace > 0 ? raw.slice(0, brace).trim() : "";
+  if (brace >= 0) {
+    try {
+      const body = JSON.parse(raw.slice(brace));
+      const message = body?.error?.message ?? body?.message;
+      if (typeof message === "string" && message) {
+        return status ? `${status} ${message}` : message;
+      }
+    } catch {
+      // Not JSON, or truncated. The raw string below is still the best answer.
+    }
+  }
+  return raw.replace(/\s+/g, " ").slice(0, 200);
+}
+
 function describeTurn(r: TurnResult): string {
   const secs = (r.durationMs / 1000).toFixed(0);
   switch (r.state) {
@@ -488,19 +704,19 @@ function renderTurn(r: TurnResult) {
   const secs = `${(r.durationMs / 1000).toFixed(0)}s`;
   switch (r.state) {
     case "awaiting_input":
-      log(C.in, "◀", `awaiting_input · ${secs}${r.tool ? ` · ${r.tool}` : ""}`, r.response);
+      log(C.in, badge("AWAITING", C.bgIn), r.tool ? `${C.grey}last tool${C.reset} ${r.tool}` : "", r.response, secs);
       break;
     case "awaiting_permission":
-      log(C.warn, "◀", `blocked on permission · ${secs}`, r.response);
+      log(C.warn, badge("BLOCKED", C.bgWarn), "permission required", r.response, secs);
       break;
     case "error":
-      log(C.err, "◀", `error · ${secs}`, r.response);
+      log(C.err, badge("ERROR", C.bgErr), "", r.response, secs);
       break;
     case "gone":
-      log(C.err, "◀", `session exited · ${secs}`);
+      log(C.err, badge("GONE", C.bgErr), "session exited", "", secs);
       break;
     default:
-      log(C.warn, "◀", `stalled · ${secs}`, "no turn started");
+      log(C.warn, badge("STALLED", C.bgWarn), "", "no turn started", secs);
   }
 }
 

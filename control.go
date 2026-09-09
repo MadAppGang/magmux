@@ -1664,9 +1664,22 @@ func routeRow(r ctrlRoute, focused, inner int) string {
 	if r.closed() {
 		label = "GONE"
 	}
+	// The state is a CHIP, not coloured text. A row is scanned, never read:
+	// a filled block of colour resolves as a discrete state at a glance, and
+	// three of them stacked make "one pane is behind" visible without reading
+	// a word. Coloured text on the panel's own ground does not — it competes
+	// with every other coloured word in the row.
+	//
+	// Padded BEFORE badging so every chip is the same width and the columns
+	// after it stay aligned; badge() adds its own one-space margins, so the
+	// chip is badgeW+2 wide. Narrow mode drops the glyph to pay for them.
+	mark := paint(c, glyph+" ")
+	if !wide {
+		mark = ""
+	}
 	head := routeTag(r.pane, focused) + " " +
 		paint(pal.text, padRight(oneLine(r.title, titleW), titleW)) + " " +
-		paint(c, glyph+" "+padRight(oneLine(label, badgeW), badgeW)) + " " +
+		mark + badge(padRight(oneLine(label, badgeW), badgeW), c) + " " +
 		paint(pal.subtle, padLeft(fmt.Sprintf("%d/%d", r.sent, r.observed), 5))
 
 	// In flight has no duration yet, so it shows elapsed behind a ‹ marker: a
@@ -1751,12 +1764,20 @@ func signalLines(sigs []ctrlSignal, focused int, pad string, inner int) []string
 	case inner >= 46:
 		verbW = 10
 	}
+	// Chips and a gutter, but only once there is room for them. Both cost
+	// columns the body would otherwise use, and a stream squeezed to four
+	// columns of text says less than an unadorned one.
+	rich := inner >= 56
+
 	// The ⇦ lands exactly under the ▶ it answers, and its status word under the
 	// verb column, so an ack reads as a continuation of one row rather than as
 	// a second row that happens to be indented.
 	indent := 3
 	if showTime {
 		indent = 9
+	}
+	if rich {
+		indent += 2 // the gutter and its space
 	}
 
 	out := make([]string, 0, len(sigs))
@@ -1769,9 +1790,23 @@ func signalLines(sigs []ctrlSignal, focused int, pad string, inner int) []string
 		if showTime {
 			b.WriteString(paint(pal.subtle, sig.at.Format("15:04")) + " ")
 		}
+		// A direction-tinted rule down the left of every row. The stream
+		// interleaves two provenances — what the controller ASKED and what
+		// magmux OBSERVED — and telling them apart used to mean reading the
+		// arrow in the middle of the row. The rule is the same distinction
+		// carried in the one place the eye lands first, so a run where the
+		// session has stopped answering reads as a column of blue with no
+		// green in it, before a single word is read.
+		if rich {
+			b.WriteString(paint(gc, "▌") + " ")
+		}
 		b.WriteString(routeTag(sig.pane, focused))
 		b.WriteString(paint(gc, glyph) + " ")
-		b.WriteString(paint(vc, padRight(oneLine(verb, verbW), verbW)) + " ")
+		if rich {
+			b.WriteString(badge(padRight(oneLine(verb, verbW), verbW), vc) + " ")
+		} else {
+			b.WriteString(paint(vc, padRight(oneLine(verb, verbW), verbW)) + " ")
+		}
 
 		body := paint(pal.text, oneLine(sig.text, maxInt(inner-visWidth(b.String()), 4)))
 		if sig.dir == "note" {
@@ -1793,7 +1828,13 @@ func signalLines(sigs []ctrlSignal, focused int, pad string, inner int) []string
 				word = oneLine(sig.code, verbW)
 			}
 		}
-		out = append(out, pad+truncANSI(strings.Repeat(" ", indent)+
+		// The ack keeps the gutter of the row it answers, so the pair reads as
+		// one exchange with a continuation rather than as two entries.
+		ackPad := strings.Repeat(" ", indent)
+		if rich {
+			ackPad = strings.Repeat(" ", indent-2) + paint(gc, "▌") + " "
+		}
+		out = append(out, pad+truncANSI(ackPad+
 			paint(pal.border, "⇦ ")+paint(ac, padRight(word, verbW))+" "+
 			paint(pal.debug, oneLine(sig.ackText, maxInt(inner-indent-verbW-3, 4))), inner))
 	}
@@ -1879,6 +1920,12 @@ func (cp *ControlPanel) exchangeLines(steps []ctrlStep, pad string, inner int) [
 		if i > 0 {
 			out = append(out, "")
 		}
+		// Each half of the exchange is headed by a chip, so a long scroll can
+		// be read by its left edge alone: the pilot's own step tag going out,
+		// the state magmux observed coming back. Without them the two
+		// directions are two identical paragraphs distinguished by one glyph,
+		// which is exactly the thing that does not survive being skimmed.
+		out = append(out, pad+stepHead(st, inner))
 		instr := wrapText(st.text, inner-2, ctrlMaxScroll)
 		out = append(out, block("▶", pal.running, pal.text, instr, pad, inner)...)
 
@@ -1899,6 +1946,36 @@ func (cp *ControlPanel) exchangeLines(steps []ctrlStep, pad string, inner int) [
 		out = append(out, block("◀", pal.success, replyColor, body, pad, inner)...)
 	}
 	return out
+}
+
+// stepHead is one exchange's title row: the pilot's tag on the left, and on the
+// right the state magmux observed with how long the turn took.
+//
+// The two chips are deliberately different colours from different sources. The
+// left one is the controller's claim about what it asked for; the right one is
+// magmux's own observation. Painting both from one colour would put the
+// panel's provenance rule out of reach of the only thing that reads it fast.
+func stepHead(st ctrlStep, inner int) string {
+	label := st.label
+	if label == "" {
+		label = fmt.Sprintf("step %d", st.n)
+	}
+	left := badge(oneLine(label, 16), pal.running)
+
+	var right string
+	switch {
+	case !st.done():
+		right = badge("IN FLIGHT", pal.dead)
+	default:
+		right = badge(stateBadge(st.state), stateColor(st.state))
+		if st.dur > 0 {
+			right += " " + paint(pal.subtle, formatDuration(st.dur))
+		}
+		if st.tool != "" {
+			right = paint(pal.debug, oneLine(st.tool, 10)) + " " + right
+		}
+	}
+	return padBetween(left, right, inner)
 }
 
 // block renders a marked, wrapped paragraph: the glyph leads the first line

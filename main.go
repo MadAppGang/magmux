@@ -1696,6 +1696,24 @@ func (p *Pane) spawnPTY(cfg PaneConfig) error {
 		"TERM=screen-256color",
 		fmt.Sprintf("COLUMNS=%d", p.w),
 		fmt.Sprintf("LINES=%d", p.h),
+		// The RESOLVED theme, under the same name magmux reads as an input.
+		//
+		// A TUI child learns the background by querying OSC 11, which
+		// answerColorQuery answers from this same resolution — but a child that
+		// is not a TUI has no way to ask. pilot/pilot.ts was the case that
+		// proved it: a plain bun script writing ANSI, which had to hardcode one
+		// background's palette and was illegible on the other.
+		//
+		// It is appended AFTER os.Environ() on purpose. os/exec keeps the last
+		// occurrence of a duplicated key, so magmux's own resolution wins over a
+		// MAGMUX_THEME inherited from the shell — which is the whole point when
+		// --theme said otherwise. cfg.Env still goes last and can still override.
+		//
+		// A NESTED magmux inherits it, and MAGMUX_THEME sits second in the
+		// resolution chain, above the OSC 11 probe. That is the right answer:
+		// the inner magmux is looking at a PTY, not at the terminal, so the
+		// outer one's reading is better evidence than anything it can probe.
+		"MAGMUX_THEME="+currentTheme.String(),
 	)
 	// Export socket path so children can discover it
 	if sockPath := os.Getenv("MAGMUX_SOCK"); sockPath != "" {

@@ -266,6 +266,28 @@ tasks:
         echo
       - '{{.MAGMUX}} -c -e "cat"'
 
+  # ── Staged showcase (no model budget, no API key) ─────────────────────────
+  # A screenshot-ready window: three agent panes driven by one controller, the
+  # control panel open, the status bar carrying the same digest.
+  #
+  # The agents are staged; everything else is real. Each staged pane files a
+  # genuine Claude Code transcript, so magmux attaches a real
+  # ClaudeCodeController to it, and the driver reaches magmux over the
+  # documented socket only. The `◀ IN` rows still come from pollControllers,
+  # which is why they cannot be faked from the driver side. See demo/README.md.
+
+  demo:
+    desc: "Staged multi-agent + controller window for screenshots — free, no API key"
+    deps: [build]
+    cmds:
+      - demo/showcase.sh
+
+  demo:dark:
+    desc: "Same showcase on the dark palette"
+    deps: [build]
+    cmds:
+      - THEME=dark demo/showcase.sh
+
   # ── MCP self-hosting demo (a session splits its own multiplexer) ──────────
   # The flagship flow, and the reason `magmux mcp` exists. One Claude Code
   # session starts in a one-pane window; it reaches magmux through the MCP

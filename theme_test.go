@@ -1629,3 +1629,58 @@ func TestThemeEnvSeamReadsProcessEnv(t *testing.T) {
 		t.Errorf("theme is %s: initTheme read the process env (TERM_THEME=%q) instead of the seam", currentTheme, os.Getenv("TERM_THEME"))
 	}
 }
+
+// TestChildIsToldTheResolvedTheme pins the contract that a pane's child learns
+// which background magmux settled on, as MAGMUX_THEME=light|dark.
+//
+// A TUI child does not need it — it queries OSC 11 and answerColorQuery replies
+// from the same resolution. A child that is not a TUI has no way to ask, and
+// pilot/pilot.ts is the case that proved it: a plain script writing ANSI, which
+// hardcoded one background's palette and was illegible on the other.
+//
+// The third case is the load-bearing one. The variable is an INPUT to magmux as
+// well as an output, so a value inherited from the shell must lose to what
+// magmux actually resolved — otherwise `--theme light` under a dark shell tells
+// every child the opposite of what magmux is drawing. It holds because the
+// export is appended after os.Environ() and os/exec keeps the last occurrence.
+func TestChildIsToldTheResolvedTheme(t *testing.T) {
+	cases := []struct {
+		name      string
+		inherited string // MAGMUX_THEME in magmux's own environment
+		flag      string // --theme
+		want      string
+	}{
+		{name: "flag_light", flag: "light", want: "light"},
+		{name: "flag_dark", flag: "dark", want: "dark"},
+		{name: "flag_beats_inherited", inherited: "dark", flag: "light", want: "light"},
+		{name: "inherited_when_no_flag", inherited: "light", want: "light"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			out := filepath.Join(dir, "theme")
+			args := []string{"-w", "-e", "printf '%s' \"$MAGMUX_THEME\" > " + out}
+			if c.flag != "" {
+				args = append([]string{"--theme", c.flag}, args...)
+			}
+			// Cleared, not left to the ambient environment: TERM_THEME or
+			// COLORFGBG on the developer's machine would otherwise decide the
+			// no-flag case and the test would pass or fail by whose terminal
+			// ran it.
+			t.Setenv("MAGMUX_THEME", c.inherited)
+			t.Setenv("TERM_THEME", "")
+			t.Setenv("COLORFGBG", "")
+			h := startHeadlessMagmux(t, args...)
+			if code := h.wait(20 * time.Second); code != 0 {
+				t.Fatalf("exit code %d, want 0\nstderr: %s", code, h.stderr.String())
+			}
+			got, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatalf("child wrote no MAGMUX_THEME: %v", err)
+			}
+			if string(got) != c.want {
+				t.Errorf("child saw MAGMUX_THEME=%q, want %q", got, c.want)
+			}
+		})
+	}
+}
