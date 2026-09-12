@@ -27,3 +27,7 @@ magmux
 .env.*
 # Session transcripts and scratch notes are local working artifacts.
 ai-docs/sessions/
+
+# Added by claudeup
+# A managed rule says this path should stay out of git.
+.claude/models.json

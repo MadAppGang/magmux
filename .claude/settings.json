@@ -5,23 +5,21 @@
     "go@magus": true,
     "browser-use@magus": true,
     "terminal@magus": true,
-    "kanban@magus": true,
-    "setup@magus": true,
     "code-analysis@magus": true,
     "multimodel@magus": true,
     "dev@magus": true
   },
+  "outputStyle": "composed",
   "installedPluginVersions": {
-    "code-analysis@magus": "5.3.1",
-    "multimodel@magus": "3.4.0",
+    "code-analysis@magus": "7.3.0",
+    "multimodel@magus": "4.1.0",
     "browser-use@magus": "1.4.0",
-    "terminal@magus": "4.1.4",
+    "terminal@magus": "5.1.0",
     "kanban@magus": "1.6.0",
-    "dev@magus": "6.0.1",
+    "dev@magus": "7.4.0",
     "claudish@magus": "2.0.1",
     "go@magus": "0.1.3",
     "statusline@magus": "3.0.0",
     "setup@magus": "1.2.1"
-  },
-  "outputStyle": "composed"
+  }
 }
