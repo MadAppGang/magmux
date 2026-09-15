@@ -23,7 +23,7 @@ const (
 
 var (
 	// errPaneTooSmall carries the code mcp_tools.go's openPaneHint branches on.
-	errPaneTooSmall = sockErrf("too_small",
+	errPaneTooSmall = sockErrf(sockCodeTooSmall,
 		"no room to split: each half needs at least %d rows and %d columns", minPaneRows, minPaneCols)
 	errTargetGone = sockErrf(sockCodeNoSuchPane,
 		"the pane to split is no longer part of the layout")

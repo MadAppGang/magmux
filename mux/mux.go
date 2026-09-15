@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/MadAppGang/magmux/hub"
 	"github.com/MadAppGang/magmux/theme"
 )
 
@@ -196,6 +197,15 @@ type Magmux struct {
 	// methods are safe to call unconditionally; it only paints if a control
 	// pane was built for it (magmux -c).
 	control *ControlPanel
+	// hub is the op registry and the event bus (package hub). Reached ONLY
+	// through m.bus(), which builds it and registers the built-in ops on first
+	// use: every unit test in this package constructs a Magmux as a struct
+	// literal and never calls init(), so the zero value has to work.
+	//
+	// It is a leaf in the lock order (treeMu -> p.mu -> hub.mu -> sub.mu) and
+	// nothing of magmux's is held while calling into it.
+	hub     *hub.Hub
+	hubOnce sync.Once
 	// autoCloseAfter is how long to wait after a pilot declares the run over
 	// before quitting (-x). Zero means wait for an explicit keypress, which
 	// is the default: a finished run that vanishes before it is read is

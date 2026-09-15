@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/MadAppGang/magmux/hub"
 	"github.com/MadAppGang/magmux/sockdir"
 )
 
@@ -60,6 +62,17 @@ type sockMsg struct {
 	Force     bool            `json:"force,omitempty"`     // pane lifecycle: escalate to SIGKILL
 	Focus     *bool           `json:"focus,omitempty"`     // pane lifecycle: focus the result
 	TimeoutMs int             `json:"timeoutMs,omitempty"` // per-request budget, 0 = the verb's default
+	// Op and Args are the `call` verb's payload: the name of a registered op
+	// and its arguments, which are that op's own shape and are decoded by the
+	// op rather than here. Args stays raw for the same reason ID does — a
+	// plugin's arguments are not magmux's to reinterpret.
+	Op   string          `json:"op,omitempty"`
+	Args json.RawMessage `json:"args,omitempty"`
+	// caller is who sent this message, as the adapter resolved it. It is
+	// UNEXPORTED and has no tag, so encoding/json can never fill it: no
+	// sequence of bytes on the wire can claim an identity, which is what makes
+	// it safe for a verb to authorise on.
+	caller hub.Caller
 }
 
 // socketDir is where this magmux binds. The field wins over the package
@@ -183,6 +196,11 @@ func (m *Magmux) socketServer() {
 	}
 }
 
+// sockConnSeq numbers socket connections for Caller.Conn ("sock#12"). It is
+// magmux's own label and is never reused within a run, so a panel row or a log
+// line names one connection and not "whoever was second".
+var sockConnSeq atomic.Uint64
+
 func (m *Magmux) handleSocketConn(conn net.Conn) {
 	// Wait for the layout before serving anything on this connection. The
 	// listener is bound before the first child forks, on purpose — MAGMUX_SOCK
@@ -274,12 +292,17 @@ func (m *Magmux) handleSocketConn(conn net.Conn) {
 	// An operator staring at a frozen panel needs to know the controller went
 	// away rather than got slow.
 	driving := false
+	connID := fmt.Sprintf("sock#%d", sockConnSeq.Add(1))
 	for scanner.Scan() {
 		line := scanner.Text()
 		var msg sockMsg
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
 			continue
 		}
+		// Identity is attached AFTER decode and by the adapter alone. See
+		// sockMsg.caller: the field is unexported precisely so this is the
+		// only way it can ever be set.
+		msg.caller = callerFor(connID, msg)
 		if m.handleSocketMsg(msg, conn) && !driving {
 			driving = true
 			m.control.noteController(true)
@@ -389,12 +412,25 @@ func (m *Magmux) recordFinalEvents(events ...any) {
 
 // broadcastEvent serializes an event as JSON and pushes it to all connected
 // socket clients. Best-effort: failed writes drop the client silently.
+//
+// It also publishes the same bytes to the hub's bus. That is a BRIDGE, not a
+// migration: the socket keeps its own synchronous write loop, byte for byte
+// and deadline for deadline, so no existing client can tell the bus exists.
+// What it buys now is that every event is on the bus for the adapters that
+// arrive later, from one publishing site rather than from a sweep through
+// every caller of this function. P2 moves the socket itself onto Subs and this
+// loop goes.
 func (m *Magmux) broadcastEvent(event any) {
 	data, err := json.Marshal(event)
 	if err != nil {
 		return
 	}
 	data = append(data, '\n')
+
+	// Before sockClientsMu, never under it: hub.mu is a leaf, and nesting it
+	// inside the socket's lock would invent an edge that P2 has to unpick when
+	// hub.mu replaces sockClientsMu outright.
+	m.bus().Publish(data)
 
 	m.sockClientsMu.Lock()
 	defer m.sockClientsMu.Unlock()

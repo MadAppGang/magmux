@@ -44,6 +44,8 @@ const (
 	sockCodePaneDead      = protocol.CodePaneDead
 	sockCodePaneHidden    = protocol.CodePaneHidden
 	sockCodeUnknownVerb   = protocol.CodeUnknownVerb
+	sockCodeTooSmall      = protocol.CodeTooSmall
+	sockCodeForbidden     = protocol.CodeForbidden
 	sockCodeNotReady      = protocol.CodeNotReady
 	sockCodeUnsupported   = protocol.CodeUnsupported
 	sockCodeBusy          = protocol.CodeBusy
@@ -59,7 +61,7 @@ const (
 // adding it in both places.
 var (
 	sockVerbs = []string{"capabilities", "list", "capture", "transcript", "open_pane", "close_pane",
-		"focus", "status", "tint", "overlay", "send", "pilot", "agent"}
+		"focus", "status", "tint", "overlay", "send", "pilot", "agent", "ops", "call"}
 	sockEvents = []string{protocol.EventSnapshot, protocol.EventExit, protocol.EventControl, protocol.EventPaneOpened, protocol.EventPaneClosed,
 		protocol.EventResults, protocol.EventShutdown, protocol.EventReply}
 )
@@ -142,7 +144,11 @@ func (m *Magmux) replyTo(conn net.Conn, id json.RawMessage, result map[string]an
 // coming and going: magmux already sees the fd close, and the only missing bit
 // was telling a driving connection apart from a passive subscriber's tint.
 func (m *Magmux) handleSocketMsg(msg sockMsg, conn net.Conn) bool {
-	driving := isControllerVerb(msg.Type)
+	// `call` is the one verb whose meaning depends on its payload: the op's
+	// class decides whether this connection is steering the session or merely
+	// watching it. Every other verb is on isControllerVerb's list, which stays
+	// exactly as it was.
+	driving := isControllerVerb(msg.Type) || (msg.Type == "call" && m.callIsDriving(msg))
 	if !m.layoutIsReady() {
 		// handleSocketConn already waited, so getting here means the wait timed
 		// out or teardown began: there is no layout to run this against. Refuse
@@ -185,6 +191,10 @@ func (m *Magmux) dispatchSocketVerbExt(msg sockMsg, done func(map[string]any, er
 	switch msg.Type {
 	case "transcript":
 		return m.sockTranscript(msg)
+	case "ops":
+		return m.sockOps()
+	case "call":
+		return m.sockCall(msg)
 	}
 	return m.dispatchSocketVerb(msg, done)
 }

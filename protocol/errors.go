@@ -19,6 +19,18 @@ const (
 	// while it is on screen, and every other pane could in principle be hidden.
 	CodePaneHidden  = "pane_hidden"
 	CodeUnknownVerb = "unknown_verb"
+	// CodeTooSmall means the layout has no room: a split that would leave
+	// either half below the minimum usable pane size is refused before
+	// anything is forked. Distinct from bad_request because the request was
+	// well formed and would succeed on a bigger terminal, which sends the
+	// caller to a different remedy: drop a pane, or find more columns.
+	CodeTooSmall = "too_small"
+	// CodeForbidden means the caller is authenticated but not allowed: a
+	// read-only connection asking for an op that is not class read, or a
+	// connection claiming something it never registered for. Distinct from
+	// unauthorized, which is about identity, and from unsupported, which is
+	// about magmux not having the feature at all.
+	CodeForbidden = "forbidden"
 	// CodeNotReady means the socket is up but the layout is not: magmux
 	// binds before the first child forks and can therefore be reached before
 	// buildGrid has run. Distinct from no_such_pane on purpose — "pane 0 does
