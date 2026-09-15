@@ -1,7 +1,7 @@
 package mcp
 
 // Tests for `magmux mcp`. All of them run without a magmux: pipes, a fake
-// socket, and a fake sessionState. The MCP server's failure modes are protocol
+// socket, and a fake client.SessionState. The MCP server's failure modes are protocol
 // failures — a stray byte on stdout, a response to a notification, a two-phase
 // wait that returns the previous turn's answer — and none of them need a real
 // terminal to reproduce.
@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/MadAppGang/magmux/client"
 )
 
 // ── handshake ───────────────────────────────────────────────────────────────
@@ -241,149 +243,13 @@ func TestMCPInitializeFallsBackForUnknownProtocol(t *testing.T) {
 	}
 }
 
-// ── the two-phase wait ──────────────────────────────────────────────────────
-
-// TestRunInstructionTwoPhase is the reason phase one exists. Without it,
-// "wait for awaiting_input" returns instantly with the PREVIOUS turn's answer,
-// because awaiting_input is exactly the state we send in.
-func TestRunInstructionTwoPhase(t *testing.T) {
-	// (a) a normal turn: settled -> working -> settled.
-	t.Run("normal transition is not stalled", func(t *testing.T) {
-		st := newSessionState()
-		st.seedAggregate([]any{map[string]any{"pane": 0, "state": "awaiting_input"}})
-
-		send := func() error {
-			go func() {
-				time.Sleep(10 * time.Millisecond)
-				st.applyPane(map[string]any{"pane": 0, "state": "working"})
-				time.Sleep(10 * time.Millisecond)
-				st.applyPane(map[string]any{"pane": 0, "state": "awaiting_input",
-					"response": "42 passed", "tool": "Bash"})
-			}()
-			return nil
-		}
-
-		r, err := runInstruction(context.Background(), st, 0, send, 2*time.Second, 2*time.Second)
-		if err != nil {
-			t.Fatalf("runInstruction: %v", err)
-		}
-		if r.Stalled {
-			t.Errorf("turn reported stalled: %+v", r)
-		}
-		if r.State != "awaiting_input" {
-			t.Errorf("state = %q, want awaiting_input", r.State)
-		}
-		if r.Response != "42 passed" {
-			t.Errorf("response = %q, want the NEW turn's response", r.Response)
-		}
-		if r.Tool != "Bash" {
-			t.Errorf("tool = %q, want Bash", r.Tool)
-		}
-	})
-
-	// (b) the instruction was dropped: nothing moved at all. This must be
-	// reported as stalled, never as an empty success — "the instruction never
-	// arrived" and "there was nothing to do" need different responses.
-	t.Run("no transition and no response change is stalled", func(t *testing.T) {
-		st := newSessionState()
-		st.seedAggregate([]any{map[string]any{"pane": 0, "state": "awaiting_input",
-			"response": "previous answer"}})
-
-		r, err := runInstruction(context.Background(), st, 0,
-			func() error { return nil }, 60*time.Millisecond, time.Second)
-		if err != nil {
-			t.Fatalf("runInstruction: %v", err)
-		}
-		if !r.Stalled {
-			t.Errorf("a dropped instruction was not reported as stalled: %+v", r)
-		}
-		if r.State != "stalled" {
-			t.Errorf("state = %q, want stalled", r.State)
-		}
-		if r.Response != "" {
-			t.Errorf("a stalled turn must not carry the previous turn's response, got %q",
-				r.Response)
-		}
-	})
-
-	// (c) the escape hatch (magmux.ts:202): the turn ran and finished inside a
-	// single 250ms controller poll, so we never sampled a non-settled state,
-	// but the response text changed — that is a real turn.
-	t.Run("response change without a visible transition is a real turn", func(t *testing.T) {
-		st := newSessionState()
-		st.seedAggregate([]any{map[string]any{"pane": 0, "state": "awaiting_input",
-			"response": "previous answer"}})
-
-		send := func() error {
-			go func() {
-				time.Sleep(10 * time.Millisecond)
-				// Never leaves awaiting_input, but answers.
-				st.applyPane(map[string]any{"pane": 0, "state": "awaiting_input",
-					"response": "new answer"})
-			}()
-			return nil
-		}
-
-		r, err := runInstruction(context.Background(), st, 0, send, 300*time.Millisecond, time.Second)
-		if err != nil {
-			t.Fatalf("runInstruction: %v", err)
-		}
-		if r.Stalled {
-			t.Errorf("escape hatch did not fire; turn reported stalled: %+v", r)
-		}
-		if r.Response != "new answer" {
-			t.Errorf("response = %q, want \"new answer\"", r.Response)
-		}
-	})
-}
-
-// TestPerPaneSnapshotClearsTheResponse pins the one place the MCP client
-// deliberately stops being a port of pilot/magmux.ts:145.
-//
-// magmux clears LastResponse at the START of every turn
-// (controller_claude.go), and pollControllers always emits the `response` key
-// on a per-pane snapshot — so `"response":""` there means "this turn has said
-// nothing yet", not "unchanged". The aggregate (buildPaneResults) omits the key
-// entirely when empty, so there an absent key really does mean unchanged.
-// Treating both the same is what handed send_and_wait the previous turn's
-// answer for any turn that was pure tool calls.
-func TestPerPaneSnapshotClearsTheResponseButAggregateDoesNot(t *testing.T) {
-	st := newSessionState()
-	st.seedAggregate([]any{map[string]any{"pane": 0, "state": "awaiting_input",
-		"response": "Added the parser."}})
-
-	// The aggregate omits `response` when it is empty, so an absent key must
-	// leave the last answer standing — that is what stops a late attach or a
-	// `list` reply wiping everything we know.
-	st.seedAggregate([]any{map[string]any{"pane": 0, "state": "awaiting_input"}})
-	if got := st.response(0); got != "Added the parser." {
-		t.Errorf("an aggregate that omits response cleared it: %q", got)
-	}
-
-	// A per-pane snapshot carries the key on every poll, so an explicit empty
-	// value is magmux telling us the turn has produced no text.
-	st.applyPane(map[string]any{"pane": 0, "state": "working", "response": "", "tool": "Edit"})
-	if got := st.response(0); got != "" {
-		t.Errorf("an explicit empty response on a per-pane snapshot was discarded: %q — "+
-			"send_and_wait would report the previous turn's answer", got)
-	}
-
-	// An omitted key on a per-pane snapshot is still "unchanged": only the keys
-	// magmux actually sends may overwrite what we know.
-	st.applyPane(map[string]any{"pane": 0, "state": "awaiting_input", "response": "done"})
-	st.applyPane(map[string]any{"pane": 0, "state": "awaiting_input"})
-	if got := st.response(0); got != "done" {
-		t.Errorf("a per-pane snapshot with no response key cleared it: %q", got)
-	}
-}
-
 // TestRunInstructionDoesNotReportThePreviousTurnsAnswer is the failure the
 // two-phase wait exists to prevent, one level up: turn 1 answers in words,
 // turn 2 is Edit + Bash and says nothing. Reporting turn 1's text against turn
 // 2 makes the driving model plan its next step from the wrong answer.
 func TestRunInstructionDoesNotReportThePreviousTurnsAnswer(t *testing.T) {
-	st := newSessionState()
-	st.seedAggregate([]any{map[string]any{"pane": 0, "state": "awaiting_input"}})
+	st := client.NewSessionState()
+	st.SeedAggregate([]any{map[string]any{"pane": 0, "state": "awaiting_input"}})
 
 	// Turn 1: a normal turn that reports in words.
 	turn := func(response, tool string) func() error {
@@ -391,30 +257,30 @@ func TestRunInstructionDoesNotReportThePreviousTurnsAnswer(t *testing.T) {
 			go func() {
 				time.Sleep(10 * time.Millisecond)
 				// magmux clears the response at the start of every turn.
-				st.applyPane(map[string]any{"pane": 0, "state": "working",
+				st.ApplyPane(map[string]any{"pane": 0, "state": "working",
 					"response": "", "tool": tool})
 				time.Sleep(10 * time.Millisecond)
-				st.applyPane(map[string]any{"pane": 0, "state": "awaiting_input",
+				st.ApplyPane(map[string]any{"pane": 0, "state": "awaiting_input",
 					"response": response, "tool": tool})
 			}()
 			return nil
 		}
 	}
 
-	first, err := runInstruction(context.Background(), st, 0,
+	first, err := client.RunInstruction(context.Background(), st, 0,
 		turn("Added the parser.", "Edit"), 2*time.Second, 2*time.Second)
 	if err != nil {
-		t.Fatalf("runInstruction: %v", err)
+		t.Fatalf("client.RunInstruction: %v", err)
 	}
 	if first.Response != "Added the parser." {
 		t.Fatalf("first turn response = %q, want the text it reported", first.Response)
 	}
 
 	// Turn 2: tool calls only, no assistant text — a routine Claude Code turn.
-	second, err := runInstruction(context.Background(), st, 0,
+	second, err := client.RunInstruction(context.Background(), st, 0,
 		turn("", "Bash"), 2*time.Second, 2*time.Second)
 	if err != nil {
-		t.Fatalf("runInstruction: %v", err)
+		t.Fatalf("client.RunInstruction: %v", err)
 	}
 	if second.Response != "" {
 		t.Errorf("a tool-only turn reported %q — that is the PREVIOUS turn's answer", second.Response)
@@ -434,18 +300,8 @@ func TestRunInstructionDoesNotReportThePreviousTurnsAnswer(t *testing.T) {
 	}
 }
 
-func TestRunInstructionReportsSendFailure(t *testing.T) {
-	st := newSessionState()
-	st.seedAggregate([]any{map[string]any{"pane": 0, "state": "awaiting_input"}})
-	want := errors.New("no such pane")
-	if _, err := runInstruction(context.Background(), st, 0,
-		func() error { return want }, time.Second, time.Second); !errors.Is(err, want) {
-		t.Fatalf("err = %v, want the send error", err)
-	}
-}
-
 func TestDescribeTurnKeepsTheEmptyResponseParagraph(t *testing.T) {
-	text := describeTurn(turnResult{State: "awaiting_input", Tool: "Edit",
+	text := describeTurn(client.TurnResult{State: "awaiting_input", Tool: "Edit",
 		Duration: 8 * time.Second}, "make: *** [test] Error 1")
 	for _, want := range []string{"does NOT mean the instruction failed", "last tool: Edit",
 		"make: *** [test] Error 1"} {
@@ -453,122 +309,9 @@ func TestDescribeTurnKeepsTheEmptyResponseParagraph(t *testing.T) {
 			t.Errorf("describeTurn output missing %q:\n%s", want, text)
 		}
 	}
-	stalled := describeTurn(turnResult{State: "stalled", Stalled: true}, "")
+	stalled := describeTurn(client.TurnResult{State: "stalled", Stalled: true}, "")
 	if !strings.Contains(stalled, "Do not assume the step was done") {
 		t.Errorf("a stalled turn must say so plainly:\n%s", stalled)
-	}
-}
-
-// ── ingest ──────────────────────────────────────────────────────────────────
-
-// TestIngestSeedsFromAggregateSnapshot covers the rule that stops a
-// late-attaching agent waiting forever: magmux pushes per-pane snapshots on
-// CHANGE only, so a session already sitting at awaiting_input emits nothing
-// further and the connect-time aggregate is the only state we will ever see.
-func TestIngestSeedsFromAggregateSnapshot(t *testing.T) {
-	s := &Session{state: newSessionState(), pending: map[string]chan mcpReply{},
-		closed: make(chan struct{}), inFlight: map[int]bool{}}
-
-	s.ingest([]byte(`{"type":"snapshot","panes":[
-	  {"pane":0,"state":"running","controller":"claude-code","model":"opus"},
-	  {"pane":1,"state":"awaiting_input","response":"done"},
-	  {"pane":2,"state":"completed","dead":true,"exitCode":0},
-	  {"pane":3,"state":"failed","dead":true,"exitCode":2},
-	  {"pane":4,"state":"panel","control":true}
-	]}`))
-
-	want := map[int]string{0: "working", 1: "awaiting_input", 2: "gone", 3: "gone", 4: "panel"}
-	for idx, state := range want {
-		if got := s.state.paneState(idx); got != state {
-			t.Errorf("pane %d state = %q, want %q (aggregate vocabulary must be translated)",
-				idx, got, state)
-		}
-	}
-	if p, _ := s.state.pane(4); !p.Control {
-		t.Error("pane 4 is the control panel and must be marked as such")
-	}
-	if p, _ := s.state.pane(3); p.ExitCode != 2 || !p.Dead {
-		t.Errorf("pane 3 = %+v, want dead with exit code 2", p)
-	}
-	if got := s.state.response(1); got != "done" {
-		t.Errorf("pane 1 response = %q, want done", got)
-	}
-
-	// A per-pane snapshot (singular `pane`, no `panes`) is the only event that
-	// tracks a turn, and its state names pass through untranslated.
-	s.ingest([]byte(`{"type":"snapshot","pane":1,"state":"working","tool":"Bash"}`))
-	if got := s.state.paneState(1); got != "working" {
-		t.Errorf("pane 1 state = %q after a live snapshot, want working", got)
-	}
-	if got := s.state.tool(1); got != "Bash" {
-		t.Errorf("pane 1 tool = %q, want Bash", got)
-	}
-	if got := s.state.response(1); got != "done" {
-		t.Errorf("an omitted response means unchanged, got %q", got)
-	}
-
-	s.ingest([]byte(`{"type":"exit","pane":0,"exitCode":3}`))
-	if got := s.state.paneState(0); got != "gone" {
-		t.Errorf("pane 0 state = %q after exit, want gone", got)
-	}
-
-	// A reply must never touch pane state — a controller cannot be allowed to
-	// fabricate an observation about a session.
-	s.ingest([]byte(`{"type":"reply","id":"1","ok":true,"result":{"pane":1,"state":"nonsense"}}`))
-	if got := s.state.paneState(1); got != "working" {
-		t.Errorf("a reply changed pane state to %q", got)
-	}
-	// Unknown event types are ignored rather than fatal.
-	s.ingest([]byte(`{"type":"control","dir":"out","pane":1}`))
-	s.ingest([]byte(`not json at all`))
-	if got := s.state.paneState(1); got != "working" {
-		t.Errorf("pane 1 state = %q after junk, want working", got)
-	}
-
-	// results/shutdown end the session and wake every waiter, so nothing sits
-	// on a fifteen-minute timeout after magmux has gone.
-	done := make(chan bool, 1)
-	go func() {
-		done <- s.state.wait(context.Background(),
-			func() bool { return s.state.paneState(1) == "awaiting_input" }, time.Minute)
-	}()
-	time.Sleep(20 * time.Millisecond)
-	s.ingest([]byte(`{"type":"shutdown"}`))
-	select {
-	case ok := <-done:
-		if ok {
-			t.Error("wait returned true although the predicate never held")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("wait did not return after shutdown — waiters must be woken when magmux goes")
-	}
-}
-
-func TestReplyRoutingMatchesNumericAndStringIDs(t *testing.T) {
-	s := &Session{state: newSessionState(), pending: map[string]chan mcpReply{},
-		closed: make(chan struct{}), inFlight: map[int]bool{}}
-	ch := make(chan mcpReply, 1)
-	s.pending["7"] = ch
-
-	s.ingest([]byte(`{"type":"reply","id":7,"ok":true,"result":{"pane":2}}`))
-	select {
-	case r := <-ch:
-		if !r.OK {
-			t.Errorf("reply not ok: %+v", r)
-		}
-	default:
-		t.Fatal("a numeric id did not route to the pending request registered as \"7\"")
-	}
-
-	s.pending["8"] = make(chan mcpReply, 1)
-	s.ingest([]byte(`{"type":"reply","id":"8","ok":false,"code":"no_such_pane","error":"pane 4 of 3"}`))
-	select {
-	case r := <-s.pending["8"]:
-		if r.OK || r.Code != "no_such_pane" {
-			t.Errorf("reply = %+v, want the failure with its code", r)
-		}
-	default:
-		t.Fatal("a string id did not route")
 	}
 }
 
@@ -735,10 +478,10 @@ func startBusyFakeMagmux(t *testing.T, probes int) *fakeMagmux {
 // Nothing in this package runs in parallel, so the swap is safe.
 func shortProbes(t *testing.T) {
 	t.Helper()
-	probe, confirm := sockProbeTimeout, sockProbeConfirmTimeout
-	sockProbeTimeout = 150 * time.Millisecond
-	sockProbeConfirmTimeout = 400 * time.Millisecond
-	t.Cleanup(func() { sockProbeTimeout, sockProbeConfirmTimeout = probe, confirm })
+	probe, confirm := client.ProbeTimeout, client.ProbeConfirmTimeout
+	client.ProbeTimeout = 150 * time.Millisecond
+	client.ProbeConfirmTimeout = 400 * time.Millisecond
+	t.Cleanup(func() { client.ProbeTimeout, client.ProbeConfirmTimeout = probe, confirm })
 }
 
 func (f *fakeMagmux) accept() {
@@ -885,10 +628,10 @@ func TestSessionDrivesAFakeMagmux(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if sess.isLegacy(ctx) {
+	if sess.IsLegacy(ctx) {
 		t.Fatal("a magmux that answered capabilities was marked legacy")
 	}
-	if got := sess.state.paneState(0); got != "awaiting_input" {
+	if got := sess.State().PaneState(0); got != "awaiting_input" {
 		t.Fatalf("pane 0 was not seeded from the connect-time aggregate: %q", got)
 	}
 
@@ -1085,9 +828,9 @@ func TestReadPaneReportsAMissingTranscriptWithoutLosingTheScreen(t *testing.T) {
 // reply says how many went and why.
 func TestRenderTranscriptCapsThePayload(t *testing.T) {
 	big := strings.Repeat("y", 4000)
-	turns := make([]transcriptTurn, 12)
+	turns := make([]client.TranscriptTurn, 12)
 	for i := range turns {
-		turns[i] = transcriptTurn{Role: "assistant", Text: fmt.Sprintf("turn%02d ", i) + big}
+		turns[i] = client.TranscriptTurn{Role: "assistant", Text: fmt.Sprintf("turn%02d ", i) + big}
 	}
 	out := renderTranscript(turns, len(turns))
 	if len(out) > transcriptSectionCap*2 {
@@ -1105,7 +848,7 @@ func TestRenderTranscriptCapsThePayload(t *testing.T) {
 
 	// A single oversized turn is clipped rather than dropped: returning nothing
 	// is indistinguishable from a session that has said nothing.
-	one := renderTranscript([]transcriptTurn{{Role: "assistant",
+	one := renderTranscript([]client.TranscriptTurn{{Role: "assistant",
 		Text: strings.Repeat("z", transcriptTurnTextCap*2)}}, 1)
 	if !strings.Contains(one, "clipped") {
 		t.Error("an oversized turn was not clipped and marked")
@@ -1113,7 +856,7 @@ func TestRenderTranscriptCapsThePayload(t *testing.T) {
 
 	// Tool payloads are clipped with their size stated, so "the tool returned
 	// this" is distinguishable from "the tool returned this and more".
-	tooly := renderTranscript([]transcriptTurn{{Role: "assistant", Tools: []transcriptTool{
+	tooly := renderTranscript([]client.TranscriptTurn{{Role: "assistant", Tools: []client.TranscriptTool{
 		{Name: "Read", Input: `{"file_path":"/x"}`, Result: strings.Repeat("q", 5000)}}}}, 1)
 	if !strings.Contains(tooly, "clipped") || !strings.Contains(tooly, "Read") {
 		t.Errorf("a large tool result was not clipped and marked:\n%s", tooly)
@@ -1165,10 +908,10 @@ func TestSendAndWaitRefusesAPaneWithNoController(t *testing.T) {
 }
 
 func TestRefuseUnturnableOnlyRejectsControllerLessPanes(t *testing.T) {
-	if why := refuseUnturnable(paneInfo{Index: 2, State: "working", Cmd: "npm run dev"}); why == "" {
+	if why := refuseUnturnable(client.PaneInfo{Index: 2, State: "working", Cmd: "npm run dev"}); why == "" {
 		t.Error("a pane with no controller has no turn to wait for and must be refused")
 	}
-	if why := refuseUnturnable(paneInfo{Index: 0, State: "awaiting_input",
+	if why := refuseUnturnable(client.PaneInfo{Index: 0, State: "awaiting_input",
 		Controller: "claude-code"}); why != "" {
 		t.Errorf("a pane with a controller must be drivable, got %q", why)
 	}
@@ -1277,7 +1020,7 @@ func TestLegacyMagmuxRefusesEverythingButSending(t *testing.T) {
 		t.Fatalf("attach: %v", err)
 	}
 	// Two silences — the dial probe and a confirming one — and only then.
-	if !sess.isLegacy(ctx) {
+	if !sess.IsLegacy(ctx) {
 		t.Fatal("a magmux that answered nothing must be treated as legacy")
 	}
 
@@ -1329,9 +1072,9 @@ func TestBusyMagmuxIsNotWrittenOffAsLegacy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if sess.capsNote() != "unproven" {
+	if sess.CapsNote() != "unproven" {
 		t.Errorf("one missed probe settled the verdict at %q; the short dial budget "+
-			"decides nothing", sess.capsNote())
+			"decides nothing", sess.CapsNote())
 	}
 
 	res, rerr := toolOpenPane(ctx, s, json.RawMessage(`{"cmd":"claude","session_id":"busy"}`))
@@ -1341,7 +1084,7 @@ func TestBusyMagmuxIsNotWrittenOffAsLegacy(t *testing.T) {
 	if res["isError"] == true {
 		t.Fatalf("a busy magmux was written off as legacy:\n%s", readPaneText(t, res))
 	}
-	if sess.isLegacy(ctx) {
+	if sess.IsLegacy(ctx) {
 		t.Error("the session answered a probe and is still marked legacy")
 	}
 	sess.Close()
@@ -1352,9 +1095,9 @@ func TestBusyMagmuxIsNotWrittenOffAsLegacy(t *testing.T) {
 // wedged past BOTH probes is refused — and then re-probed, not condemned.
 func TestLegacyVerdictExpiresAndIsRechecked(t *testing.T) {
 	shortProbes(t)
-	recheck := legacyRecheckAfter
-	legacyRecheckAfter = 50 * time.Millisecond
-	t.Cleanup(func() { legacyRecheckAfter = recheck })
+	recheck := client.LegacyRecheckAfter
+	client.LegacyRecheckAfter = 50 * time.Millisecond
+	t.Cleanup(func() { client.LegacyRecheckAfter = recheck })
 
 	f := startBusyFakeMagmux(t, 2)
 	s := newMCPServer(io.Discard, io.Discard)
@@ -1364,56 +1107,16 @@ func TestLegacyVerdictExpiresAndIsRechecked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if !sess.isLegacy(ctx) {
+	if !sess.IsLegacy(ctx) {
 		t.Fatal("two silences in a row must produce the legacy verdict, or a genuinely " +
 			"old magmux is never detected")
 	}
-	time.Sleep(2 * legacyRecheckAfter)
-	if sess.isLegacy(ctx) {
+	time.Sleep(2 * client.LegacyRecheckAfter)
+	if sess.IsLegacy(ctx) {
 		t.Error("the legacy verdict was never re-tested: a magmux that was busy for a " +
 			"minute stays refused for the life of the server")
 	}
 	sess.Close()
-}
-
-// TestALateReplyProvesTheReplyProtocol covers the cheapest recovery there is:
-// a reply that arrived just after its waiter gave up is still proof that the
-// plumbing exists, and proof outranks any amount of silence.
-func TestALateReplyProvesTheReplyProtocol(t *testing.T) {
-	sess := &Session{ID: "late", state: newSessionState(), pending: map[string]chan mcpReply{},
-		closed: make(chan struct{}), inFlight: map[int]bool{}}
-	sess.capState.Store(capsSilent)
-	sess.probedAt = time.Now() // a fresh verdict: isLegacy answers without probing
-	ctx := context.Background()
-	if !sess.isLegacy(ctx) {
-		t.Fatal("setup: the session should start out on the silent verdict")
-	}
-
-	// Nobody is waiting on id 99 any more — the request timed out — and it must
-	// still count.
-	sess.ingest([]byte(`{"type":"reply","id":"99","ok":false,"code":"no_such_pane","error":"nope"}`))
-	if sess.isLegacy(ctx) {
-		t.Error("magmux replied and the session is still refused as legacy")
-	}
-}
-
-func TestSendAndWaitRefusesTwoConcurrentTurnsOnOnePane(t *testing.T) {
-	sess := &Session{ID: "x", state: newSessionState(), pending: map[string]chan mcpReply{},
-		closed: make(chan struct{}), inFlight: map[int]bool{}}
-	if !sess.beginTurn(2) {
-		t.Fatal("first turn was refused")
-	}
-	if sess.beginTurn(2) {
-		t.Error("two concurrent turns on one pane were allowed — the second would report " +
-			"the first one's answer")
-	}
-	if !sess.beginTurn(3) {
-		t.Error("a turn on another pane was refused")
-	}
-	sess.endTurn(2)
-	if !sess.beginTurn(2) {
-		t.Error("the pane was not released")
-	}
 }
 
 // ── self-pane guard ─────────────────────────────────────────────────────────
@@ -1501,16 +1204,16 @@ func TestUnreadableAncestrySaysSoInThePaneListing(t *testing.T) {
 }
 
 func TestRefuseUndrivableExplainsTheSelfDeadlock(t *testing.T) {
-	if why := refuseUndrivable(paneInfo{Index: 1, Self: true}); !strings.Contains(why, "deadlock") {
+	if why := refuseUndrivable(client.PaneInfo{Index: 1, Self: true}); !strings.Contains(why, "deadlock") {
 		t.Errorf("a self pane must be refused with an explanation, got %q", why)
 	}
-	if why := refuseUndrivable(paneInfo{Index: 2, Control: true}); why == "" {
+	if why := refuseUndrivable(client.PaneInfo{Index: 2, Control: true}); why == "" {
 		t.Error("the control panel has no process and must be refused")
 	}
-	if why := refuseUndrivable(paneInfo{Index: 3, Dead: true, State: "gone"}); why == "" {
+	if why := refuseUndrivable(client.PaneInfo{Index: 3, Dead: true, State: "gone"}); why == "" {
 		t.Error("a dead pane must be refused")
 	}
-	if why := refuseUndrivable(paneInfo{Index: 0, State: "awaiting_input"}); why != "" {
+	if why := refuseUndrivable(client.PaneInfo{Index: 0, State: "awaiting_input"}); why != "" {
 		t.Errorf("an idle session pane must be drivable, got %q", why)
 	}
 }

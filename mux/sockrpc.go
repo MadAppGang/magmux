@@ -28,47 +28,29 @@ import (
 	"time"
 
 	"github.com/MadAppGang/magmux/buildinfo"
+	"github.com/MadAppGang/magmux/protocol"
 )
 
-// sockProtocol is the version reported by `capabilities`. Bumped only when a
-// client that understood the previous value would misread the new one.
-const sockProtocol = 1
+// sockProtocol is the version reported by `capabilities`: protocol.Version.
+const sockProtocol = protocol.Version
 
-// Stable, machine-readable failure codes. A caller branches on the code; the
-// message beside it is for a human and may be reworded at any time.
+// The failure codes, and what each one means, are protocol's
+// (protocol/errors.go). These aliases keep every call site in this package, and
+// so every reply byte, exactly as it was.
 const (
-	sockCodeBadRequest    = "bad_request"
-	sockCodeNoSuchPane    = "no_such_pane"
-	sockCodePaneIsControl = "pane_is_control"
-	sockCodePaneDead      = "pane_dead"
-	// sockCodePaneHidden means the pane is alive and holds its id but is not in
-	// the layout, so nothing paints it. Distinct from no_such_pane because the
-	// pane is real and its history is intact, and distinct from pane_is_control
-	// because it is about VISIBILITY: the panel is a perfectly good focus target
-	// while it is on screen, and every other pane could in principle be hidden.
-	sockCodePaneHidden  = "pane_hidden"
-	sockCodeUnknownVerb = "unknown_verb"
-	// sockCodeNotReady means the socket is up but the layout is not: magmux
-	// binds before the first child forks and can therefore be reached before
-	// buildGrid has run. Distinct from no_such_pane on purpose — "pane 0 does
-	// not exist" and "no pane exists yet" send a caller to opposite places, and
-	// the second one is fixed by waiting rather than by using another index.
-	sockCodeNotReady    = "not_ready"
-	sockCodeUnsupported = "unsupported"
-	sockCodeBusy        = "busy"
-	sockCodeTimeout     = "timeout"
-	sockCodeInternal    = "internal"
-	// sockCodeNoController means the pane exists and is perfectly healthy but
-	// magmux is not following a tool inside it — a shell, a dev server, a REPL.
-	// Distinct from unsupported because the recovery differs: there is nothing
-	// to wait for and nothing to fix, so the caller should read the screen.
-	sockCodeNoController = "no_controller"
-	// sockCodeNoTranscript means a controller IS following this pane but has
-	// not located the tool's own record of it. It is emphatically not an empty
-	// success: "we cannot find its record" and "it has said nothing" send a
-	// caller to opposite places, and discovery genuinely lags at session start
-	// and can fail outright (see the ~/.claude/projects note in CLAUDE.md).
-	sockCodeNoTranscript = "no_transcript"
+	sockCodeBadRequest    = protocol.CodeBadRequest
+	sockCodeNoSuchPane    = protocol.CodeNoSuchPane
+	sockCodePaneIsControl = protocol.CodePaneIsControl
+	sockCodePaneDead      = protocol.CodePaneDead
+	sockCodePaneHidden    = protocol.CodePaneHidden
+	sockCodeUnknownVerb   = protocol.CodeUnknownVerb
+	sockCodeNotReady      = protocol.CodeNotReady
+	sockCodeUnsupported   = protocol.CodeUnsupported
+	sockCodeBusy          = protocol.CodeBusy
+	sockCodeTimeout       = protocol.CodeTimeout
+	sockCodeInternal      = protocol.CodeInternal
+	sockCodeNoController  = protocol.CodeNoController
+	sockCodeNoTranscript  = protocol.CodeNoTranscript
 )
 
 // sockVerbs and sockEvents are what `capabilities` advertises. Maintained by
@@ -78,30 +60,20 @@ const (
 var (
 	sockVerbs = []string{"capabilities", "list", "capture", "transcript", "open_pane", "close_pane",
 		"focus", "status", "tint", "overlay", "send", "pilot", "agent"}
-	sockEvents = []string{"snapshot", "exit", "control", "pane_opened", "pane_closed",
-		"results", "shutdown", "reply"}
+	sockEvents = []string{protocol.EventSnapshot, protocol.EventExit, protocol.EventControl, protocol.EventPaneOpened, protocol.EventPaneClosed,
+		protocol.EventResults, protocol.EventShutdown, protocol.EventReply}
 )
 
-// sockErr is a verb failure with a stable machine-readable code.
-type sockErr struct{ Code, Msg string }
-
-func (e *sockErr) Error() string { return e.Msg }
+// sockErr is protocol.Error under its old name, so every call site, and every
+// errors.As in this package, is unchanged.
+type sockErr = protocol.Error
 
 func sockErrf(code, format string, a ...any) *sockErr {
-	return &sockErr{Code: code, Msg: fmt.Sprintf(format, a...)}
+	return protocol.Errf(code, format, a...)
 }
 
 // verbErrCode extracts the machine-readable code from a verb failure, or "".
-func verbErrCode(err error) string {
-	if err == nil {
-		return ""
-	}
-	var se *sockErr
-	if errors.As(err, &se) {
-		return se.Code
-	}
-	return sockCodeInternal
-}
+func verbErrCode(err error) string { return protocol.CodeOf(err) }
 
 // errReplyDeferred is returned by a verb that answers through its done callback
 // instead of returning a result — the work outlives the dispatch call. It is a

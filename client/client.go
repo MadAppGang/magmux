@@ -1,4 +1,4 @@
-package mcp
+package client
 
 // The magmux socket client used by `magmux mcp`.
 //
@@ -27,44 +27,46 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/MadAppGang/magmux/protocol"
 )
 
 // Reply timeouts. Reads are cheap and local; open_pane pays for a fork/exec;
 // send pays pilotSendDelay plus a possibly-busy TUI.
 const (
-	sockReadTimeout      = 5 * time.Second
+	ReadTimeout          = 5 * time.Second
 	sockLifecycleTimeout = 10 * time.Second
-	sockSendTimeout      = 20 * time.Second
+	SendTimeout          = 20 * time.Second
 )
 
 // Capability-probe budgets. Vars rather than consts so a test can exercise both
 // verdicts without paying real seconds of silence for the legacy one.
 var (
-	// sockProbeTimeout bounds the probe made during dial. It is short because
+	// ProbeTimeout bounds the probe made during dial. It is short because
 	// attach must stay snappy, and — the whole point of the two budgets —
 	// silence under it is therefore NOT evidence of anything.
-	sockProbeTimeout = 1500 * time.Millisecond
+	ProbeTimeout = 1500 * time.Millisecond
 
-	// sockProbeConfirmTimeout bounds every later probe, the ones whose answer
+	// ProbeConfirmTimeout bounds every later probe, the ones whose answer
 	// decides whether a verb is refused. A magmux re-scanning ~/.claude/projects
 	// under treeMu.RLock can miss the short budget without being unhealthy; it
 	// gets a lifecycle-grade wait before it is written off. Only a magmux that
-	// really is silent ever pays it, and then at most once per legacyRecheckAfter
+	// really is silent ever pays it, and then at most once per LegacyRecheckAfter
 	// — which is the right way round, because the alternative for a legacy
 	// magmux is a `send` that lands and is then reported as a 20s failure.
-	sockProbeConfirmTimeout = sockLifecycleTimeout
+	ProbeConfirmTimeout = sockLifecycleTimeout
 
-	// legacyRecheckAfter is how long a "silent" verdict stands before another
+	// LegacyRecheckAfter is how long a "silent" verdict stands before another
 	// probe is spent on it. The verdict is a guess made from an absence, so it
 	// expires; a magmux that was wedged for a minute must not be refused for the
 	// rest of the server's life.
-	legacyRecheckAfter = 30 * time.Second
+	LegacyRecheckAfter = 30 * time.Second
 )
 
 // Default two-phase waits, matching pilot/magmux.ts.
 const (
-	defaultStartTimeout = 45 * time.Second
-	defaultTurnTimeout  = 15 * time.Minute
+	DefaultStartTimeout = 45 * time.Second
+	DefaultTurnTimeout  = 15 * time.Minute
 )
 
 // settledStates are the states in which a session has finished with a turn and
@@ -76,11 +78,11 @@ var settledStates = map[string]bool{
 	"gone":                true,
 }
 
-// errLegacyMagmux is returned for every verb that needs the reply plumbing
+// ErrLegacyMagmux is returned for every verb that needs the reply plumbing
 // when the magmux on the other end predates it. `send` still works, because it
 // needs nothing but a fire-and-forget write plus the broadcasts magmux has
 // always emitted — which is exactly the pilot's proven capability set.
-var errLegacyMagmux = errors.New(
+var ErrLegacyMagmux = errors.New(
 	"this magmux predates the request/reply socket protocol, so only send_keys and " +
 		"send_and_wait work against it — ask the human to restart magmux with the current binary")
 
@@ -116,13 +118,10 @@ func (e *sockRequestError) Error() string {
 	return fmt.Sprintf("%s (%s)", e.Msg, e.Code)
 }
 
-func sockErrCode(err error) string {
-	var re *sockRequestError
-	if errors.As(err, &re) {
-		return re.Code
-	}
-	return ""
-}
+// Unwrap exposes the failure as the protocol.Error magmux sent, so
+// protocol.CodeOf reads its code. Error keeps its own wording, with the code
+// beside the message, because that is what the model is shown.
+func (e *sockRequestError) Unwrap() error { return &protocol.Error{Code: e.Code, Msg: e.Msg} }
 
 // sockTimeoutError is "our own timer fired and magmux said nothing". It is a
 // type rather than a formatted string because it is the ONE failure that says
@@ -141,10 +140,10 @@ func (e *sockTimeoutError) Error() string {
 
 // ── pane state ──────────────────────────────────────────────────────────────
 
-// paneInfo is everything the client knows about one pane. Fields are filled
+// PaneInfo is everything the client knows about one pane. Fields are filled
 // from whichever source spoke last: the connect-time aggregate, a per-pane
 // snapshot, an `exit` event, or a `list` reply.
-type paneInfo struct {
+type PaneInfo struct {
 	Index      int
 	State      string
 	Label      string
@@ -168,11 +167,11 @@ type paneInfo struct {
 	Self       bool // set by the MCP layer, not by magmux
 }
 
-// aggregateState translates magmux's pane-level vocabulary (built from
+// AggregateState translates magmux's pane-level vocabulary (built from
 // dead/exitCode/inputReady in buildPaneResults) into the controller lifecycle
 // names the live per-pane snapshots carry, so the rest of the server reasons
 // about exactly one set of state names.
-func aggregateState(s string) string {
+func AggregateState(s string) string {
 	switch s {
 	case "completed", "failed":
 		return "gone"
@@ -184,50 +183,50 @@ func aggregateState(s string) string {
 	}
 }
 
-// sessionState is the client's view of every pane, plus a broadcast channel so
+// SessionState is the client's view of every pane, plus a broadcast channel so
 // waiters re-check their predicate on every event. It is the Go equivalent of
 // magmux.ts's EventEmitter + waitFor.
-type sessionState struct {
+type SessionState struct {
 	mu     sync.Mutex
-	panes  map[int]*paneInfo
+	panes  map[int]*PaneInfo
 	order  []int
 	ended  bool
 	notify chan struct{}
 }
 
-func newSessionState() *sessionState {
-	return &sessionState{panes: map[int]*paneInfo{}, notify: make(chan struct{})}
+func NewSessionState() *SessionState {
+	return &SessionState{panes: map[int]*PaneInfo{}, notify: make(chan struct{})}
 }
 
 // bumpLocked wakes every waiter. The closed-and-replaced channel is a
 // broadcast with no per-waiter bookkeeping: a waiter that grabbed the old
 // channel sees it close, and one that arrives later grabs the new one.
 // Caller holds mu.
-func (st *sessionState) bumpLocked() {
+func (st *SessionState) bumpLocked() {
 	close(st.notify)
 	st.notify = make(chan struct{})
 }
 
-func (st *sessionState) sub() <-chan struct{} {
+func (st *SessionState) sub() <-chan struct{} {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.notify
 }
 
 // paneLocked returns the entry for idx, creating it if needed. Caller holds mu.
-func (st *sessionState) paneLocked(idx int) *paneInfo {
+func (st *SessionState) paneLocked(idx int) *PaneInfo {
 	if p, ok := st.panes[idx]; ok {
 		return p
 	}
-	p := &paneInfo{Index: idx, State: "unknown"}
+	p := &PaneInfo{Index: idx, State: "unknown"}
 	st.panes[idx] = p
 	st.order = append(st.order, idx)
 	return p
 }
 
-// seedAggregate applies an aggregate `snapshot`/`results` payload: the whole
+// SeedAggregate applies an aggregate `snapshot`/`results` payload: the whole
 // pane table in one event, in magmux's pane-level vocabulary.
-func (st *sessionState) seedAggregate(entries []any) {
+func (st *SessionState) SeedAggregate(entries []any) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	for _, raw := range entries {
@@ -241,7 +240,7 @@ func (st *sessionState) seedAggregate(entries []any) {
 		}
 		p := st.paneLocked(idx)
 		if s, ok := evStr(e, "state"); ok {
-			p.State = aggregateState(s)
+			p.State = AggregateState(s)
 		}
 		if evBool(e, "control") || p.State == "panel" {
 			// The control panel has no process and never takes a turn; every
@@ -256,9 +255,9 @@ func (st *sessionState) seedAggregate(entries []any) {
 	st.bumpLocked()
 }
 
-// applyPane applies a per-pane live `snapshot` (singular `pane`, no `panes`),
+// ApplyPane applies a per-pane live `snapshot` (singular `pane`, no `panes`),
 // which is the only event that tracks a turn.
-func (st *sessionState) applyPane(e map[string]any) {
+func (st *SessionState) ApplyPane(e map[string]any) {
 	idx, ok := evInt(e, "pane")
 	if !ok {
 		return
@@ -303,10 +302,10 @@ func (st *sessionState) applyPane(e map[string]any) {
 //
 // `response` is the exception that proves it: it is sticky here, and NOT sticky
 // on the per-pane snapshot path, where magmux emits the key unconditionally.
-// See applyPane.
+// See ApplyPane.
 //
 // Caller holds mu.
-func (st *sessionState) mergeCommonLocked(p *paneInfo, e map[string]any) {
+func (st *SessionState) mergeCommonLocked(p *PaneInfo, e map[string]any) {
 	if v, ok := evStr(e, "response"); ok && v != "" {
 		p.Response = v
 	}
@@ -354,7 +353,7 @@ func (st *sessionState) mergeCommonLocked(p *paneInfo, e map[string]any) {
 	}
 }
 
-func (st *sessionState) markExit(idx, code int) {
+func (st *SessionState) markExit(idx, code int) {
 	if idx < 0 {
 		return
 	}
@@ -370,7 +369,7 @@ func (st *sessionState) markExit(idx, code int) {
 // markEnded records that magmux is going away. Waiters re-check their
 // predicate once more and then give up rather than burning their full timeout,
 // mirroring magmux.ts's `onClosed => done(pred())`.
-func (st *sessionState) markEnded() {
+func (st *SessionState) markEnded() {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.ended {
@@ -380,28 +379,28 @@ func (st *sessionState) markEnded() {
 	st.bumpLocked()
 }
 
-func (st *sessionState) isEnded() bool {
+func (st *SessionState) isEnded() bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.ended
 }
 
 // pane returns a copy of one pane's state.
-func (st *sessionState) pane(idx int) (paneInfo, bool) {
+func (st *SessionState) pane(idx int) (PaneInfo, bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	p, ok := st.panes[idx]
 	if !ok {
-		return paneInfo{}, false
+		return PaneInfo{}, false
 	}
 	return *p, true
 }
 
-// all returns a copy of every pane, in the order magmux first mentioned them.
-func (st *sessionState) all() []paneInfo {
+// All returns a copy of every pane, in the order magmux first mentioned them.
+func (st *SessionState) All() []PaneInfo {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	out := make([]paneInfo, 0, len(st.order))
+	out := make([]PaneInfo, 0, len(st.order))
 	for _, idx := range st.order {
 		if p, ok := st.panes[idx]; ok {
 			out = append(out, *p)
@@ -410,21 +409,21 @@ func (st *sessionState) all() []paneInfo {
 	return out
 }
 
-func (st *sessionState) paneState(idx int) string {
+func (st *SessionState) PaneState(idx int) string {
 	if p, ok := st.pane(idx); ok {
 		return p.State
 	}
 	return "unknown"
 }
 
-func (st *sessionState) response(idx int) string {
+func (st *SessionState) response(idx int) string {
 	if p, ok := st.pane(idx); ok {
 		return p.Response
 	}
 	return ""
 }
 
-func (st *sessionState) tool(idx int) string {
+func (st *SessionState) tool(idx int) string {
 	if p, ok := st.pane(idx); ok {
 		return p.Tool
 	}
@@ -436,7 +435,7 @@ func (st *sessionState) tool(idx int) string {
 // cancelled, or the session ended first.
 //
 // pred must not be called with st.mu held, so it may use the accessors above.
-func (st *sessionState) wait(ctx context.Context, pred func() bool, timeout time.Duration) bool {
+func (st *SessionState) wait(ctx context.Context, pred func() bool, timeout time.Duration) bool {
 	if pred() {
 		return true
 	}
@@ -487,7 +486,7 @@ type Session struct {
 	nextID  atomic.Uint64
 	pending map[string]chan mcpReply
 	pendMu  sync.Mutex
-	state   *sessionState
+	state   *SessionState
 	closed  chan struct{}
 	once    sync.Once
 
@@ -501,9 +500,12 @@ type Session struct {
 	inFlight map[int]bool
 }
 
-// dialSession connects, consumes the guaranteed connect-time aggregate
+// State is the client's live view of this session's panes.
+func (s *Session) State() *SessionState { return s.state }
+
+// Dial connects, consumes the guaranteed connect-time aggregate
 // snapshot, starts the reader, and probes for the reply plumbing.
-func dialSession(ctx context.Context, id, sockPath string, pid int) (*Session, error) {
+func Dial(ctx context.Context, id, sockPath string, pid int) (*Session, error) {
 	d := net.Dialer{Timeout: 2 * time.Second}
 	conn, err := d.DialContext(ctx, "unix", sockPath)
 	if err != nil {
@@ -515,13 +517,13 @@ func dialSession(ctx context.Context, id, sockPath string, pid int) (*Session, e
 		PID:      pid,
 		conn:     conn,
 		pending:  map[string]chan mcpReply{},
-		state:    newSessionState(),
+		state:    NewSessionState(),
 		closed:   make(chan struct{}),
 		inFlight: map[int]bool{},
 	}
 
 	br := bufio.NewReaderSize(conn, 64*1024)
-	_ = conn.SetReadDeadline(time.Now().Add(sockReadTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(ReadTimeout))
 	first, err := br.ReadBytes('\n')
 	if err != nil {
 		conn.Close()
@@ -560,32 +562,32 @@ func (s *Session) ingest(line []byte) {
 	}
 	typ, _ := evStr(ev, "type")
 	switch typ {
-	case "snapshot":
+	case protocol.EventSnapshot:
 		// The aggregate carries `panes`; the per-pane live event carries
 		// `pane`. Subscribers disambiguate on that, and only the latter tracks
 		// a turn.
 		if arr, ok := ev["panes"].([]any); ok {
-			s.state.seedAggregate(arr)
+			s.state.SeedAggregate(arr)
 			return
 		}
 		if _, ok := ev["pane"]; ok {
-			s.state.applyPane(ev)
+			s.state.ApplyPane(ev)
 		}
-	case "exit":
+	case protocol.EventExit:
 		idx, ok := evInt(ev, "pane")
 		if !ok {
 			return
 		}
 		code, _ := evInt(ev, "exitCode")
 		s.state.markExit(idx, code)
-	case "results":
+	case protocol.EventResults:
 		if arr, ok := ev["panes"].([]any); ok {
-			s.state.seedAggregate(arr)
+			s.state.SeedAggregate(arr)
 		}
 		s.state.markEnded()
-	case "shutdown":
+	case protocol.EventShutdown:
 		s.state.markEnded()
-	case "reply":
+	case protocol.EventReply:
 		s.routeReply(line)
 	default:
 		// `control`, `pilot` and anything we do not know about: ignore. A
@@ -655,7 +657,7 @@ func replyKey(raw json.RawMessage) string {
 //     already given up and including an `ok:false` one.
 //   - capsSilent is a guess made from an absence. It needs two silences — the
 //     short dial probe and a lifecycle-grade one — and it EXPIRES after
-//     legacyRecheckAfter, so it can never be the permanent write-off it was.
+//     LegacyRecheckAfter, so it can never be the permanent write-off it was.
 //   - Only a probe timeout is evidence. A cancelled context or a closed socket
 //     leaves the verdict exactly where it was.
 const (
@@ -675,18 +677,18 @@ func (s *Session) probeCapabilities(ctx context.Context) {
 	s.capsVerdict(ctx)
 }
 
-// isLegacy reports whether this magmux lacks the reply plumbing. It may block
+// IsLegacy reports whether this magmux lacks the reply plumbing. It may block
 // for one probe when the verdict is not yet settled, which is why it takes a
 // context: every refusal in the server is made from this answer, so it must be
 // the considered one rather than a stale guess.
-func (s *Session) isLegacy(ctx context.Context) bool {
+func (s *Session) IsLegacy(ctx context.Context) bool {
 	return s.capsVerdict(ctx) == capsSilent
 }
 
-// capsNote is the verdict as a word, WITHOUT probing for it — for logging, and
-// for nothing else. A decision made from this rather than from isLegacy is a
+// CapsNote is the verdict as a word, WITHOUT probing for it — for logging, and
+// for nothing else. A decision made from this rather than from IsLegacy is a
 // decision made from a guess that may not have been checked yet.
-func (s *Session) capsNote() string {
+func (s *Session) CapsNote() string {
 	switch s.capState.Load() {
 	case capsProven:
 		return "replies"
@@ -710,11 +712,11 @@ func (s *Session) capsVerdict(ctx context.Context) int32 {
 		return v
 	}
 
-	timeout := sockProbeConfirmTimeout
+	timeout := ProbeConfirmTimeout
 	first := s.probedAt.IsZero()
 	if first {
-		timeout = sockProbeTimeout
-	} else if v == capsSilent && time.Since(s.probedAt) < legacyRecheckAfter {
+		timeout = ProbeTimeout
+	} else if v == capsSilent && time.Since(s.probedAt) < LegacyRecheckAfter {
 		return capsSilent // a fresh verdict; do not spend another timeout on it
 	}
 	s.probedAt = time.Now()
@@ -748,8 +750,8 @@ func (s *Session) capsVerdict(ctx context.Context) int32 {
 // request sends a message with an id and waits for its single reply, refusing
 // up front against a magmux that cannot answer.
 func (s *Session) request(ctx context.Context, msg map[string]any, timeout time.Duration) (map[string]any, error) {
-	if s.isLegacy(ctx) {
-		return nil, errLegacyMagmux
+	if s.IsLegacy(ctx) {
+		return nil, ErrLegacyMagmux
 	}
 	return s.requestRaw(ctx, msg, timeout)
 }
@@ -793,9 +795,9 @@ func (s *Session) requestRaw(ctx context.Context, msg map[string]any, timeout ti
 	}
 }
 
-// fire writes a message with no id, which magmux answers with nothing. Used
+// Fire writes a message with no id, which magmux answers with nothing. Used
 // for `send` against a legacy magmux, the one verb that works without replies.
-func (s *Session) fire(msg map[string]any) error {
+func (s *Session) Fire(msg map[string]any) error {
 	return s.writeLine(msg)
 }
 
@@ -812,7 +814,7 @@ func (s *Session) writeLine(msg map[string]any) error {
 		return fmt.Errorf("magmux session %s is closed", s.ID)
 	default:
 	}
-	_ = s.conn.SetWriteDeadline(time.Now().Add(sockReadTimeout))
+	_ = s.conn.SetWriteDeadline(time.Now().Add(ReadTimeout))
 	_, err = s.conn.Write(data)
 	_ = s.conn.SetWriteDeadline(time.Time{})
 	return err
@@ -835,8 +837,8 @@ func (s *Session) close(closeConn bool) {
 	}
 }
 
-// beginTurn claims a pane for one send_and_wait.
-func (s *Session) beginTurn(pane int) bool {
+// BeginTurn claims a pane for one send_and_wait.
+func (s *Session) BeginTurn(pane int) bool {
 	s.turnMu.Lock()
 	defer s.turnMu.Unlock()
 	if s.inFlight[pane] {
@@ -846,7 +848,7 @@ func (s *Session) beginTurn(pane int) bool {
 	return true
 }
 
-func (s *Session) endTurn(pane int) {
+func (s *Session) EndTurn(pane int) {
 	s.turnMu.Lock()
 	delete(s.inFlight, pane)
 	s.turnMu.Unlock()
@@ -854,28 +856,28 @@ func (s *Session) endTurn(pane int) {
 
 // ── verbs ───────────────────────────────────────────────────────────────────
 
-// listPanes asks magmux for its enriched pane table, falling back to the state
+// ListPanes asks magmux for its enriched pane table, falling back to the state
 // the broadcasts have already given us when the verb is unavailable. The
 // fallback is what keeps list_panes working against a legacy magmux.
-func (s *Session) listPanes(ctx context.Context) ([]paneInfo, error) {
-	if s.isLegacy(ctx) {
-		return s.state.all(), nil
+func (s *Session) ListPanes(ctx context.Context) ([]PaneInfo, error) {
+	if s.IsLegacy(ctx) {
+		return s.state.All(), nil
 	}
-	res, err := s.request(ctx, map[string]any{"type": "list"}, sockReadTimeout)
+	res, err := s.request(ctx, map[string]any{"type": "list"}, ReadTimeout)
 	if err != nil {
-		code := sockErrCode(err)
-		if code == "unknown_verb" || code == "unsupported" {
-			return s.state.all(), nil
+		code := protocol.CodeOf(err)
+		if code == protocol.CodeUnknownVerb || code == protocol.CodeUnsupported {
+			return s.state.All(), nil
 		}
 		return nil, err
 	}
 	if arr, ok := res["panes"].([]any); ok {
-		s.state.seedAggregate(arr)
+		s.state.SeedAggregate(arr)
 	}
-	return s.state.all(), nil
+	return s.state.All(), nil
 }
 
-// capture renders a screenful of a pane. lines>0 keeps the LAST n rows, where
+// Capture renders a screenful of a pane. lines>0 keeps the LAST n rows, where
 // the prompt lives; offset>0 reaches back through the pane's scrollback in rows,
 // measured from the bottom of the live screen.
 //
@@ -883,7 +885,7 @@ func (s *Session) listPanes(ctx context.Context) ([]paneInfo, error) {
 // magmux predating scrollback byte-identical: an older build ignores unknown
 // fields, so a zero offset would work anyway, but a request that carries nothing
 // new cannot be blamed for anything either.
-func (s *Session) capture(ctx context.Context, pane, lines, offset int) (map[string]any, error) {
+func (s *Session) Capture(ctx context.Context, pane, lines, offset int) (map[string]any, error) {
 	msg := map[string]any{"type": "capture", "pane": pane}
 	if lines > 0 {
 		msg["lines"] = lines
@@ -891,50 +893,50 @@ func (s *Session) capture(ctx context.Context, pane, lines, offset int) (map[str
 	if offset > 0 {
 		msg["offset"] = offset
 	}
-	return s.request(ctx, msg, sockReadTimeout)
+	return s.request(ctx, msg, ReadTimeout)
 }
 
-// transcriptTurn is one turn of a session's own on-disk record, as the socket
+// TranscriptTurn is one turn of a session's own on-disk record, as the socket
 // carries it. Separate from magmux's Turn on purpose: the MCP server is a
 // different process and shares no types with the multiplexer, so this is a
 // wire shape and stays one.
-type transcriptTurn struct {
+type TranscriptTurn struct {
 	Role      string
 	Text      string
 	Timestamp string
-	Tools     []transcriptTool
+	Tools     []TranscriptTool
 }
 
-type transcriptTool struct {
+type TranscriptTool struct {
 	Name   string
 	Input  string
 	Result string
 }
 
-// transcript asks magmux for the last `turns` turns of a pane's session record.
+// Transcript asks magmux for the last `turns` turns of a pane's session record.
 //
 // Errors are passed through untouched, codes and all: read_pane branches on
 // no_controller / no_transcript / unsupported to tell the model three quite
 // different things, and flattening them into "could not read the transcript"
 // would put it back to guessing which one it hit.
-func (s *Session) transcript(ctx context.Context, pane, turns int) ([]transcriptTurn, error) {
+func (s *Session) Transcript(ctx context.Context, pane, turns int) ([]TranscriptTurn, error) {
 	msg := map[string]any{"type": "transcript", "pane": pane}
 	if turns > 0 {
 		// `lines` is what the verb reads the turn count from; see sockTranscript.
 		msg["lines"] = turns
 	}
-	res, err := s.request(ctx, msg, sockReadTimeout)
+	res, err := s.request(ctx, msg, ReadTimeout)
 	if err != nil {
 		return nil, err
 	}
 	raw, _ := res["turns"].([]any)
-	out := make([]transcriptTurn, 0, len(raw))
+	out := make([]TranscriptTurn, 0, len(raw))
 	for _, entry := range raw {
 		e, ok := entry.(map[string]any)
 		if !ok {
 			continue
 		}
-		t := transcriptTurn{}
+		t := TranscriptTurn{}
 		t.Role, _ = evStr(e, "role")
 		t.Text, _ = evStr(e, "text")
 		t.Timestamp, _ = evStr(e, "timestamp")
@@ -944,7 +946,7 @@ func (s *Session) transcript(ctx context.Context, pane, turns int) ([]transcript
 			if !ok {
 				continue
 			}
-			var call transcriptTool
+			var call TranscriptTool
 			call.Name, _ = evStr(tm, "name")
 			call.Input, _ = evStr(tm, "input")
 			call.Result, _ = evStr(tm, "result")
@@ -955,8 +957,8 @@ func (s *Session) transcript(ctx context.Context, pane, turns int) ([]transcript
 	return out, nil
 }
 
-// sendKeys delivers text and/or named keys to a pane.
-func (s *Session) sendKeys(ctx context.Context, pane int, text string, keys []string, enter bool, label string) error {
+// SendKeys delivers text and/or named keys to a pane.
+func (s *Session) SendKeys(ctx context.Context, pane int, text string, keys []string, enter bool, label string) error {
 	msg := map[string]any{
 		"type":  "send",
 		"pane":  pane,
@@ -971,20 +973,20 @@ func (s *Session) sendKeys(ctx context.Context, pane int, text string, keys []st
 	if label != "" {
 		msg["label"] = label
 	}
-	if s.isLegacy(ctx) {
+	if s.IsLegacy(ctx) {
 		// No reply to wait for; the broadcasts are the only feedback there is.
-		return s.fire(msg)
+		return s.Fire(msg)
 	}
-	_, err := s.request(ctx, msg, sockSendTimeout)
+	_, err := s.request(ctx, msg, SendTimeout)
 	return err
 }
 
-func (s *Session) openPane(ctx context.Context, req map[string]any) (map[string]any, error) {
+func (s *Session) OpenPane(ctx context.Context, req map[string]any) (map[string]any, error) {
 	req["type"] = "open_pane"
 	return s.request(ctx, req, sockLifecycleTimeout)
 }
 
-func (s *Session) closePane(ctx context.Context, pane int, force bool) (map[string]any, error) {
+func (s *Session) ClosePane(ctx context.Context, pane int, force bool) (map[string]any, error) {
 	msg := map[string]any{"type": "close_pane", "pane": pane}
 	if force {
 		msg["force"] = true
@@ -994,9 +996,9 @@ func (s *Session) closePane(ctx context.Context, pane int, force bool) (map[stri
 
 // ── the two-phase turn ──────────────────────────────────────────────────────
 
-// turnResult is what the controlled session did in response to one
+// TurnResult is what the controlled session did in response to one
 // instruction. Mirrors magmux.ts's TurnResult.
-type turnResult struct {
+type TurnResult struct {
 	State    string
 	Response string
 	Tool     string
@@ -1004,7 +1006,7 @@ type turnResult struct {
 	Stalled  bool
 }
 
-// runInstruction pushes an instruction into a pane and waits for the resulting
+// RunInstruction pushes an instruction into a pane and waits for the resulting
 // turn. A logic port of pilot/magmux.ts:188-228.
 //
 // The wait is two-phase on purpose. The session is already sitting in
@@ -1019,134 +1021,51 @@ type turnResult struct {
 // to do" need different responses from the driver.
 //
 // send is injected so this function can be unit-tested against a fake
-// sessionState with no socket at all — it is the logic most likely to rot.
-func runInstruction(ctx context.Context, st *sessionState, pane int, send func() error,
-	startTimeout, turnTimeout time.Duration) (turnResult, error) {
+// SessionState with no socket at all — it is the logic most likely to rot.
+func RunInstruction(ctx context.Context, st *SessionState, pane int, send func() error,
+	startTimeout, turnTimeout time.Duration) (TurnResult, error) {
 
 	startedAt := time.Now()
 	// Sampled per call, immediately before the send, and never reused across
 	// turns: it is the baseline for the escape hatch below, and a baseline from
 	// two turns ago would make a repeated answer look like a fresh one. Now
-	// that an explicitly empty response is honoured (applyPane), the clear that
+	// that an explicitly empty response is honoured (ApplyPane), the clear that
 	// begins a turn is itself a visible change from this baseline, which is
 	// exactly the evidence the escape hatch wants.
 	before := st.response(pane)
 
 	if err := send(); err != nil {
-		return turnResult{}, err
+		return TurnResult{}, err
 	}
 
-	started := st.wait(ctx, func() bool { return !settledStates[st.paneState(pane)] }, startTimeout)
+	started := st.wait(ctx, func() bool { return !settledStates[st.PaneState(pane)] }, startTimeout)
 	if !started {
 		// One honest escape hatch: if the response text changed while we were
 		// waiting, the turn did run and we simply never sampled a non-settled
 		// state — a turn shorter than the controller's 250ms poll window.
 		if st.response(pane) != before {
-			return turnResult{
-				State:    st.paneState(pane),
+			return TurnResult{
+				State:    st.PaneState(pane),
 				Response: st.response(pane),
 				Tool:     st.tool(pane),
 				Duration: time.Since(startedAt),
 			}, nil
 		}
-		return turnResult{State: "stalled", Duration: time.Since(startedAt), Stalled: true}, nil
+		return TurnResult{State: "stalled", Duration: time.Since(startedAt), Stalled: true}, nil
 	}
 
-	settled := st.wait(ctx, func() bool { return settledStates[st.paneState(pane)] }, turnTimeout)
-	state := st.paneState(pane)
+	settled := st.wait(ctx, func() bool { return settledStates[st.PaneState(pane)] }, turnTimeout)
+	state := st.PaneState(pane)
 	if !settled {
 		state = "stalled"
 	}
-	return turnResult{
+	return TurnResult{
 		State:    state,
 		Response: st.response(pane),
 		Tool:     st.tool(pane),
 		Duration: time.Since(startedAt),
 		Stalled:  !settled,
 	}, nil
-}
-
-// describeTurn turns a turnResult into the text the driving model reads. A
-// port of pilot/pilot.ts:445-485, including the awaiting-input-with-no-response
-// paragraph, which is load-bearing: saying "(no response)" reads as "nothing
-// happened", and a driver then burns its budget on sanity checks — observed
-// costing half a run.
-//
-// screen is the last few rendered lines, appended when a turn settles with no
-// response text. The pilot could only *explain* the emptiness; with capture we
-// can show what actually happened.
-func describeTurn(r turnResult, screen string) string {
-	secs := fmt.Sprintf("%.0f", r.Duration.Seconds())
-	var b strings.Builder
-	switch r.State {
-	case "awaiting_input":
-		if r.Response == "" {
-			fmt.Fprintf(&b, "The session finished the turn in %ss and is waiting for the next "+
-				"instruction.\n\nIt produced no text summary — normal when a turn is just tool "+
-				"calls", secs)
-			if r.Tool != "" {
-				fmt.Fprintf(&b, " (last tool: %s)", r.Tool)
-			}
-			b.WriteString(". This does NOT mean the instruction failed, and the session is " +
-				"working normally. If you need to know the outcome, make it part of the next " +
-				"instruction — ask the session to state the result in its reply, in words.")
-			appendScreen(&b, screen)
-			return b.String()
-		}
-		fmt.Fprintf(&b, "The session finished the turn in %ss and is waiting for the next "+
-			"instruction.\n\nIt reported:\n%s", secs, r.Response)
-		if r.Tool != "" {
-			fmt.Fprintf(&b, "\n\nLast tool used: %s", r.Tool)
-		}
-		return b.String()
-	case "awaiting_permission":
-		fmt.Fprintf(&b, "After %ss the session is BLOCKED on a permission prompt and cannot "+
-			"continue on its own. Last output:\n%s", secs, orNone(r.Response))
-		appendScreen(&b, screen)
-		b.WriteString("\n\nAnswer it with send_keys (for example keys:[\"1\"] or keys:[\"enter\"]) " +
-			"after reading the prompt.")
-		return b.String()
-	case "error":
-		fmt.Fprintf(&b, "The session reported an error after %ss:\n%s", secs, orDetail(r.Response))
-		appendScreen(&b, screen)
-		return b.String()
-	case "gone":
-		fmt.Fprintf(&b, "The session process exited after %ss. No further instructions can be "+
-			"sent to this pane.", secs)
-		appendScreen(&b, screen)
-		return b.String()
-	default:
-		fmt.Fprintf(&b, "The instruction did not produce a turn within %ss — the session never "+
-			"started working. It may not have received the instruction. Do not assume the step "+
-			"was done.", secs)
-		appendScreen(&b, screen)
-		b.WriteString("\n\nRead the pane before retrying: the session may be at a prompt, " +
-			"mid-render, or waiting on something else.")
-		return b.String()
-	}
-}
-
-func appendScreen(b *strings.Builder, screen string) {
-	if strings.TrimSpace(screen) == "" {
-		return
-	}
-	b.WriteString("\n\nWhat the pane shows right now:\n```\n")
-	b.WriteString(strings.TrimRight(screen, "\n"))
-	b.WriteString("\n```")
-}
-
-func orNone(s string) string {
-	if s == "" {
-		return "(none)"
-	}
-	return s
-}
-
-func orDetail(s string) string {
-	if s == "" {
-		return "(no detail)"
-	}
-	return s
 }
 
 // ── JSON helpers ────────────────────────────────────────────────────────────

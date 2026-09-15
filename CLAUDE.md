@@ -14,13 +14,19 @@ Layout: `cmd/magmux/main.go` is a thin shim. Its first statement dispatches
 which GoReleaser sets with `-X github.com/MadAppGang/magmux/buildinfo.Version=…`.
 The leaf packages `pty/`, `proc/`, `sockdir/` and `theme/` sit below `mux`,
 and the MCP server is package `mcp` in `mcp/`; each is an implementation detail
-of magmux with no API stability before v1. Everything else is package `mux` in
+of magmux with no API stability before v1. The two PUBLIC packages are
+`protocol/` — the socket's error codes (`protocol.Error`, `Errf`, `CodeOf`,
+`Code*`), event names and version; `mux/sockrpc.go` keeps `sockErr`,
+`sockErrf`, `verbErrCode` and `sockCode*` as aliases of them — and `client/`,
+the Go socket client (`Session`, `Dial`, `RunInstruction`) that `mcp` drives
+sessions through, formerly `mcp/mcp_client.go`. Everything else is package `mux` in
 `mux/`, and `go test` runs each package with cwd = its own directory, so
 `TestMain` builds `../cmd/magmux`. There is no `internal` directory, so the
 compiler no longer stops a lower package importing `mux`:
 `cmd/magmux/import_direction_test.go` (`TestImportDirection`) is that guard.
 `test/reorg/r3.sed` is the rename map for the identifiers that changed name
-when the leaves moved out.
+when the leaves moved out; `test/reorg/r4.sed` is the same for `protocol` and
+`client`.
 
 The terminal core (formerly `mux/main.go`, ~8,350 lines) is split by section
 into files in `mux/`; the tool-controller layer and the socket layer live

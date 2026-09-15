@@ -833,9 +833,11 @@ func assertThemeLine(t *testing.T, line string, contains []string) {
 func TestNoCouldNotDetectString(t *testing.T) {
 	needles := []string{"could not " + "detect", "undetec" + "ted"}
 	// The leaf packages R3 moved out of this one are scanned too, so the test
-	// still covers every line it covered when they were files in package mux.
+	// still covers every line it covered when they were files in package mux;
+	// so are client and protocol, which R4 lifted out of mcp and sockrpc.go.
 	var files []string
-	for _, pat := range []string{"*.go", "../theme/*.go", "../sockdir/*.go", "../pty/*.go", "../proc/*.go", "../mcp/*.go"} {
+	for _, pat := range []string{"*.go", "../theme/*.go", "../sockdir/*.go", "../pty/*.go", "../proc/*.go", "../mcp/*.go",
+		"../client/*.go", "../protocol/*.go"} {
 		m, err := filepath.Glob(pat)
 		if err != nil || len(m) == 0 {
 			t.Fatalf("glob %s: %v (%d files)", pat, err, len(m))

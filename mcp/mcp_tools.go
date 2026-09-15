@@ -28,6 +28,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/MadAppGang/magmux/client"
+	"github.com/MadAppGang/magmux/protocol"
 	"github.com/MadAppGang/magmux/sockdir"
 )
 
@@ -330,7 +332,7 @@ func (s *mcpServer) handleToolCall(req rpcRequest) {
 // the current default, then the magmux we are running inside, then the only
 // reachable one. Ambiguity is an error rather than a guess — picking the wrong
 // session means typing into someone else's terminal.
-func (s *mcpServer) resolveSession(ctx context.Context, id string) (*Session, error) {
+func (s *mcpServer) resolveSession(ctx context.Context, id string) (*client.Session, error) {
 	s.sessMu.Lock()
 	if id != "" {
 		if sess, ok := s.sessions[id]; ok {
@@ -393,7 +395,7 @@ func (s *mcpServer) resolveSession(ctx context.Context, id string) (*Session, er
 
 // attach dials a session and registers it, becoming the default if there is
 // none yet.
-func (s *mcpServer) attach(ctx context.Context, id, sock string, pid int) (*Session, error) {
+func (s *mcpServer) attach(ctx context.Context, id, sock string, pid int) (*client.Session, error) {
 	if sock == "" {
 		if id == "" {
 			return nil, fmt.Errorf("no id or socket given")
@@ -411,7 +413,7 @@ func (s *mcpServer) attach(ctx context.Context, id, sock string, pid int) (*Sess
 	}
 	s.sessMu.Unlock()
 
-	sess, err := dialSession(ctx, id, sock, pid)
+	sess, err := client.Dial(ctx, id, sock, pid)
 	if err != nil {
 		return nil, err
 	}
@@ -444,13 +446,13 @@ func (s *mcpServer) attach(ctx context.Context, id, sock string, pid int) (*Sess
 	// named itself at initialize — an anonymous controller gains nothing from
 	// the event, and `pilot start` resets the panel's counters.
 	if client != "" {
-		if err := sess.fire(map[string]any{
+		if err := sess.Fire(map[string]any{
 			"type": "pilot", "event": "start", "client": client,
 		}); err != nil {
 			s.logf("could not announce %q to session %s: %v", client, id, err)
 		}
 	}
-	s.logf("attached session %s (%s), capabilities=%s", id, sock, sess.capsNote())
+	s.logf("attached session %s (%s), capabilities=%s", id, sock, sess.CapsNote())
 	return sess, nil
 }
 
@@ -459,31 +461,31 @@ func (s *mcpServer) attach(ctx context.Context, id, sock string, pid int) (*Sess
 // resolvePane turns a pane reference — an index, a numeric string, or a label
 // — into an index magmux can be given. Labels are matched against the label a
 // pane was opened with, then against its command.
-func (s *mcpServer) resolvePane(ctx context.Context, sess *Session, ref any) (paneInfo, error) {
-	panes, err := sess.listPanes(ctx)
+func (s *mcpServer) resolvePane(ctx context.Context, sess *client.Session, ref any) (client.PaneInfo, error) {
+	panes, err := sess.ListPanes(ctx)
 	if err != nil {
-		panes = sess.state.all()
+		panes = sess.State().All()
 	}
 	s.markSelfPanes(panes)
 
-	byIndex := func(idx int) (paneInfo, error) {
+	byIndex := func(idx int) (client.PaneInfo, error) {
 		for _, p := range panes {
 			if p.Index == idx {
 				if p.Closed {
-					return paneInfo{}, fmt.Errorf("pane %d has been closed; %s", idx, paneMenu(panes))
+					return client.PaneInfo{}, fmt.Errorf("pane %d has been closed; %s", idx, paneMenu(panes))
 				}
 				return p, nil
 			}
 		}
 		if len(panes) == 0 {
-			return paneInfo{}, fmt.Errorf("this session reports no panes")
+			return client.PaneInfo{}, fmt.Errorf("this session reports no panes")
 		}
-		return paneInfo{}, fmt.Errorf("no pane %d; %s", idx, paneMenu(panes))
+		return client.PaneInfo{}, fmt.Errorf("no pane %d; %s", idx, paneMenu(panes))
 	}
 
 	switch v := ref.(type) {
 	case nil:
-		return paneInfo{}, fmt.Errorf("no pane given; %s", paneMenu(panes))
+		return client.PaneInfo{}, fmt.Errorf("no pane given; %s", paneMenu(panes))
 	case float64:
 		return byIndex(int(v))
 	case int:
@@ -491,7 +493,7 @@ func (s *mcpServer) resolvePane(ctx context.Context, sess *Session, ref any) (pa
 	case string:
 		name := strings.TrimSpace(v)
 		if name == "" {
-			return paneInfo{}, fmt.Errorf("empty pane reference; %s", paneMenu(panes))
+			return client.PaneInfo{}, fmt.Errorf("empty pane reference; %s", paneMenu(panes))
 		}
 		if idx, err := strconv.Atoi(name); err == nil {
 			return byIndex(idx)
@@ -510,13 +512,13 @@ func (s *mcpServer) resolvePane(ctx context.Context, sess *Session, ref any) (pa
 				return p, nil
 			}
 		}
-		return paneInfo{}, fmt.Errorf("no pane labelled %q; %s", name, paneMenu(panes))
+		return client.PaneInfo{}, fmt.Errorf("no pane labelled %q; %s", name, paneMenu(panes))
 	default:
-		return paneInfo{}, fmt.Errorf("pane must be an index or a label, got %T", ref)
+		return client.PaneInfo{}, fmt.Errorf("pane must be an index or a label, got %T", ref)
 	}
 }
 
-func paneMenu(panes []paneInfo) string {
+func paneMenu(panes []client.PaneInfo) string {
 	if len(panes) == 0 {
 		return "this session has no panes"
 	}
@@ -555,7 +557,7 @@ func mcpFirstWord(s string) string {
 // then has no way to know it would recognise our own pane, and an unmarked pane
 // means "not ours" everywhere downstream. Finding our pane anyway settles it —
 // the walk got far enough for the only question being asked.
-func (s *mcpServer) markSelfPanes(panes []paneInfo) bool {
+func (s *mcpServer) markSelfPanes(panes []client.PaneInfo) bool {
 	anc, complete := s.ancestry()
 	found := false
 	for i := range panes {
@@ -580,7 +582,7 @@ const selfGuardWarning = "\n\nNOTE: this process's ancestry could not be read (a
 // refuseUndrivable rejects the panes that cannot be driven at all. The self
 // check is the important one: an agent that instructs its own pane waits for a
 // turn it is itself inside, so it waits forever.
-func refuseUndrivable(p paneInfo) string {
+func refuseUndrivable(p client.PaneInfo) string {
 	switch {
 	case p.Self:
 		return fmt.Sprintf("pane %d is the pane you are running in. Driving it would "+
@@ -603,14 +605,14 @@ func refuseUndrivable(p paneInfo) string {
 // It is deliberately NOT part of refuseUndrivable, which send_keys shares:
 // typing into such a pane is fine and is exactly what send_keys is for. Only
 // send_and_wait needs a controller, and without one it waits vacuously —
-// buildPaneResults reports such a pane as "running", aggregateState maps that
+// buildPaneResults reports such a pane as "running", client.AggregateState maps that
 // to "working", "working" is not settled, so phase one succeeds instantly
 // without anything having happened and phase two then waits for a settled state
 // that can only ever arrive from a controller snapshot or from the process
 // exiting. Since send_and_wait's tool.timeout is 0, nothing else bounds it: the
 // tool call blocks for the full turn timeout (15 minutes by default) and comes
-// back "stalled", with the pane held by beginTurn the whole time.
-func refuseUnturnable(p paneInfo) string {
+// back "stalled", with the pane held by BeginTurn the whole time.
+func refuseUnturnable(p client.PaneInfo) string {
 	if p.Controller != "" {
 		return ""
 	}
@@ -679,7 +681,7 @@ func toolListSessions(ctx context.Context, s *mcpServer, raw json.RawMessage) (m
 			label, _ := evStr(entry, "label")
 			cmd, _ := evStr(entry, "cmd")
 			pid, _ := evInt(entry, "pid")
-			line := fmt.Sprintf("\n    pane %d  %s", idx, aggregateState(state))
+			line := fmt.Sprintf("\n    pane %d  %s", idx, client.AggregateState(state))
 			if label != "" {
 				line += "  " + label
 			}
@@ -728,11 +730,11 @@ func toolAttachSession(ctx context.Context, s *mcpServer, raw json.RawMessage) (
 	s.defID = sess.ID
 	s.sessMu.Unlock()
 
-	panes, listErr := sess.listPanes(ctx)
+	panes, listErr := sess.ListPanes(ctx)
 	reliable := s.markSelfPanes(panes)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Attached to session %s (%s). It is now the default.\n", sess.ID, sess.SockPath)
-	if sess.isLegacy(ctx) {
+	if sess.IsLegacy(ctx) {
 		b.WriteString("\nThis magmux is an older build without the request/reply socket " +
 			"protocol: send_keys and send_and_wait work, everything else does not. Ask the " +
 			"human to restart magmux with the current binary.\n")
@@ -806,7 +808,7 @@ func toolListPanes(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[
 	if err != nil {
 		return toolResultError("%v", err), nil
 	}
-	panes, err := sess.listPanes(ctx)
+	panes, err := sess.ListPanes(ctx)
 	if err != nil {
 		return toolResultError("could not list panes of session %s: %v", sess.ID, err), nil
 	}
@@ -819,11 +821,11 @@ func toolListPanes(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[
 	return toolText(body), nil
 }
 
-func renderPaneTable(panes []paneInfo) string {
+func renderPaneTable(panes []client.PaneInfo) string {
 	if len(panes) == 0 {
 		return "This session reports no panes."
 	}
-	sorted := append([]paneInfo(nil), panes...)
+	sorted := append([]client.PaneInfo(nil), panes...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Index < sorted[j].Index })
 
 	var b strings.Builder
@@ -882,8 +884,8 @@ func toolOpenPane(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 	if err != nil {
 		return toolResultError("%v", err), nil
 	}
-	if sess.isLegacy(ctx) {
-		return toolResultError("%v", errLegacyMagmux), nil
+	if sess.IsLegacy(ctx) {
+		return toolResultError("%v", client.ErrLegacyMagmux), nil
 	}
 
 	req := map[string]any{"cmd": args.Cmd}
@@ -915,7 +917,7 @@ func toolOpenPane(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 		req["target"] = t.Index
 	}
 
-	res, err := sess.openPane(ctx, req)
+	res, err := sess.OpenPane(ctx, req)
 	if err != nil {
 		return toolResultError("could not open a pane: %v%s", err, openPaneHint(err)), nil
 	}
@@ -938,7 +940,7 @@ func toolOpenPane(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 }
 
 func openPaneHint(err error) string {
-	switch sockErrCode(err) {
+	switch protocol.CodeOf(err) {
 	case "unknown_verb", "unsupported":
 		return "\n\nThis magmux cannot open panes yet. Ask the human to add the pane by hand, " +
 			"then call list_panes."
@@ -962,8 +964,8 @@ func toolClosePane(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[
 	if err != nil {
 		return toolResultError("%v", err), nil
 	}
-	if sess.isLegacy(ctx) {
-		return toolResultError("%v", errLegacyMagmux), nil
+	if sess.IsLegacy(ctx) {
+		return toolResultError("%v", client.ErrLegacyMagmux), nil
 	}
 	p, err := s.resolvePane(ctx, sess, args.Pane)
 	if err != nil {
@@ -977,7 +979,7 @@ func toolClosePane(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[
 		return toolResultError("pane %d is magmux's control panel; it is the human's view of "+
 			"what you are doing and is not yours to close.", p.Index), nil
 	}
-	if _, err := sess.closePane(ctx, p.Index, args.Force); err != nil {
+	if _, err := sess.ClosePane(ctx, p.Index, args.Force); err != nil {
 		return toolResultError("could not close pane %d: %v", p.Index, err), nil
 	}
 	return toolText(fmt.Sprintf("Closed pane %d. Pane indices do not shift, so every other "+
@@ -1071,13 +1073,13 @@ func toolReadPane(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 		}
 		return out, nil
 	}
-	if sess.isLegacy(ctx) {
+	if sess.IsLegacy(ctx) {
 		b.WriteString("\n\nThis magmux is too old to render a pane's screen, so state above is " +
 			"all there is. Ask the human to restart magmux with the current binary.")
 		return toolText(b.String()), nil
 	}
 
-	res, err := sess.capture(ctx, p.Index, args.Lines, args.Offset)
+	res, err := sess.Capture(ctx, p.Index, args.Lines, args.Offset)
 	if err != nil {
 		b.WriteString("\n\nCould not read the screen: " + err.Error())
 		return toolResultError("%s", b.String()), nil
@@ -1169,15 +1171,15 @@ const (
 // session said nothing", and dropping the section entirely reads as "you did
 // not ask". Both are answers about the SESSION to a question that failed on
 // MAGMUX's side.
-func readPaneTranscript(ctx context.Context, sess *Session, p paneInfo, turns int) (string, bool) {
+func readPaneTranscript(ctx context.Context, sess *client.Session, p client.PaneInfo, turns int) (string, bool) {
 	head := fmt.Sprintf("══ TRANSCRIPT — pane %d's own record on disk ══", p.Index)
-	if sess.isLegacy(ctx) {
+	if sess.IsLegacy(ctx) {
 		return head + "\nThis magmux predates transcripts, so there is no record to read. Ask " +
 			"the human to restart magmux with the current binary; until then the screen below " +
 			"is all there is.", false
 	}
 
-	got, err := sess.transcript(ctx, p.Index, turns)
+	got, err := sess.Transcript(ctx, p.Index, turns)
 	if err != nil {
 		return head + "\n" + transcriptFailure(p, err), false
 	}
@@ -1192,8 +1194,8 @@ func readPaneTranscript(ctx context.Context, sess *Session, p paneInfo, turns in
 // transcriptFailure turns magmux's error code into the one sentence that tells
 // the model what it is actually looking at. The three codes lead to three
 // different next steps, which is the whole reason they are separate codes.
-func transcriptFailure(p paneInfo, err error) string {
-	switch sockErrCode(err) {
+func transcriptFailure(p client.PaneInfo, err error) string {
+	switch protocol.CodeOf(err) {
 	case "no_controller":
 		return fmt.Sprintf("Pane %d is not running an agent magmux follows — a shell, a REPL and "+
 			"a dev server have no transcript. Nothing is wrong with the pane: read its screen "+
@@ -1216,7 +1218,7 @@ func transcriptFailure(p paneInfo, err error) string {
 // renderTranscript lays the turns out oldest first and enforces the payload
 // cap by dropping the OLDEST turns — the newest is what a driver acted on last
 // and is never the one to lose.
-func renderTranscript(turns []transcriptTurn, requested int) string {
+func renderTranscript(turns []client.TranscriptTurn, requested int) string {
 	blocks := make([]string, len(turns))
 	for i, t := range turns {
 		blocks[i] = renderTranscriptTurn(t)
@@ -1248,7 +1250,7 @@ func renderTranscript(turns []transcriptTurn, requested int) string {
 	return b.String()
 }
 
-func renderTranscriptTurn(t transcriptTurn) string {
+func renderTranscriptTurn(t client.TranscriptTurn) string {
 	var b strings.Builder
 	role := t.Role
 	if role == "" {
@@ -1328,7 +1330,7 @@ func toolSendKeys(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 		enter = *args.Enter
 	}
 
-	if err := sess.sendKeys(ctx, p.Index, args.Text, args.Keys, enter, "send_keys"); err != nil {
+	if err := sess.SendKeys(ctx, p.Index, args.Text, args.Keys, enter, "send_keys"); err != nil {
 		return toolResultError("could not send to pane %d: %v", p.Index, err), nil
 	}
 
@@ -1344,7 +1346,7 @@ func toolSendKeys(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 		b.WriteString(" then Enter")
 	}
 	b.WriteString(".")
-	if sess.isLegacy(ctx) {
+	if sess.IsLegacy(ctx) {
 		b.WriteString("\n\n(This magmux cannot confirm delivery — it predates the reply " +
 			"protocol. Read the pane to check.)")
 	}
@@ -1355,8 +1357,8 @@ func toolSendKeys(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 		case <-time.After(wait):
 		case <-ctx.Done():
 		}
-		if !sess.isLegacy(ctx) {
-			if res, err := sess.capture(ctx, p.Index, 20, 0); err == nil {
+		if !sess.IsLegacy(ctx) {
+			if res, err := sess.Capture(ctx, p.Index, 20, 0); err == nil {
 				if text, _ := evStr(res, "text"); strings.TrimSpace(text) != "" {
 					b.WriteString("\n\nThe pane now shows:\n```\n" +
 						strings.TrimRight(text, "\n") + "\n```")
@@ -1403,17 +1405,17 @@ func toolSendAndWait(ctx context.Context, s *mcpServer, raw json.RawMessage) (ma
 
 	// Two concurrent turns on one pane is nonsense: the second would watch the
 	// first one's turn and report its answer.
-	if !sess.beginTurn(p.Index) {
+	if !sess.BeginTurn(p.Index) {
 		return toolResultError("pane %d already has a send_and_wait in flight. Wait for it to "+
 			"return before sending another instruction to that pane.", p.Index), nil
 	}
-	defer sess.endTurn(p.Index)
+	defer sess.EndTurn(p.Index)
 
-	startTimeout := defaultStartTimeout
+	startTimeout := client.DefaultStartTimeout
 	if args.StartTimeoutMs > 0 {
 		startTimeout = time.Duration(args.StartTimeoutMs) * time.Millisecond
 	}
-	turnTimeout := defaultTurnTimeout
+	turnTimeout := client.DefaultTurnTimeout
 	if args.TurnTimeoutMs > 0 {
 		turnTimeout = time.Duration(args.TurnTimeoutMs) * time.Millisecond
 	}
@@ -1426,12 +1428,12 @@ func toolSendAndWait(ctx context.Context, s *mcpServer, raw json.RawMessage) (ma
 		// The send itself gets its own deadline: a session that never
 		// acknowledges the bytes is a different failure from one that never
 		// starts a turn, and they read differently to the driver.
-		sendCtx, cancel := context.WithTimeout(ctx, sockSendTimeout)
+		sendCtx, cancel := context.WithTimeout(ctx, client.SendTimeout)
 		defer cancel()
-		return sess.sendKeys(sendCtx, p.Index, args.Instruction, nil, true, label)
+		return sess.SendKeys(sendCtx, p.Index, args.Instruction, nil, true, label)
 	}
 
-	res, err := runInstruction(ctx, sess.state, p.Index, send, startTimeout, turnTimeout)
+	res, err := client.RunInstruction(ctx, sess.State(), p.Index, send, startTimeout, turnTimeout)
 	if err != nil {
 		return toolResultError("could not deliver the instruction to pane %d: %v", p.Index, err), nil
 	}
@@ -1439,9 +1441,9 @@ func toolSendAndWait(ctx context.Context, s *mcpServer, raw json.RawMessage) (ma
 	// A turn that settles with nothing to say used to leave the driver
 	// guessing; now that capture exists, show it the screen instead.
 	screen := ""
-	if res.Response == "" && !sess.isLegacy(ctx) {
-		capCtx, cancel := context.WithTimeout(context.Background(), sockReadTimeout)
-		if cres, cerr := sess.capture(capCtx, p.Index, 15, 0); cerr == nil {
+	if res.Response == "" && !sess.IsLegacy(ctx) {
+		capCtx, cancel := context.WithTimeout(context.Background(), client.ReadTimeout)
+		if cres, cerr := sess.Capture(capCtx, p.Index, 15, 0); cerr == nil {
 			screen, _ = evStr(cres, "text")
 		}
 		cancel()

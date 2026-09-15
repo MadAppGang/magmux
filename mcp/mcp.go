@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/MadAppGang/magmux/buildinfo"
+	"github.com/MadAppGang/magmux/client"
 	"github.com/MadAppGang/magmux/proc"
 )
 
@@ -133,7 +134,7 @@ type mcpServer struct {
 	logMu sync.Mutex
 
 	sessMu   sync.Mutex
-	sessions map[string]*Session
+	sessions map[string]*client.Session
 	defID    string
 
 	ancMu     sync.Mutex
@@ -148,7 +149,7 @@ func newMCPServer(out io.Writer, logw io.Writer) *mcpServer {
 	return &mcpServer{
 		out:      bufio.NewWriter(out),
 		logw:     logw,
-		sessions: map[string]*Session{},
+		sessions: map[string]*client.Session{},
 	}
 }
 
@@ -254,11 +255,11 @@ func (s *mcpServer) serve(in io.Reader) int {
 // stdin closing means the client is gone, so there is nobody left to answer.
 func (s *mcpServer) shutdown() {
 	s.sessMu.Lock()
-	sessions := make([]*Session, 0, len(s.sessions))
+	sessions := make([]*client.Session, 0, len(s.sessions))
 	for _, sess := range s.sessions {
 		sessions = append(sessions, sess)
 	}
-	s.sessions = map[string]*Session{}
+	s.sessions = map[string]*client.Session{}
 	s.defID = ""
 	s.sessMu.Unlock()
 	for _, sess := range sessions {
