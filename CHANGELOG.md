@@ -9,6 +9,57 @@ Releases before v0.11.0 predate this file; their notes were generated from
 commit subjects and remain on the
 [GitHub releases page](https://github.com/MadAppGang/magmux/releases).
 
+## [0.12.0] - 2026-09-15
+
+### Changed
+
+- **Homebrew installs a cask now, not a formula.** GoReleaser deprecated the
+  formula path because the formulas it generated were a hack — they declared a
+  source build and then installed a pre-compiled binary, which was the only way
+  to reach Linuxbrew when it was written. It no longer is: Homebrew ships a
+  Linux Caskroom, and the generated cask carries `on_linux` blocks for both
+  arm64 and amd64, so the same four platforms are covered. Existing installs
+  are migrated by `tap_migrations.json` in the tap, so `brew upgrade` finds the
+  cask instead of silently finding nothing.
+
+  Two consequences worth knowing. Casks have no `test` stanza, so
+  `brew test magmux` no longer exists. And casks propagate macOS's download
+  quarantine onto the payload where formulas never did, so the cask carries a
+  hook that strips it — without it `magmux --version` prints nothing and exits
+  while `brew install` still reports success.
+
+### Fixed
+
+- **The pilot broke its own gutter on long tokens.** A body carrying a
+  transcript path or a URL emitted that token whole — 85 characters into a
+  40-column pane — and the terminal soft-wrapped it with the continuation
+  starting at column 0 with no gutter, breaking the exact vertical rule the
+  layout exists to draw. It now hard-splits, matching the Go implementation of
+  the same job that has always done so.
+- **A recovered provider error could still decide the summary.** The flag was
+  set on the first refusal and never cleared, so a run that recovered and then
+  ended for an unrelated reason closed with "could not reach its model:
+  <the old error>" — the same misattribution the mechanism exists to prevent,
+  pointed the other way. It is now cleared by any later message that did not
+  error. An error carrying no readable message is reported rather than passed
+  over, so a rename in the upstream SDK surfaces instead of silently disabling
+  detection.
+- **The control panel's route table dropped its data on medium-width panes.**
+  The state chip widened the row, and the layout drops the entire right-hand
+  group rather than trimming it, so duration, sparkline and tool only appeared
+  from 61 columns — leaving an 11-column band showing a long state label in
+  padding and no moving information at all. A third width band keeps the data
+  and shortens the label to pay for it, bringing the threshold to 50 columns:
+  a 100-column terminal split in two.
+
+### Internal
+
+- `goreleaser check` runs in CI. Nothing validated the release config until a
+  tag was pushed, by which point the tag is immutable and the failure costs a
+  renumbered release. It is pinned to the same GoReleaser version the release
+  uses, because a gate that validates a different version than the one that
+  ships is not a gate.
+
 ## [0.11.0] - 2026-09-09
 
 ### Added
@@ -54,4 +105,5 @@ commit subjects and remain on the
   nudges, and the summary "the pilot stopped without calling finish". The
   provider's own error is now reported, and nudging stops once one is seen.
 
+[0.12.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.12.0
 [0.11.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.11.0
