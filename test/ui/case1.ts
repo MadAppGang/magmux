@@ -56,7 +56,7 @@ console.log(`\n${C.bold}  Build${C.reset}`);
 if (override) {
   console.log(`  ${C.yellow}!${C.reset} using MAGMUX_BIN override ${C.grey}${binary}${C.reset}`);
 } else {
-  execSync(`go build -o ${JSON.stringify(BIN)} .`, { cwd: REPO, stdio: "inherit" });
+  execSync(`go build -o ${JSON.stringify(BIN)} ./cmd/magmux`, { cwd: REPO, stdio: "inherit" });
   console.log(`  ${C.green}✓${C.reset} ${path.relative(REPO, BIN)}`);
 }
 

@@ -88,15 +88,16 @@ tasks:
     # A glob, not a hand-listed set: the previous list named only main.go and
     # pty_*.go, so edits to controller_claude.go (and later control.go /
     # pilot.go) did not invalidate the build and `task test:*` would silently
-    # run a stale binary.
+    # run a stale binary. `**` because the Go sources live in packages
+    # (cmd/magmux, mux, buildinfo, ...), not in the repo root.
     sources:
-      - '*.go'
+      - '**/*.go'
       - go.mod
       - go.sum
     generates:
       - magmux
     cmds:
-      - go build -o magmux .
+      - go build -o magmux ./cmd/magmux
 
   clean:
     desc: Remove dev binary and test grid files

@@ -11,11 +11,11 @@ A port of [MTM](https://github.com/deadpixi/mtm) (Rob King) from C to Go, design
 brew tap MadAppGang/tap && brew install magmux
 
 # Go install
-go install github.com/MadAppGang/magmux@latest
+go install github.com/MadAppGang/magmux/cmd/magmux@latest
 
 # From source
 git clone https://github.com/MadAppGang/magmux
-cd magmux && go build -o magmux .
+cd magmux && go build -o magmux ./cmd/magmux
 ```
 
 ## Usage
@@ -514,7 +514,7 @@ columns is refused with `too_small` before anything is forked.
 `focus` flag is one-shot.
 
 Inbound messages (subscribers writing to magmux) also drive status-bar text,
-pane tints, and agent hook events; see `sockMsg` in `main.go`. These are
+pane tints, and agent hook events; see `sockMsg` in `mux/main.go`. These are
 optional and unrelated to the read-only subscribe flow above.
 
 `{"type":"tint","color":"green"}` colours the pane's **border** (green, red or

@@ -5,7 +5,7 @@ controller, with the control panel open and the status bar carrying the same
 digest. It costs nothing and needs no API key.
 
 ```bash
-go build -o magmux .
+go build -o magmux ./cmd/magmux
 demo/showcase.sh
 ```
 

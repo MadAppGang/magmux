@@ -3,21 +3,29 @@
 ## Build
 
 ```bash
-go build -o magmux .
+go build -o magmux ./cmd/magmux
 ```
 
 ## Architecture
 
-`main.go` (~8,350 lines) holds the terminal core; the tool-controller layer,
+Layout: `cmd/magmux/main.go` is a thin shim, `os.Exit(mux.Main(os.Args[1:]))`.
+`buildinfo/` holds `Version` / `Commit`, which GoReleaser sets with
+`-X github.com/MadAppGang/magmux/buildinfo.Version=…`. Everything else is
+package `mux` in `mux/`, and `go test` runs each package with cwd = its own
+directory, so `TestMain` builds `../cmd/magmux`. There is no `internal`
+directory, so the compiler no longer stops a lower package importing `mux`:
+`cmd/magmux/import_direction_test.go` (`TestImportDirection`) is that guard.
+
+`mux/main.go` (~8,350 lines) holds the terminal core; the tool-controller layer,
 the socket layer and the MCP layer live beside it.
 
-`main.go`, in order:
+`mux/main.go`, in order:
 
 1. **Cell/Screen** — Cell struct (rune + Color + Attr), the viewport grid, and
    the scrollback ring behind it
 2. **VT Parser** — DEC ANSI state machine (port of vtparser.c), handles CSI/ESC/OSC/C0
 3. **Pane** — Binary tree layout node, owns PTY + Screen + VT parser
-4. **PTY helpers** — Raw /dev/ptmx + ioctls (no CGo); platform bits in `pty_darwin.go` / `pty_linux.go`
+4. **PTY helpers** — Raw /dev/ptmx + ioctls (no CGo); platform bits in `mux/pty_darwin.go` / `mux/pty_linux.go`
 5. **Renderer** — ANSI escape code output with dirty-flag optimization
 6. **Multiplexer** — Main event loop, input routing, mouse handling, SIGWINCH
 7. **Selection** — Mouse drag text selection + clipboard copy (OSC 52 + pbcopy)
@@ -28,22 +36,22 @@ the socket layer and the MCP layer live beside it.
 
 Socket lifecycle:
 
-- `sockdir.go` — where the socket is bound (`--sock-dir` / `MAGMUX_SOCK_DIR`)
+- `mux/sockdir.go` — where the socket is bound (`--sock-dir` / `MAGMUX_SOCK_DIR`)
   and the startup sweep that removes pid-named sockets whose owner is provably
   dead. Free functions, no `*Magmux`, no locks.
 
 Tool controllers:
 
-- `controller.go` — the `ToolController` interface and the `Snapshot` /
+- `mux/controller.go` — the `ToolController` interface and the `Snapshot` /
   `ControllerState` surface every controller produces, plus the optional
   `InputNotifier` interface.
-- `controller_claude.go` — observes a Claude Code pane by tailing its JSONL
+- `mux/controller_claude.go` — observes a Claude Code pane by tailing its JSONL
   transcript under `~/.claude/projects/`.
 
 Controlled sessions (an external AI agent steering a pane):
 
-- `pilot.go` — the `send` socket verb and PTY injection. The inbound half.
-- `control.go` — the control panel: the OUT/IN log of pilot↔session traffic,
+- `mux/pilot.go` — the `send` socket verb and PTY injection. The inbound half.
+- `mux/control.go` — the control panel: the OUT/IN log of pilot↔session traffic,
   painted into a PTY-less pane.
 - `pilot/pilot.ts` — the pi.dev agent that does the steering, with its
   toolbox replaced by `send_to_session` + `finish`.
@@ -170,7 +178,7 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   session the first time anything closed — no error, no log. Every int → pane
   conversion goes through `paneByIDLocked` / `livePanesLocked`; a surviving raw
   subscript of `allPanes` writes tint, overlay or keystrokes into a detached
-  pane. Enforce with `grep -n 'm\.allPanes\[' *.go`, which must hit nothing
+  pane. Enforce with `grep -n 'm\.allPanes\[' mux/*.go`, which must hit nothing
   outside `paneByIDLocked`.
 
 - **`treeMu` guards the layout; `p.mu` still guards content.** `treeMu` covers
@@ -377,7 +385,7 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   a future caller cannot bypass it.
 
 - **Zero bytes on stdout is closed by ENUMERATION, not by assertion.** There
-  are exactly four writers in `main.go` and the fourth is unreachable:
+  are exactly four writers in `mux/main.go` and the fourth is unreachable:
   the alt-screen sequence in `init()` (inside the tty branch), `restore()`'s
   disable sequence (early return), `writeTerm` (early return), and
   `putClipboard`'s OSC 52 — reached only from `parseSGRMouse` ← `tryParseEscape`
@@ -572,7 +580,7 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   makes `done` count magmux's own bookkeeping. This is a grep-able invariant:
 
   ```
-  $ grep -n 'observed *=\|observed++\|steplog\[i\].state = ' control.go
+  $ grep -n 'observed *=\|observed++\|steplog\[i\].state = ' mux/control.go
   ```
 
   must hit `recordObserved` and the run-zeroing in `recordStart`, and nothing
@@ -646,7 +654,8 @@ Uses GoReleaser. To release:
 5. GoReleaser creates the GitHub Release + updates the Homebrew formula
 
 There is no version string to edit anywhere: `.goreleaser.yml` injects it at
-build time via `-X main.Version={{.Version}}`, so **the tag is the version**.
+build time via `-X github.com/MadAppGang/magmux/buildinfo.Version={{.Version}}`
+(from `./cmd/magmux`), so **the tag is the version**.
 `magmux --version` on a snapshot build reports `X.Y.Z-SNAPSHOT-<sha>`, which is
 how to tell a real release binary from a local one.
 

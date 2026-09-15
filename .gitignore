@@ -1,4 +1,4 @@
-magmux
+/magmux
 dist/
 *.log
 /tmp/
@@ -20,7 +20,7 @@ gtd/sessions/
 .claude/_profiles/
 /ai-docs/sessions/ 
 node_modules/
-magmux
+/magmux
 
 # Local credentials for the pilot.
 .env
