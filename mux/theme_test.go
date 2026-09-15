@@ -1556,6 +1556,8 @@ func TestNoCouldNotDetectString(t *testing.T) {
 
 // TestThemeEnvReadsNoFile is VC-11 at the source level: theme.go opens no
 // file, and neither theme.go nor main.go mentions a ".env" outside a comment.
+// main.go is now the section files test/reorg/r2-ranges.txt split it into,
+// which together hold exactly its lines, so all of them are scanned.
 // The files are read as TEXT for a grep, nothing more. Reports the offending
 // line if a .env loader or a file read ever lands on the theme path.
 func TestThemeEnvReadsNoFile(t *testing.T) {
@@ -1565,7 +1567,8 @@ func TestThemeEnvReadsNoFile(t *testing.T) {
 		}
 		return l
 	}
-	for _, f := range []string{"theme.go", "main.go"} {
+	for _, f := range []string{"theme.go", "cell.go", "screen.go", "scrollback.go", "vt.go", "pane.go", "render.go",
+		"mux.go", "selection.go", "chrome.go", "socket.go", "grid.go", "dynpanes.go", "cli.go"} {
 		data, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)

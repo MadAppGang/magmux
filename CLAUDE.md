@@ -16,21 +16,30 @@ directory, so `TestMain` builds `../cmd/magmux`. There is no `internal`
 directory, so the compiler no longer stops a lower package importing `mux`:
 `cmd/magmux/import_direction_test.go` (`TestImportDirection`) is that guard.
 
-`mux/main.go` (~8,350 lines) holds the terminal core; the tool-controller layer,
-the socket layer and the MCP layer live beside it.
+The terminal core (formerly `mux/main.go`, ~8,350 lines) is split by section
+into files in `mux/`; the tool-controller layer, the socket layer and the MCP
+layer live beside it. `test/reorg/r2-ranges.txt` maps every line of the old
+`mux/main.go` to the file it moved to.
 
-`mux/main.go`, in order:
+The core's sections, in the old file's order:
 
 1. **Cell/Screen** — Cell struct (rune + Color + Attr), the viewport grid, and
-   the scrollback ring behind it
-2. **VT Parser** — DEC ANSI state machine (port of vtparser.c), handles CSI/ESC/OSC/C0
-3. **Pane** — Binary tree layout node, owns PTY + Screen + VT parser
-4. **PTY helpers** — Raw /dev/ptmx + ioctls (no CGo); platform bits in `mux/pty_darwin.go` / `mux/pty_linux.go`
-5. **Renderer** — ANSI escape code output with dirty-flag optimization
-6. **Multiplexer** — Main event loop, input routing, mouse handling, SIGWINCH
-7. **Selection** — Mouse drag text selection + clipboard copy (OSC 52 + pbcopy)
+   the scrollback ring behind it: `mux/cell.go`, `mux/screen.go`,
+   `mux/scrollback.go` (the ring, and scroll mode)
+2. **VT Parser** — DEC ANSI state machine (port of vtparser.c), handles CSI/ESC/OSC/C0: `mux/vt.go`
+3. **Pane** — Binary tree layout node, owns PTY + Screen + VT parser: `mux/pane.go`
+4. **PTY helpers** — Raw /dev/ptmx + ioctls (no CGo); platform bits in `mux/pty_darwin.go` / `mux/pty_linux.go`; `setWinSize` is in `mux/pane.go`
+5. **Renderer** — ANSI escape code output with dirty-flag optimization: `mux/render.go`
+   (also `renderLoop`, `render`, `writeTerm` and `renderLocked`)
+6. **Multiplexer** — Main event loop, input routing, mouse handling, SIGWINCH:
+   `mux/mux.go`; the layout builders, grid-file parser and grid exit handling in
+   `mux/grid.go`; socket IPC in `mux/socket.go`; `open_pane` / `close_pane` in
+   `mux/dynpanes.go`; `Main` and flag parsing in `mux/cli.go`
+7. **Selection** — Mouse drag text selection + clipboard copy (OSC 52 + pbcopy): `mux/selection.go`
+   (also `parseSGRMouse`)
 8. **Chrome** — the panel/status-bar toggles (`Ctrl-G p` / `Ctrl-G s`),
-   `statusRowsLocked` / `reflowLocked`, and the status bar's panel digest.
+   `statusRowsLocked` / `reflowLocked`, and the status bar's panel digest:
+   `mux/chrome.go`.
    magmux's default is to show none of itself: a lone session pane is a bare
    terminal, because `renderBorder` only ever paints a SPLIT node.
 
@@ -385,10 +394,11 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   a future caller cannot bypass it.
 
 - **Zero bytes on stdout is closed by ENUMERATION, not by assertion.** There
-  are exactly four writers in `mux/main.go` and the fourth is unreachable:
-  the alt-screen sequence in `init()` (inside the tty branch), `restore()`'s
-  disable sequence (early return), `writeTerm` (early return), and
-  `putClipboard`'s OSC 52 — reached only from `parseSGRMouse` ← `tryParseEscape`
+  are exactly four writers in the core (the files split from `mux/main.go`) and
+  the fourth is unreachable: the alt-screen sequence in `init()` (inside the
+  tty branch) and `restore()`'s disable sequence (early return), both in
+  `mux/mux.go`; `writeTerm` (early return) in `mux/render.go`; and
+  `putClipboard`'s OSC 52 in `mux/selection.go` — reached only from `parseSGRMouse` ← `tryParseEscape`
   ← `inputLoop`, which does not run headless. **It gets no guard on purpose**:
   one would imply the path is live and invite someone to make it so. The fifth
   site is not on stdout at all — `detectThemeColor` writes its OSC 11 query to

@@ -1,0 +1,55 @@
+# R2 range map: how the post-R1 mux/main.go (8413 lines) was split into section files.
+#
+# One `file start end` per line, inclusive, 1-based, over the post-R1 mux/main.go.
+# prove-split.sh rebuilds that file from the baseline commit plus r1-main.patch.
+# The lines are in source order, so reading this top to bottom walks main.go.
+# A file's content is the concatenation of its ranges in this order.
+#
+# The file `-` is scaffolding that goes to no file: the package clause and the
+# import block. prove-split.sh checks that `-` holds nothing else. Every new
+# file writes its own `package mux` and import block in its place.
+#
+# Each range after the first starts on the blank line after the previous
+# declaration, so a banner comment (`// ── Section ──`) and a doc comment go
+# with the declaration below them.
+mux.go         1    3
+-              4   28
+chrome.go     29  107
+mux.go       108  116
+scrollback.go 117 147
+mux.go       148  150
+selection.go 151  157
+cell.go      158  191
+screen.go    192  384
+scrollback.go 385 466
+screen.go    467  478
+vt.go        479 1501
+pane.go     1502 2045
+render.go   2046 2779
+mux.go      2780 3038
+chrome.go   3039 3043
+mux.go      3044 3132
+chrome.go   3133 3145
+mux.go      3146 3192
+chrome.go   3193 3268
+mux.go      3269 3281
+scrollback.go 3282 3479
+chrome.go   3480 3518
+mux.go      3519 3698
+grid.go     3699 3994
+chrome.go   3995 4028
+mux.go      4029 4892
+selection.go 4893 5161
+grid.go     5162 5189
+socket.go   5190 5993
+grid.go     5994 6397
+dynpanes.go 6398 6860
+chrome.go   6861 7015
+dynpanes.go 7016 7071
+render.go   7072 7174
+chrome.go   7175 7461
+render.go   7462 7781
+mux.go      7782 7807
+pane.go     7808 7828
+mux.go      7829 7869
+cli.go      7870 8413
