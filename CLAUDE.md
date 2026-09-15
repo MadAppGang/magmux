@@ -210,9 +210,21 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   tint, inputReady, …`) stay under `p.mu`. Lock order:
 
   ```
-  treeMu -> p.mu -> sockClientsMu
+  treeMu -> p.mu -> hub.mu -> sub.mu
   treeMu -> cp.mu ;  treeMu -> claimedMu
   ```
+
+  **`hub.mu` and `sub.mu` (package `hub`) are LEAVES, and that is the whole of
+  their rule.** `hub.mu` guards the op registry, the Sub set, the lane set and
+  the shutdown flags; `sub.mu` guards one subscriber's queues. Neither is ever
+  held across an `OpFunc`, a `Sink` call (a write to somebody's socket), a
+  `Watcher` call or a plugin-host call, and no lock of magmux's is ever taken
+  while either is held — `Hub.Call` copies the func out under `RLock` and calls
+  it after the release, and `Hub.Session` hands the adapter back the Sub so the
+  connect-time aggregate is built with no hub lock held. The single edge inside
+  the package is `hub.mu -> sub.mu`. They replaced `sockClientsMu`, which was a
+  leaf on the same terms and which one wedged subscriber could hold for 100ms
+  per event per client.
 
   Three rules:
   1. **Never hold `treeMu` across blocking I/O** — `ptmx.Write`, `conn.Write`,
@@ -230,8 +242,8 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
      all, because `renderLocked` holds RLock throughout.
      `TestConcurrentOpenCloseIsRaceFree` carries a goroutine-dump watchdog
      precisely because a bare test timeout names nothing.
-  3. Never acquire `treeMu` while holding `p.mu`, `cp.mu`, `sockClientsMu` or
-     `claimedMu`.
+  3. Never acquire `treeMu` while holding `p.mu`, `cp.mu`, `hub.mu`, `sub.mu`
+     or `claimedMu`.
 
 - **`renderLocked` builds a frame; `render` writes it.** The three slow things
   in a frame all live outside the lock, and each was a real stall:

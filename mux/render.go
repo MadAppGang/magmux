@@ -771,9 +771,11 @@ func (m *Magmux) renderLoop() {
 //   - the controller poll, which is filesystem work (see pollControllers) and
 //     runs before the lock is taken, so its snapshots still take precedence
 //     over the screen-scraping heuristics in the same frame;
-//   - the snapshot events, collected under the lock and broadcast after it
-//     (conn.Write has a 100ms-per-client deadline, so a wedged subscriber would
-//     otherwise stall every writer);
+//   - the snapshot events, collected under the lock and broadcast after it.
+//     Publishing no longer writes to anybody (each subscriber has its own queue
+//     and its own writer), but it still takes hub.mu, and hub.mu is a leaf that
+//     no mux lock is ever nested inside — the rule that made this safe when one
+//     wedged subscriber cost every writer 100 ms per event;
 //   - the frame itself. renderLocked BUILDS the bytes and hands them back; this
 //     is the only place they are written. A tty whose buffer is full blocks
 //     that write for as long as it likes, and with RLock held that is a

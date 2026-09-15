@@ -22,12 +22,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/MadAppGang/magmux/buildinfo"
+	"github.com/MadAppGang/magmux/hub"
 	"github.com/MadAppGang/magmux/protocol"
 )
 
@@ -85,19 +85,22 @@ var errReplyDeferred = errors.New("reply deferred")
 
 // replyTo unicasts a reply to one connection.
 //
-// It takes sockClientsMu — the same lock broadcastEvent holds — so a reply can
-// never interleave mid-line with a broadcast on the same fd; a write to a unix
-// stream socket is not atomic and a spliced line would corrupt both messages.
+// It goes through that connection's Sub, which is the one writer on that fd —
+// so a reply can never interleave mid-line with a broadcast, because both are
+// written by the same goroutine from the same queue. (A write to a unix stream
+// socket is not atomic, and a spliced line would corrupt both messages; that
+// used to be enforced by holding sockClientsMu across both writers.)
 //
-// Caller must NOT hold p.mu. The established order is p.mu -> sockClientsMu
-// (see the note at handleSocketConn), so a verb builds its result payload,
-// releases p.mu, and only then replies.
+// Queueing never blocks, so this is safe to call from any goroutine, including
+// one holding no lock at all after releasing p.mu — which every verb still
+// does, because building a result under p.mu and replying after it is what
+// keeps the order treeMu -> p.mu -> hub.mu intact.
 //
-// A failed write is not spliced out of m.sockClients the way broadcastEvent
-// does it: this connection has its own read loop, which ends on the same
-// failure and unregisters it there.
-func (m *Magmux) replyTo(conn net.Conn, id json.RawMessage, result map[string]any, err error) {
-	if conn == nil || len(id) == 0 {
+// A reply is deliberately never recorded as a final event: finals are replayed
+// to a client that connects during teardown, and a stale reply arriving there
+// would break the results → shutdown → EOF ordering.
+func (m *Magmux) replyTo(sub *hub.Sub, id json.RawMessage, result map[string]any, err error) {
+	if sub == nil || len(id) == 0 {
 		return
 	}
 	reply := map[string]any{"type": "reply", "id": id, "ok": err == nil}
@@ -128,12 +131,7 @@ func (m *Magmux) replyTo(conn net.Conn, id json.RawMessage, result map[string]an
 		}
 	}
 	data = append(data, '\n')
-
-	m.sockClientsMu.Lock()
-	defer m.sockClientsMu.Unlock()
-	_ = conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
-	_, _ = conn.Write(data)
-	_ = conn.SetWriteDeadline(time.Time{})
+	sub.Send(data)
 }
 
 // handleSocketMsg runs one inbound message and answers it if — and only if — it
@@ -143,20 +141,29 @@ func (m *Magmux) replyTo(conn net.Conn, id json.RawMessage, result map[string]an
 // tweak, which is the whole of the protocol needed to notice a controller
 // coming and going: magmux already sees the fd close, and the only missing bit
 // was telling a driving connection apart from a passive subscriber's tint.
-func (m *Magmux) handleSocketMsg(msg sockMsg, conn net.Conn) bool {
+func (m *Magmux) handleSocketMsg(msg sockMsg, sub *hub.Sub) bool {
 	// `call` is the one verb whose meaning depends on its payload: the op's
 	// class decides whether this connection is steering the session or merely
 	// watching it. Every other verb is on isControllerVerb's list, which stays
 	// exactly as it was.
 	driving := isControllerVerb(msg.Type) || (msg.Type == "call" && m.callIsDriving(msg))
+	msg.sub = sub
 	if !m.layoutIsReady() {
 		// handleSocketConn already waited, so getting here means the wait timed
 		// out or teardown began: there is no layout to run this against. Refuse
 		// rather than dispatch — every verb would resolve its pane against an
 		// empty table and report a missing INDEX for a missing LAYOUT. Silent
 		// without an id, like every other failure on the legacy path.
-		m.replyTo(conn, msg.ID, nil, sockErrf(sockCodeNotReady,
+		m.replyTo(sub, msg.ID, nil, sockErrf(sockCodeNotReady,
 			"magmux has not finished starting up; no panes exist yet"))
+		return false
+	}
+	if m.bus().Closing() {
+		// Teardown began: Quiesce has stopped new work so that `results` can
+		// report a session that is no longer moving. Same refusal, for the same
+		// reason, and silent without an id for the same reason again.
+		m.replyTo(sub, msg.ID, nil, sockErrf(sockCodeNotReady,
+			"magmux is shutting down and is not taking new requests"))
 		return false
 	}
 	if len(msg.ID) == 0 {
@@ -166,12 +173,12 @@ func (m *Magmux) handleSocketMsg(msg sockMsg, conn net.Conn) bool {
 	}
 	id := msg.ID
 	result, err := m.dispatchSocketVerbExt(msg, func(r map[string]any, e error) {
-		m.replyTo(conn, id, r, e)
+		m.replyTo(sub, id, r, e)
 	})
 	if errors.Is(err, errReplyDeferred) {
 		return driving // the verb owns the reply now, and will send exactly one
 	}
-	m.replyTo(conn, id, result, err)
+	m.replyTo(sub, id, result, err)
 	return driving
 }
 

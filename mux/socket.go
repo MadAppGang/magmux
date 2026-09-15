@@ -1,7 +1,6 @@
 package mux
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -9,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/MadAppGang/magmux/hub"
@@ -73,6 +71,15 @@ type sockMsg struct {
 	// sequence of bytes on the wire can claim an identity, which is what makes
 	// it safe for a verb to authorise on.
 	caller hub.Caller
+	// sub is the connection this message arrived on, for the verbs whose work
+	// outlives the dispatch call: `send` is admitted on the reader and
+	// DELIVERED on this Sub's lane for its pane, so two instructions to one
+	// pane from one connection are typed in submission order.
+	//
+	// Unexported for the same reason caller is, and nil for every path that has
+	// no connection behind it (an op called through the registry, a unit test),
+	// which keeps today's one-goroutine-per-send behaviour as the fallback.
+	sub *hub.Sub
 }
 
 // socketDir is where this magmux binds. The field wins over the package
@@ -154,34 +161,12 @@ func (m *Magmux) socketServer() {
 		return
 	}
 
-	// Cleanup on exit
+	// Cleanup on exit. The whole of the teardown ordering lives in
+	// shutdownSocket (sockconn.go): quiesce the work, build results, then
+	// finalize every subscriber with results → shutdown → EOF.
 	go func() {
 		<-m.quit
-		// Push a final aggregated results event with the last-known state of
-		// every pane. Subscribers (e.g. claudish) use this as the authoritative
-		// final state — no file-based fallback needed.
-		results := map[string]any{
-			"type":    "results",
-			"panes":   m.buildPaneResults(),
-			"endedAt": time.Now().UTC().Format(time.RFC3339),
-		}
-		shutdown := map[string]any{"type": "shutdown"}
-		// Record before broadcasting. From this point a connection either wins
-		// the race and is registered (so the broadcasts below reach it), or it
-		// arrives after and is replayed these same events by handleSocketConn.
-		// Both paths deliver exactly once, because a client that sees
-		// finalEvents is never added to sockClients.
-		m.recordFinalEvents(results, shutdown)
-		m.broadcastEvent(results)
-		// Push a shutdown event so clients know the socket is closing.
-		m.broadcastEvent(shutdown)
-		// Deterministically flush and close each subscriber connection instead
-		// of racing a fixed drain sleep. Closing the connection after the two
-		// broadcasts above (which write synchronously under sockClientsMu) gives
-		// each subscriber a clean EOF *after* it has received the final results
-		// — the ordering guarantee integrators rely on. Bound the whole teardown
-		// so a single wedged subscriber can't hang magmux's exit.
-		m.closeSockClients(2 * time.Second)
+		m.shutdownSocket()
 		ln.Close()
 		os.Remove(sockPath)
 		m.markSocketDone()
@@ -193,123 +178,6 @@ func (m *Magmux) socketServer() {
 			return // listener closed
 		}
 		go m.handleSocketConn(conn)
-	}
-}
-
-// sockConnSeq numbers socket connections for Caller.Conn ("sock#12"). It is
-// magmux's own label and is never reused within a run, so a panel row or a log
-// line names one connection and not "whoever was second".
-var sockConnSeq atomic.Uint64
-
-func (m *Magmux) handleSocketConn(conn net.Conn) {
-	// Wait for the layout before serving anything on this connection. The
-	// listener is bound before the first child forks, on purpose — MAGMUX_SOCK
-	// must be in that child's environment — so connections can and do arrive
-	// while m.root and m.allPanes are still nil. Serving one there writes an
-	// EMPTY aggregate snapshot as the connection's first line, and a subscriber
-	// seeds its whole pane map from that line, so it would then wait forever
-	// for per-pane snapshots that only ever fire on change.
-	//
-	// Done BEFORE sockClientsMu is taken: that lock is what makes the write and
-	// the registration below atomic against the shutdown broadcast, and holding
-	// it across a wait would block every other client's `results`.
-	m.waitLayoutReady(layoutReadyTimeout)
-
-	// Immediately send the current pane-state snapshot so a subscriber that
-	// connects *after* some panes have already exited still receives full
-	// state (the live exit/snapshot events it missed are folded into this one
-	// aggregate event). Written before registering the connection for
-	// broadcasts so it is always the first line this subscriber sees.
-	snapshot := map[string]any{
-		"type":  "snapshot",
-		"panes": m.buildPaneResults(),
-	}
-	// NOTE: distinct from the per-pane live "snapshot" event (which carries a
-	// singular "pane" field). This connect-time aggregate carries a "panes"
-	// array — subscribers disambiguate on that field.
-	//
-	// Build the payload BEFORE taking sockClientsMu: buildPaneResults locks
-	// each pane, and the established lock order is p.mu -> sockClientsMu
-	// (pollControllers releases p.mu before broadcasting). Taking them the
-	// other way round here would invert it.
-	data, err := json.Marshal(snapshot)
-	if err != nil {
-		conn.Close()
-		return
-	}
-	data = append(data, '\n')
-
-	// Write the aggregate and register for broadcasts ATOMICALLY, under the
-	// same lock broadcastEvent uses. Writing first and registering after left
-	// a window in which a shutdown broadcast (results/shutdown) could run
-	// against a client list that did not yet contain this connection: the
-	// subscriber then saw a clean EOF with no `results` event, violating the
-	// ordering guarantee integrators rely on. That was rare but real — it is
-	// what made TestSocketSubscriberContract flaky.
-	m.sockClientsMu.Lock()
-	_ = conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
-	_, _ = conn.Write(data)
-	_ = conn.SetWriteDeadline(time.Time{})
-	if len(m.finalEvents) > 0 {
-		// Teardown already began, so this connection will never be broadcast
-		// to. Replay the final events it missed, then give it a clean EOF.
-		// Registering instead would either lose `results` or leave the
-		// connection dangling.
-		for _, ev := range m.finalEvents {
-			_ = conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
-			_, _ = conn.Write(ev)
-		}
-		m.sockClientsMu.Unlock()
-		conn.Close()
-		return
-	}
-	m.sockClients = append(m.sockClients, conn)
-	m.sockClientsMu.Unlock()
-
-	defer func() {
-		conn.Close()
-		m.sockClientsMu.Lock()
-		for i, c := range m.sockClients {
-			if c == conn {
-				m.sockClients = append(m.sockClients[:i], m.sockClients[i+1:]...)
-				break
-			}
-		}
-		m.sockClientsMu.Unlock()
-	}()
-
-	scanner := bufio.NewScanner(conn)
-	// Raise the token limit off the 64KB default. An oversized line is not
-	// skipped: Scan returns false and this loop ends, so one long message
-	// (a pasted instruction, a large payload) silently drops the *whole*
-	// client connection rather than one line — the subscriber stops receiving
-	// broadcasts with no error anywhere. 4MB matches the transcript scanners
-	// in controller_claude.go.
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	// Whether this connection ever DROVE anything, as opposed to subscribing
-	// and tinting. It is the only thing the panel needs to report a controller
-	// arriving and going away: the fd close below is already the disconnect.
-	// An operator staring at a frozen panel needs to know the controller went
-	// away rather than got slow.
-	driving := false
-	connID := fmt.Sprintf("sock#%d", sockConnSeq.Add(1))
-	for scanner.Scan() {
-		line := scanner.Text()
-		var msg sockMsg
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			continue
-		}
-		// Identity is attached AFTER decode and by the adapter alone. See
-		// sockMsg.caller: the field is unexported precisely so this is the
-		// only way it can ever be set.
-		msg.caller = callerFor(connID, msg)
-		if m.handleSocketMsg(msg, conn) && !driving {
-			driving = true
-			m.control.noteController(true)
-		}
-	}
-	if driving {
-		m.control.noteController(false)
 	}
 }
 
@@ -346,9 +214,10 @@ func (m *Magmux) layoutIsReady() bool {
 // waitLayoutReady blocks until the layout exists, magmux starts shutting down,
 // or the timeout expires; it reports whether the layout is actually there.
 //
-// Callers must hold NO lock — least of all sockClientsMu, which serialises
-// every broadcast: waiting under it would stall the shutdown broadcast that
-// delivers `results` behind a client that connected during startup.
+// Callers must hold NO lock, and it must run BEFORE the connection's Sub is
+// registered: a Sub is BUFFERING from the moment it is registered until its
+// aggregate is built, and five seconds of events would overflow its cap and
+// close it before it ever started.
 func (m *Magmux) waitLayoutReady(timeout time.Duration) bool {
 	if m.layoutIsReady() {
 		return true
@@ -358,8 +227,8 @@ func (m *Magmux) waitLayoutReady(timeout time.Duration) bool {
 		return true
 	case <-m.quit:
 		// Teardown never waits on a subscriber. The connection is still served:
-		// handleSocketConn's finalEvents replay is what gives it results →
-		// shutdown → EOF, and that path must stay reachable.
+		// a Session opened once Finalize has run is replayed the same two
+		// finals and closed, so it still gets results → shutdown → EOF.
 		return false
 	case <-time.After(timeout):
 		return false
@@ -393,93 +262,22 @@ func (m *Magmux) waitSocketShutdown(timeout time.Duration) {
 	}
 }
 
-// recordFinalEvents marshals the shutdown payloads and stores them so a
-// subscriber connecting during or after teardown can still be given them.
-// Must be called before the corresponding broadcasts.
-func (m *Magmux) recordFinalEvents(events ...any) {
-	var encoded [][]byte
-	for _, e := range events {
-		data, err := json.Marshal(e)
-		if err != nil {
-			continue
-		}
-		encoded = append(encoded, append(data, '\n'))
-	}
-	m.sockClientsMu.Lock()
-	m.finalEvents = encoded
-	m.sockClientsMu.Unlock()
-}
-
-// broadcastEvent serializes an event as JSON and pushes it to all connected
-// socket clients. Best-effort: failed writes drop the client silently.
+// broadcastEvent serializes an event as JSON and publishes it on the hub's bus,
+// which is the ONE path to every subscriber on every transport.
 //
-// It also publishes the same bytes to the hub's bus. That is a BRIDGE, not a
-// migration: the socket keeps its own synchronous write loop, byte for byte
-// and deadline for deadline, so no existing client can tell the bus exists.
-// What it buys now is that every event is on the bus for the adapters that
-// arrive later, from one publishing site rather than from a sweep through
-// every caller of this function. P2 moves the socket itself onto Subs and this
-// loop goes.
+// It never blocks and it never writes: each Sub has its own bounded queue and
+// its own writer goroutine, so a peer that has stopped reading fills its own
+// queue and is closed with slow_consumer while everybody else is unaffected.
+// That is N1, and it is why this is safe to call from the render goroutine —
+// the old shape wrote to every client here, synchronously, under one lock, with
+// a 100 ms deadline each, so one wedged subscriber cost every other writer a
+// frame.
+//
+// One marshalling per event, and the bytes are the whole line, newline
+// included: the framing belongs to the transport and the hub adds none.
 func (m *Magmux) broadcastEvent(event any) {
-	data, err := json.Marshal(event)
-	if err != nil {
-		return
-	}
-	data = append(data, '\n')
-
-	// Before sockClientsMu, never under it: hub.mu is a leaf, and nesting it
-	// inside the socket's lock would invent an edge that P2 has to unpick when
-	// hub.mu replaces sockClientsMu outright.
-	m.bus().Publish(data)
-
-	m.sockClientsMu.Lock()
-	defer m.sockClientsMu.Unlock()
-	// Iterate in reverse so we can splice out dead clients.
-	for i := len(m.sockClients) - 1; i >= 0; i-- {
-		c := m.sockClients[i]
-		_ = c.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
-		if _, err := c.Write(data); err != nil {
-			c.Close()
-			m.sockClients = append(m.sockClients[:i], m.sockClients[i+1:]...)
-		}
-	}
-}
-
-// closeSockClients flushes and closes every connected subscriber connection so
-// each receives a clean EOF *after* the final results/shutdown broadcasts. The
-// broadcasts run synchronously under sockClientsMu with a per-write deadline, so
-// by the time this runs the payload has already been written to the OS socket
-// buffer; closing the fd then signals end-of-stream. Bounded by timeout so a
-// wedged peer (never draining its receive buffer) can't block magmux's exit.
-func (m *Magmux) closeSockClients(timeout time.Duration) {
-	m.sockClientsMu.Lock()
-	conns := make([]net.Conn, len(m.sockClients))
-	copy(conns, m.sockClients)
-	m.sockClients = nil
-	m.sockClientsMu.Unlock()
-
-	if len(conns) == 0 {
-		return
-	}
-
-	done := make(chan struct{})
-	go func() {
-		for _, c := range conns {
-			// A write deadline in the past forces any buffered write to flush or
-			// error immediately rather than block, then Close signals EOF.
-			_ = c.SetWriteDeadline(time.Now().Add(timeout))
-			_ = c.Close()
-		}
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		// Best effort: force-close whatever is left so nothing lingers.
-		for _, c := range conns {
-			_ = c.Close()
-		}
+	if data := eventLine(event); len(data) > 0 {
+		m.bus().Publish(data)
 	}
 }
 
@@ -600,14 +398,19 @@ func (m *Magmux) dispatchSocketVerb(msg sockMsg, done func(map[string]any, error
 		if msg.Enter != nil {
 			enter = *msg.Enter
 		}
+		// Admitted here, on the reader; DELIVERED on this connection's lane for
+		// this pane (msg.sub), so two instructions to one pane cannot be typed
+		// into each other. A message with no connection behind it — an op
+		// called through the registry, a unit test — keeps the old
+		// one-goroutine-per-send shape.
 		if done == nil {
-			return nil, m.sendToPane(paneIdx, msg.Text, msg.Keys, enter, msg.Label, nil)
+			return nil, m.sendToPaneVia(msg.sub, paneIdx, msg.Text, msg.Keys, enter, msg.Label, nil)
 		}
 		// Delivery outlives this call, so the reply does too: it means "the
 		// bytes reached the PTY", which is the failure mode that used to live
 		// and die inside sendToPane's goroutine.
 		result := map[string]any{"pane": paneIdx, "bytes": len(msg.Text), "keys": len(msg.Keys), "enter": enter}
-		if err := m.sendToPane(paneIdx, msg.Text, msg.Keys, enter, msg.Label, func(err error) {
+		if err := m.sendToPaneVia(msg.sub, paneIdx, msg.Text, msg.Keys, enter, msg.Label, func(err error) {
 			done(result, err)
 		}); err != nil {
 			return nil, err

@@ -73,6 +73,11 @@ type Hub struct {
 	calls    map[uint64]context.CancelFunc
 	nextCall uint64
 	inflight sync.WaitGroup
+	// lanes is every live (Sub, pane) lane, INCLUDING those whose Sub is closed
+	// and merely draining. Quiesce is the only thing that discards a queued
+	// item, so it has to be able to reach a lane its connection has already
+	// outlived (see lane.go).
+	lanes map[*lane]struct{}
 }
 
 // New returns an empty hub.
@@ -81,6 +86,7 @@ func New() *Hub {
 		ops:   make(map[string]Op),
 		subs:  make(map[*Sub]struct{}),
 		calls: make(map[uint64]context.CancelFunc),
+		lanes: make(map[*lane]struct{}),
 	}
 }
 
@@ -252,9 +258,9 @@ func (h *Hub) Call(ctx context.Context, c Caller, name string, args json.RawMess
 // to grace for it to return. After it, every Call is not_ready.
 //
 // It is deliberately not the same thing as Finalize. Quiesce is about WORK
-// (ops in flight, and from P2 the queued PTY writes in each lane); Finalize is
-// about the STREAM. Building results in between is what makes the aggregate a
-// report on a session that has stopped moving.
+// (ops in flight, and the queued PTY writes in each lane); Finalize is about
+// the STREAM. Building results in between is what makes the aggregate a report
+// on a session that has stopped moving.
 //
 // An op still running when grace expires is abandoned, not killed: its reply
 // is refused and its effect can still land. Only two things can get there — a
@@ -278,9 +284,21 @@ func (h *Hub) Quiesce(grace time.Duration) {
 		cancel()
 	}
 
+	// Every QUEUED lane item is discarded unrun — including in a closed Sub's
+	// draining lane — and whatever is delivering is cancelled at its next stop
+	// check. This is the ONLY place an item is dropped, which is why a
+	// discarded send is told about it rather than vanishing.
+	lanes := h.laneSet()
+	for _, l := range lanes {
+		l.quiesce()
+	}
+
 	done := make(chan struct{})
 	go func() {
 		h.inflight.Wait()
+		for _, l := range lanes {
+			l.running.Wait()
+		}
 		close(done)
 	}()
 	select {

@@ -98,6 +98,10 @@ type Sub struct {
 	torn   bool
 	dead   bool
 	reason string
+	// lanes is this connection's ordered delivery queues, one per pane. See
+	// lane.go: a lane outlives its Sub, so this map is only how a PUSHER finds
+	// one — the hub keeps its own set for Quiesce.
+	lanes map[int]*lane
 }
 
 func newSub(h *Hub, c Caller, sink Sink, pluginOf func() string) *Sub {
@@ -154,7 +158,13 @@ func (s *Sub) Send(msg []byte) {
 // connection ended. What is already queued is still written — a reply to a
 // request the peer sent before it went away still goes out, and is simply lost
 // at the socket — and the writer then exits.
+//
+// Its lanes are told too, and they behave the same way: nothing new is
+// accepted, what is already queued still RUNS. That is what keeps README's
+// one-shot client working, whose second send is always still queued behind the
+// first one's pacing when the socket closes.
 func (s *Sub) Close(reason string) {
+	defer s.closeLanes()
 	s.mu.Lock()
 	if s.closed || s.dead {
 		s.mu.Unlock()
@@ -241,6 +251,11 @@ func (s *Sub) finalize(finals [][]byte, cut, deadline time.Time) {
 // Publish on overflow, Finalize at its deadline, the writer on a torn write —
 // and it is idempotent.
 func (s *Sub) kill(reason string) {
+	// The STREAM is over; the lanes are not. A send already accepted is still
+	// delivered and still acked on the panel, exactly as it is for a peer that
+	// merely hung up — losing it because the peer stopped READING would make
+	// delivery depend on something it has nothing to do with.
+	defer s.closeLanes()
 	s.mu.Lock()
 	if s.dead {
 		s.mu.Unlock()
@@ -289,6 +304,11 @@ func (s *Sub) take() (msg []byte, stop bool, reason string) {
 		msg, s.head = s.head, nil
 	case s.finalized && len(s.finals) > 0:
 		msg, s.finals = s.finals[0], s.finals[1:]
+		if len(msg) == 0 {
+			// An empty final is nothing to write and must not be mistaken for
+			// "nothing to do", which would park the writer on its wake channel.
+			return nil, true, "shutdown"
+		}
 	case s.finalized:
 		return nil, true, "shutdown"
 	case len(s.fifo) > 0:

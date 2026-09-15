@@ -22,9 +22,12 @@ package mux
 // nobody to tell.
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/MadAppGang/magmux/hub"
 )
 
 // pilotSendDelay is the pause between writing an instruction's text and
@@ -126,16 +129,30 @@ func (p *Pane) pasteWrap(text string) []byte {
 }
 
 // sendToPane delivers a driver instruction: optional text, then optional named
-// keys, then optionally Enter. The writes run on their own goroutine because of
-// the inter-write delay — the socket reader must not block on a slow pane.
+// keys, then optionally Enter.
 //
-// done, if non-nil, is called on that delivery goroutine once every write has
-// been attempted: nil on success, a *sockErr otherwise. It is the only way a
-// caller can learn that the bytes never reached the PTY, a failure that until
-// now lived and died inside this goroutine. Note what it does and does not
-// claim: the bytes were written, not that the TUI on the far end accepted them
-// — an app that is not ready for a paste can still drop it, which is what
-// pilotSendDelay exists to make unlikely.
+// It is in two halves, and the seam is what makes ordering possible.
+//
+//   - ADMIT is synchronous, on the caller's goroutine, in exactly today's
+//     order: resolve the pane, write the OUT row, broadcast the `control out`
+//     event, tell the controller a turn is starting. On the socket that is the
+//     READER goroutine, so OUT rows keep socket order relative to `pilot`,
+//     `close_pane` and every other verb — which is what `▶ OUT` means: the
+//     request as it arrived.
+//   - DELIVER is the paced part — text, a key every 20 ms, a pause, Enter —
+//     and never runs on the caller's goroutine, because the transport reader
+//     must not block on a slow pane.
+//
+// Without a Sub, delivery goes on its own goroutine exactly as it always did.
+// With one (sendToPaneVia), it goes on that connection's lane for that pane, so
+// two instructions from one connection to one pane cannot interleave.
+//
+// done, if non-nil, is called once every write has been attempted: nil on
+// success, a *sockErr otherwise. It is the only way a caller can learn that the
+// bytes never reached the PTY. Note what it does and does not claim: the bytes
+// were written, not that the TUI on the far end accepted them — an app that is
+// not ready for a paste can still drop it, which is what pilotSendDelay exists
+// to make unlikely.
 //
 // Synchronous validation errors (a bad index, the control pane) are returned
 // directly and done is NOT called, so a caller waiting on a reply gets exactly
@@ -143,16 +160,63 @@ func (p *Pane) pasteWrap(text string) []byte {
 //
 // Caller must NOT hold p.mu.
 func (m *Magmux) sendToPane(idx int, text string, keys []string, enter bool, label string, done func(error)) error {
+	return m.sendToPaneVia(nil, idx, text, keys, enter, label, done)
+}
+
+// sendToPaneVia is sendToPane with the connection named, so its delivery can be
+// ordered against that connection's other sends to the same pane.
+func (m *Magmux) sendToPaneVia(sub *hub.Sub, idx int, text string, keys []string, enter bool, label string, done func(error)) error {
+	d, err := m.admitSend(idx, text, keys, enter, label)
+	if err != nil {
+		return err
+	}
+	if sub == nil {
+		go d.deliver(context.Background(), done)
+		return nil
+	}
+	err = sub.Deliver(idx, hub.LaneItem{
+		Run:     func(ctx context.Context) { d.deliver(ctx, done) },
+		Discard: func() { d.discard(done) },
+		// The text is what makes one item big; the rest is a handful of key
+		// names. The cap this counts against is per (connection, pane).
+		Size: len(text) + 64,
+	})
+	if err != nil {
+		// The OUT row is already on the panel — admit wrote it — so a send that
+		// vanished into a full lane or into a shutdown must say so there. The
+		// caller gets the same error by its own route, and done is not called:
+		// one answer, one route.
+		m.control.recordAck(d.seq, false, verbErrCode(err), err.Error())
+		return err
+	}
+	return nil
+}
+
+// sendDelivery is one admitted instruction, waiting to be typed.
+type sendDelivery struct {
+	m     *Magmux
+	p     *Pane
+	idx   int
+	seq   int // the OUT row this delivery answers
+	text  string
+	keys  []string
+	enter bool
+}
+
+// admitSend resolves the target and files the request, with no I/O and no
+// waiting. Everything it does is what the panel and the pane's controller have
+// always been told the moment a send arrived.
+func (m *Magmux) admitSend(idx int, text string, keys []string, enter bool, label string) (*sendDelivery, error) {
 	// Resolved through the identity table, never by raw index: after a
 	// close_pane the ids are sparse, and a bounds check alone would happily
 	// type an instruction into a pane that is no longer on screen.
 	p := m.paneByID(idx)
 	if p == nil {
-		return sockErrf(sockCodeNoSuchPane, "no pane %d (it may have been closed)", idx)
+		return nil, sockErrf(sockCodeNoSuchPane, "no pane %d (it may have been closed)", idx)
 	}
 	if p.isControl {
 		// the panel is not a session; nothing to type into
-		return sockErrf(sockCodePaneIsControl, "pane %d is the control panel and has no session to type into", idx)
+		return nil, sockErrf(sockCodePaneIsControl, "pane %d is the control panel and has no session to type into", idx)
 	}
 
 	// Log before delivery so the panel shows the instruction even if the
@@ -181,60 +245,119 @@ func (m *Magmux) sendToPane(idx int, text string, keys []string, enter bool, lab
 	if n, ok := p.controller.(InputNotifier); ok && p.controller != nil {
 		n.NotifyInput()
 	}
+	return &sendDelivery{m: m, p: p, idx: idx, seq: seq, text: text, keys: keys, enter: enter}, nil
+}
 
-	go func() {
-		// A rejected write means the pane cannot take input at all — its child
-		// exited or its PTY is closed — so the instruction is gone and there is
-		// no point pressing on. A bad key name is the caller's mistake in one
-		// keystroke: the rest is still delivered, as it always was, and the
-		// first such error is what the reply reports.
-		dead := func(what string) error {
-			return sockErrf(sockCodePaneDead,
-				"pane %d rejected the %s: its child has exited or its PTY is closed", idx, what)
+// deliver types the instruction. It is the body that used to be the `go func()`
+// in sendToPane, with one addition: a stop check before every write and a
+// cancellable pause instead of a sleep, so Quiesce can end a delivery between
+// keystrokes rather than waiting out its pacing.
+//
+// ctx is cancelled by Hub.Quiesce and by nothing else. A caller's own timeout
+// ends that caller's WAIT; it never truncates an instruction half-typed.
+func (d *sendDelivery) deliver(ctx context.Context, done func(error)) {
+	var firstErr error
+	// A rejected write means the pane cannot take input at all — its child
+	// exited or its PTY is closed — so the instruction is gone and there is
+	// no point pressing on. A bad key name is the caller's mistake in one
+	// keystroke: the rest is still delivered, as it always was, and the
+	// first such error is what the reply reports.
+	dead := func(what string) error {
+		return sockErrf(sockCodePaneDead,
+			"pane %d rejected the %s: its child has exited or its PTY is closed", d.idx, what)
+	}
+	finish := func(err error) {
+		// The panel learns the outcome whether or not anyone asked for a
+		// reply: a fire-and-forget send that never reached the PTY is
+		// exactly the failure an operator needs to see.
+		d.m.control.recordAck(d.seq, err == nil, verbErrCode(err), ackText(d.text, d.keys, d.enter, err))
+		if done != nil {
+			done(err)
 		}
-		var firstErr error
-		finish := func(err error) {
-			// The panel learns the outcome whether or not anyone asked for a
-			// reply: a fire-and-forget send that never reached the PTY is
-			// exactly the failure an operator needs to see.
-			m.control.recordAck(seq, err == nil, verbErrCode(err), ackText(text, keys, enter, err))
-			if done != nil {
-				done(err)
-			}
-		}
+	}
 
-		if text != "" {
-			if !p.injectPTY(p.pasteWrap(text)) {
-				finish(dead("text"))
-				return
-			}
+	if ctx.Err() != nil {
+		finish(d.cancelled("nothing"))
+		return
+	}
+	if d.text != "" {
+		if !d.p.injectPTY(d.p.pasteWrap(d.text)) {
+			finish(dead("text"))
+			return
 		}
-		for _, k := range keys {
-			b, ok := keyBytes(k)
-			if !ok {
-				if dbgFile != nil {
-					fmt.Fprintf(dbgFile, "[pilot] unknown key %q\n", k)
-				}
-				if firstErr == nil {
-					firstErr = sockErrf(sockCodeBadRequest, "unknown key %q", k)
-				}
-				continue
+	}
+	for _, k := range d.keys {
+		b, ok := keyBytes(k)
+		if !ok {
+			if dbgFile != nil {
+				fmt.Fprintf(dbgFile, "[pilot] unknown key %q\n", k)
 			}
-			time.Sleep(20 * time.Millisecond)
-			if !p.injectPTY(b) && firstErr == nil {
-				firstErr = dead("key " + k)
+			if firstErr == nil {
+				firstErr = sockErrf(sockCodeBadRequest, "unknown key %q", k)
 			}
+			continue
 		}
-		if enter {
-			// Let the TUI settle on the text before submitting it.
-			time.Sleep(pilotSendDelay)
-			if !p.injectPTY([]byte("\r")) && firstErr == nil {
-				firstErr = dead("enter")
-			}
+		if !pause(ctx, 20*time.Millisecond) {
+			finish(d.cancelled("key " + k))
+			return
 		}
-		finish(firstErr)
-	}()
-	return nil
+		if !d.p.injectPTY(b) && firstErr == nil {
+			firstErr = dead("key " + k)
+		}
+	}
+	if d.enter {
+		// Let the TUI settle on the text before submitting it.
+		if !pause(ctx, pilotSendDelay) {
+			finish(d.cancelled("enter"))
+			return
+		}
+		if !d.p.injectPTY([]byte("\r")) && firstErr == nil {
+			firstErr = dead("enter")
+		}
+	}
+	finish(firstErr)
+}
+
+// discard answers for an instruction Quiesce dropped before it ran. The OUT row
+// exists — admit wrote it — so the only wrong answer here is silence.
+func (d *sendDelivery) discard(done func(error)) {
+	err := sockErrf(sockCodeNotReady,
+		"pane %d: the instruction was discarded unsent; magmux is shutting down", d.idx)
+	d.m.control.recordAck(d.seq, false, verbErrCode(err), err.Error())
+	if done != nil {
+		done(err)
+	}
+}
+
+// cancelled is what a delivery stopped mid-way reports. It names what had
+// already been written, because "cancelled" alone leaves an operator unable to
+// tell a session that got half an instruction from one that got none.
+func (d *sendDelivery) cancelled(before string) error {
+	return sockErrf(sockCodeNotReady,
+		"pane %d: delivery was cancelled before the %s (%s delivered); magmux is shutting down",
+		d.idx, before, deliveredSoFar(d.text))
+}
+
+// deliveredSoFar describes the part of an instruction that did reach the PTY.
+func deliveredSoFar(text string) string {
+	if text == "" {
+		return "nothing"
+	}
+	return fmt.Sprintf("%d bytes of text", len(text))
+}
+
+// pause waits out a pacing delay, or reports false the moment the delivery is
+// cancelled. A bare time.Sleep here is what would make Quiesce wait out a
+// 40-key send's full 800 ms of pacing.
+func pause(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // ackText summarises what magmux did with a send, for the ⇦ continuation on

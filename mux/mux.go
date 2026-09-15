@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -47,9 +46,14 @@ type Magmux struct {
 	//
 	// Lock order:
 	//
-	//	treeMu -> p.mu -> sockClientsMu
+	//	treeMu -> p.mu -> hub.mu -> sub.mu
 	//	treeMu -> cp.mu
 	//	treeMu -> claimedMu
+	//
+	// hub.mu and sub.mu are LEAVES: nothing of magmux's is ever taken while
+	// either is held, and neither is held across an OpFunc, a Sink write or a
+	// plugin call. Publishing an event or queueing a reply therefore never
+	// blocks and never reaches back into the terminal core.
 	//
 	// Three rules:
 	//
@@ -65,7 +69,7 @@ type Magmux struct {
 	//     from a site that already holds treeMu has a …Locked twin —
 	//     allPanesDoneLocked above all, because renderLocked holds RLock
 	//     throughout.
-	//  3. Never acquire treeMu while holding p.mu, cp.mu, sockClientsMu or
+	//  3. Never acquire treeMu while holding p.mu, cp.mu, hub.mu, sub.mu or
 	//     claimedMu.
 	//
 	// One deliberate exception to the usual reader/writer split: render()
@@ -139,17 +143,7 @@ type Magmux struct {
 	// assigned in production either.
 	//
 	// Written once, in main(), before any goroutine exists.
-	sockDir       string
-	sockClients   []net.Conn // currently-connected socket subscribers (for push events)
-	sockClientsMu sync.Mutex
-	// finalEvents holds the marshaled shutdown payloads (results, then
-	// shutdown) once teardown begins. Guarded by sockClientsMu. Non-empty
-	// means "shutdown has started": a client connecting from that moment on
-	// is never registered for broadcasts, and is instead replayed these
-	// events directly before being closed. That makes "every subscriber
-	// receives results before EOF" hold no matter when it connects — see
-	// handleSocketConn and recordFinalEvents.
-	finalEvents [][]byte
+	sockDir string
 	// sockDone is closed once the socket server has finished its teardown —
 	// final results/shutdown broadcast, subscribers flushed and closed,
 	// listener removed. main waits on it before exiting, because that
@@ -695,9 +689,11 @@ func (m *Magmux) attachController(p *Pane) {
 // `force` skips the throttle for the final poll before teardown.
 //
 // It COLLECTS its snapshot events and returns them rather than broadcasting
-// inline. Broadcasting here would put conn.Write — with its 100ms-per-client
-// deadline — on the render goroutine, so one wedged subscriber would stall the
-// frame. The caller broadcasts.
+// inline. That began as a rule about blocking — broadcasting used to write to
+// every client here, with a 100ms deadline each, so one wedged subscriber
+// stalled the frame — and it survives the move onto the bus as a rule about
+// locks: publishing takes hub.mu, which is a leaf, and the caller broadcasts
+// with nothing of magmux's held.
 //
 // Caller must NOT hold treeMu. Poll is filesystem work, not memory work:
 // ClaudeCodeController.Poll tails a transcript and, until it has found one,
@@ -1024,7 +1020,8 @@ func (m *Magmux) signalLoop(ch <-chan os.Signal, exit func(int)) {
 
 	// ── phase 2 ──
 	// Any LATER signal is a human saying the graceful path is taking too long.
-	// waitSocketShutdown allows 3s and closeSockClients 2s — both CEILINGS that
+	// waitSocketShutdown allows 3s, and the teardown inside it 2.5s (a 0.5s
+	// quiesce plus a 2s finalize deadline) — both CEILINGS that
 	// return as soon as teardown completes, but a person who has pressed ^C
 	// twice must not be made to discover that.
 	sig := hurry
