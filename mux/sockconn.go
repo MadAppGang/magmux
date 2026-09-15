@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/MadAppGang/magmux/hub"
+	"github.com/MadAppGang/magmux/protocol"
 )
 
 // sockSink is a unix-socket connection as the hub sees it.
@@ -86,9 +87,23 @@ func (m *Magmux) handleSocketConn(conn net.Conn) {
 	m.waitLayoutReady(layoutReadyTimeout)
 
 	connID := fmt.Sprintf("sock#%d", sockConnSeq.Add(1))
+
+	// The plugin host's view of this connection. It exists before the Sub
+	// because the Sub needs it: a connection registers as a plugin AFTER it and
+	// its Sub already exist, so identity cannot be captured — Sub.Caller
+	// resolves it through pc.Plugin at every single message. A connection that
+	// never registers has pc.Plugin() == "" forever, which costs one map-free
+	// mutex per call and nothing else.
+	pc := m.plugins().Conn(connID, nil)
+
 	// Step 1: register, BUFFERING. From this moment every Publish is queued for
 	// this connection, and nothing is written yet.
-	sub := m.bus().Session(hub.Caller{Transport: "socket", Conn: connID}, &sockSink{conn: conn}, nil)
+	sub := m.bus().Session(hub.Caller{Transport: "socket", Conn: connID}, &sockSink{conn: conn}, pc.Plugin)
+	// The host writes to a plugin through the SAME Sub as everything else: one
+	// writer per connection is what stops an `invoke` interleaving mid-line with
+	// a broadcast, and Sub.Send never blocks, so a wedged plugin fills its own
+	// queue and is closed with slow_consumer like any other slow peer.
+	pc.SetSend(sub.Send)
 
 	// Step 2: build the aggregate with NO hub lock held. buildPaneResults takes
 	// treeMu and each p.mu, and the order is treeMu -> p.mu -> hub.mu; building
@@ -121,6 +136,12 @@ func (m *Magmux) handleSocketConn(conn net.Conn) {
 	// away rather than got slow.
 	driving := false
 	defer func() {
+		// The plugin goes first, and it is not conditional on this connection
+		// having been one. A plugin's connection ending IS the plugin ending —
+		// magmux cannot invoke what it cannot reach — so its ops are withdrawn
+		// here, before the Sub is closed, so `ops_changed` and `plugin_exited`
+		// still reach every OTHER subscriber through a live bus.
+		pc.Close()
 		// Close, not kill: whatever is already queued for this connection is
 		// still written (and lost at the socket, which is the peer's business),
 		// and whatever is already queued on its LANES is still delivered.
@@ -139,15 +160,31 @@ func (m *Magmux) handleSocketConn(conn net.Conn) {
 	// in controller_claude.go.
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := scanner.Bytes()
+		// PEEK first, and route the plugin protocol off the RAW line before
+		// anything decodes it as a verb.
+		//
+		// It has to happen here rather than in the verb table for two reasons.
+		// The legacy no-id path silently drops unknown verbs, so a plugin
+		// message that reached it would vanish with no error anywhere; and a
+		// plugin message carries a TOKEN and an identity claim, which must not
+		// share a decode path with the ordinary verbs — a field on sockMsg is a
+		// field every verb's handler can see.
+		var env protocol.Envelope
+		if err := json.Unmarshal(line, &env); err != nil {
+			continue
+		}
+		if pc.Handle(env, line) {
+			continue
+		}
 		var msg sockMsg
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		if err := json.Unmarshal(line, &msg); err != nil {
 			continue
 		}
 		// Identity is attached AFTER decode and by the adapter alone. See
 		// sockMsg.caller: the field is unexported precisely so this is the
 		// only way it can ever be set.
-		msg.caller = callerFor(connID, msg)
+		msg.caller = callerFor(sub, msg)
 		if m.handleSocketMsg(msg, sub) && !driving {
 			driving = true
 			m.control.noteController(true)

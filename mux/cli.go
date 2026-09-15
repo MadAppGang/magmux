@@ -102,6 +102,13 @@ func Main(args []string) int {
 			fmt.Println("            The name must be fully qualified; anything else is ignored with a")
 			fmt.Println("            message, because ignoring a grant can only ever narrow access.")
 			fmt.Println("  --tls-cert FILE / --tls-key FILE  Serve https/wss. Both or neither.")
+			fmt.Println("  --plugin CMD  Run CMD as a plugin and let it add its own ops. Repeatable.")
+			fmt.Println("            It is started through the shell with MAGMUX_SOCK, MAGMUX_PLUGIN_ID")
+			fmt.Println("            and a one-time MAGMUX_PLUGIN_TOKEN in its environment; it registers")
+			fmt.Println("            over the socket, and its ops appear as plugin.op in `ops` and on")
+			fmt.Println("            every transport. Its stdout and stderr go to")
+			fmt.Println("            {sock-dir}/magmux-{id}.plugin-{name}.log, never to the terminal.")
+			fmt.Println("            A plugin that fails to start is reported and skipped, not fatal.")
 			fmt.Println("  --allow-origin ORIGIN  Allow a browser origin (exact scheme://host[:port]).")
 			fmt.Println("            Repeatable. Only these origins get CORS headers; a request from")
 			fmt.Println("            any other origin is refused 403, and an absent Origin is allowed.")
@@ -208,7 +215,9 @@ func Main(args []string) int {
 			fmt.Println("  MAGMUX_SEL_BG   Selection background (256-color index, default: 220)")
 			fmt.Println("  MAGMUX_TOKEN    The --listen bearer token. Wins over --token-file and is")
 			fmt.Println("                  NEVER written to disk. There is no --token flag on purpose:")
-			fmt.Println("                  a value on a command line is in every ps listing.")
+			fmt.Println("                  a value on a command line is in every ps listing. It is also")
+			fmt.Println("                  what a plugin you start YOURSELF registers with, with or")
+			fmt.Println("                  without --listen; plugins magmux starts get their own.")
 			fmt.Println("  MAGMUX_VIEW_TOKEN  The read-only token, same order and same rule.")
 			fmt.Println("  MAGMUX_DEBUG    Enable debug logging to /tmp/magmux-debug.log")
 			os.Exit(0)
@@ -230,6 +239,7 @@ func Main(args []string) int {
 	var sockDirArg string
 	var themePref string
 	var remoteOpts remoteOptions
+	var pluginCmds []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--listen":
@@ -279,6 +289,16 @@ func Main(args []string) int {
 			if i+1 < len(args) {
 				i++
 				remoteOpts.allowOrigins = append(remoteOpts.allowOrigins, args[i])
+			}
+		case "--plugin":
+			if i+1 < len(args) {
+				i++
+				// Taken verbatim: it is a shell command line, and the shell is
+				// what decides what its quoting means. Nothing is validated
+				// here because there is nothing magmux can usefully check — a
+				// command that does not exist fails at spawn, with the shell's
+				// own message, in the plugin's own log.
+				pluginCmds = append(pluginCmds, args[i])
 			}
 		case "-g":
 			if i+1 < len(args) {
@@ -487,6 +507,15 @@ func Main(args []string) int {
 		},
 	}
 
+	// A plugin an operator runs BY HAND authenticates with the session token,
+	// and that is worth something even with no --listen: a developer debugging
+	// a plugin runs `MAGMUX_TOKEN=... magmux -e sh` and then starts the plugin
+	// in another terminal, without opening a port to do it. A magmux with
+	// neither --listen nor MAGMUX_TOKEN has no session token at all, and then
+	// only plugins it spawned itself can register — which is the right answer,
+	// because it never issued a credential anybody else could hold.
+	mux.remoteToken = os.Getenv("MAGMUX_TOKEN")
+
 	// Remote control, BEFORE init(), and every part of it: the tokens are
 	// resolved and a generated one is written to its final name, the TLS pair
 	// is loaded, the insecure-bind warning is printed, and the listener binds.
@@ -505,6 +534,11 @@ func Main(args []string) int {
 			os.Exit(1)
 		}
 		rem = r
+		// The session token reaches exactly one other thing: the plugin host,
+		// so a plugin an operator started by hand can register with the
+		// credential they already have in MAGMUX_TOKEN. Plugins magmux spawns
+		// get their own one-time token and never see this one.
+		mux.remoteToken = r.tokens.Token
 		// stderr, never stdout: --headless writes zero bytes to stdout and that
 		// rule has no exceptions. The token itself is never printed.
 		rem.note(os.Stderr)
@@ -545,6 +579,14 @@ func Main(args []string) int {
 	defer mux.markLayoutReady()
 	// Give the socket a moment to bind before spawning children
 	sleepMs(10)
+
+	// Plugins start HERE: after MAGMUX_SOCK is published and before the layout
+	// exists. A plugin's first act is to dial that socket, and a connection
+	// that arrives before the layout is simply held at the door
+	// (waitLayoutReady) rather than served an empty pane table — so starting
+	// them now buys a runtime's worth of startup in parallel with the panes,
+	// and costs nothing in ordering.
+	mux.startPlugins(pluginCmds)
 
 	if useGrid {
 		if err := mux.buildGrid(commands); err != nil {
@@ -651,6 +693,13 @@ func Main(args []string) int {
 	// in a goroutine woken by m.quit, so we must let it finish — exiting here
 	// races it and drops results entirely.
 	mux.waitSocketShutdown(3 * time.Second)
+
+	// Plugins go after that, and the order is their graceful exit: the hub has
+	// already given every subscriber — plugins included — results, then
+	// shutdown, then EOF, so a well-behaved plugin has already left of its own
+	// accord. What follows is SIGTERM to each process group, a second, SIGKILL,
+	// and cmd.Wait, so nothing is orphaned and nothing is left a zombie.
+	mux.stopPlugins()
 
 	// The HTTP subscribers were finalized by the same Hub.Finalize the socket's
 	// were — results, shutdown, EOF, on whatever transport each was on — so

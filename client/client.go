@@ -39,29 +39,113 @@ const (
 	SendTimeout          = 20 * time.Second
 )
 
-// Capability-probe budgets. Vars rather than consts so a test can exercise both
-// verdicts without paying real seconds of silence for the legacy one.
-var (
-	// ProbeTimeout bounds the probe made during dial. It is short because
-	// attach must stay snappy, and — the whole point of the two budgets —
-	// silence under it is therefore NOT evidence of anything.
-	ProbeTimeout = 1500 * time.Millisecond
+// Capability-probe budgets. These are the DEFAULTS; each is per Session and is
+// overridden with the matching Dial option.
+//
+// They were package variables until the plugin SDK arrived, and the change is
+// deliberate rather than cosmetic: two Sessions in one process — an MCP server
+// attached to two magmuxes, a plugin whose own tests dial a fake — would
+// otherwise share one set of budgets, and a test that shortened them for its
+// fixture shortened them for every other connection in the process at the same
+// time. A knob that reaches across connections is not a knob, it is a global.
+const (
+	// DefaultProbeTimeout bounds the probe made during dial. It is short
+	// because attach must stay snappy, and — the whole point of the two budgets
+	// — silence under it is therefore NOT evidence of anything.
+	DefaultProbeTimeout = 1500 * time.Millisecond
 
-	// ProbeConfirmTimeout bounds every later probe, the ones whose answer
-	// decides whether a verb is refused. A magmux re-scanning ~/.claude/projects
-	// under treeMu.RLock can miss the short budget without being unhealthy; it
-	// gets a lifecycle-grade wait before it is written off. Only a magmux that
-	// really is silent ever pays it, and then at most once per LegacyRecheckAfter
-	// — which is the right way round, because the alternative for a legacy
-	// magmux is a `send` that lands and is then reported as a 20s failure.
-	ProbeConfirmTimeout = sockLifecycleTimeout
+	// DefaultProbeConfirmTimeout bounds every later probe, the ones whose
+	// answer decides whether a verb is refused. A magmux re-scanning
+	// ~/.claude/projects under treeMu.RLock can miss the short budget without
+	// being unhealthy; it gets a lifecycle-grade wait before it is written off.
+	// Only a magmux that really is silent ever pays it, and then at most once
+	// per recheck interval — which is the right way round, because the
+	// alternative for a legacy magmux is a `send` that lands and is then
+	// reported as a 20s failure.
+	DefaultProbeConfirmTimeout = sockLifecycleTimeout
 
-	// LegacyRecheckAfter is how long a "silent" verdict stands before another
-	// probe is spent on it. The verdict is a guess made from an absence, so it
-	// expires; a magmux that was wedged for a minute must not be refused for the
-	// rest of the server's life.
-	LegacyRecheckAfter = 30 * time.Second
+	// DefaultLegacyRecheckAfter is how long a "silent" verdict stands before
+	// another probe is spent on it. The verdict is a guess made from an
+	// absence, so it expires; a magmux that was wedged for a minute must not be
+	// refused for the rest of the server's life.
+	DefaultLegacyRecheckAfter = 30 * time.Second
 )
+
+// DialOption configures one Session at Dial time.
+type DialOption func(*dialConfig)
+
+type dialConfig struct {
+	probe         time.Duration
+	probeConfirm  time.Duration
+	legacyRecheck time.Duration
+	onEvent       func([]byte)
+}
+
+// orDefault is the zero-value rule for a duration knob: unset means the
+// default, never "immediately".
+func orDefault(d, def time.Duration) time.Duration {
+	if d <= 0 {
+		return def
+	}
+	return d
+}
+
+func defaultDialConfig() dialConfig {
+	return dialConfig{
+		probe:         DefaultProbeTimeout,
+		probeConfirm:  DefaultProbeConfirmTimeout,
+		legacyRecheck: DefaultLegacyRecheckAfter,
+	}
+}
+
+// WithProbeTimeout sets the dial-time probe budget. Silence under it settles
+// nothing, so shortening it makes a dial faster and never makes a verdict
+// hastier.
+func WithProbeTimeout(d time.Duration) DialOption {
+	return func(c *dialConfig) {
+		if d > 0 {
+			c.probe = d
+		}
+	}
+}
+
+// WithProbeConfirmTimeout sets the budget for the probe whose silence DOES
+// settle the verdict. Short values make a busy magmux look legacy, which is the
+// failure this budget exists to avoid; it is worth shortening only in a test
+// that wants to watch the verdict being reached.
+func WithProbeConfirmTimeout(d time.Duration) DialOption {
+	return func(c *dialConfig) {
+		if d > 0 {
+			c.probeConfirm = d
+		}
+	}
+}
+
+// WithLegacyRecheckAfter sets how long a "silent" verdict stands before another
+// probe is spent on it.
+func WithLegacyRecheckAfter(d time.Duration) DialOption {
+	return func(c *dialConfig) {
+		if d > 0 {
+			c.legacyRecheck = d
+		}
+	}
+}
+
+// WithEventHook installs a callback that sees EVERY line magmux sends, after
+// this package's own handling of it.
+//
+// It exists for the plugin SDK, which has to receive message types this client
+// knows nothing about (`invoke`, `invoke_cancel`) on the same connection that
+// carries ordinary events and replies. Every line rather than only the unknown
+// ones, deliberately: a hook that saw a filtered subset would silently stop
+// seeing a message type the day this package learned to handle it.
+//
+// It runs on the reader goroutine, so it must not block — anything slow belongs
+// on a goroutine of the hook's own — and it must not call back into the Session
+// with a request, which would wait for a reply this same goroutine has to read.
+func WithEventHook(fn func(line []byte)) DialOption {
+	return func(c *dialConfig) { c.onEvent = fn }
+}
 
 // Default two-phase waits, matching pilot/magmux.ts.
 const (
@@ -494,6 +578,10 @@ type Session struct {
 	// explaining refusals. Guarded by probeMu.
 	caps map[string]any
 
+	// The probe budgets for THIS session, and the raw-line hook. Written once
+	// by Dial before the reader goroutine exists, and read-only after.
+	cfg dialConfig
+
 	// turnMu guards inFlight: two concurrent send_and_wait on one pane is
 	// nonsense — the second would watch the first one's turn.
 	turnMu   sync.Mutex
@@ -505,7 +593,11 @@ func (s *Session) State() *SessionState { return s.state }
 
 // Dial connects, consumes the guaranteed connect-time aggregate
 // snapshot, starts the reader, and probes for the reply plumbing.
-func Dial(ctx context.Context, id, sockPath string, pid int) (*Session, error) {
+func Dial(ctx context.Context, id, sockPath string, pid int, opts ...DialOption) (*Session, error) {
+	cfg := defaultDialConfig()
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	d := net.Dialer{Timeout: 2 * time.Second}
 	conn, err := d.DialContext(ctx, "unix", sockPath)
 	if err != nil {
@@ -520,6 +612,7 @@ func Dial(ctx context.Context, id, sockPath string, pid int) (*Session, error) {
 		state:    NewSessionState(),
 		closed:   make(chan struct{}),
 		inFlight: map[int]bool{},
+		cfg:      cfg,
 	}
 
 	br := bufio.NewReaderSize(conn, 64*1024)
@@ -559,6 +652,12 @@ func (s *Session) ingest(line []byte) {
 	var ev map[string]any
 	if err := json.Unmarshal(line, &ev); err != nil {
 		return
+	}
+	// The hook sees every line, AFTER this function's own handling of it, so a
+	// plugin's `invoke` dispatch cannot observe a state the pane table has not
+	// caught up with yet.
+	if s.cfg.onEvent != nil {
+		defer s.cfg.onEvent(line)
 	}
 	typ, _ := evStr(ev, "type")
 	switch typ {
@@ -712,11 +811,16 @@ func (s *Session) capsVerdict(ctx context.Context) int32 {
 		return v
 	}
 
-	timeout := ProbeConfirmTimeout
+	// Each budget falls back to its default when it is zero, so a Session built
+	// as a struct literal — every one in this package's own tests — behaves
+	// exactly as a dialled one. The budgets were package variables until they
+	// became Dial options, and a zero value that meant "no patience at all"
+	// would turn that refactor into a behaviour change for every such literal.
+	timeout := orDefault(s.cfg.probeConfirm, DefaultProbeConfirmTimeout)
 	first := s.probedAt.IsZero()
 	if first {
-		timeout = ProbeTimeout
-	} else if v == capsSilent && time.Since(s.probedAt) < LegacyRecheckAfter {
+		timeout = orDefault(s.cfg.probe, DefaultProbeTimeout)
+	} else if v == capsSilent && time.Since(s.probedAt) < orDefault(s.cfg.legacyRecheck, DefaultLegacyRecheckAfter) {
 		return capsSilent // a fresh verdict; do not spend another timeout on it
 	}
 	s.probedAt = time.Now()
@@ -745,6 +849,17 @@ func (s *Session) capsVerdict(ctx context.Context) int32 {
 	// session, and proof must never be clobbered by the silence that raced it.
 	s.capState.CompareAndSwap(capsUnknown, capsSilent)
 	return s.capState.Load()
+}
+
+// Request sends any message with an id and waits for its single reply.
+//
+// It is the general form of the named verbs below, for a caller whose message
+// this package has no method for: a plugin's `plugin.register`, a `call` to
+// another plugin's op, a verb added after this client was written. The id is
+// this package's to assign — a caller that set its own would collide with the
+// reply table — so msg must not carry one.
+func (s *Session) Request(ctx context.Context, msg map[string]any, timeout time.Duration) (map[string]any, error) {
+	return s.request(ctx, msg, timeout)
 }
 
 // request sends a message with an id and waits for its single reply, refusing

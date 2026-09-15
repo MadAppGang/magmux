@@ -73,6 +73,16 @@ type sockMsg struct {
 	// claim that can be wrong, so 120 is clamped to 30 and the reply says so.
 	Mode string `json:"mode,omitempty"`
 	FPS  int    `json:"fps,omitempty"`
+	// Controller is open_pane's one privileged field: "self" asks magmux to
+	// make the CALLING PLUGIN the new pane's controller, so the plugin's own
+	// `controller.snapshot` messages become that pane's state.
+	//
+	// It takes only "self". A caller that wrote "plugin:ticket" would be naming
+	// an identity rather than claiming one, and identity on this socket comes
+	// from the connection's registration and from nowhere else — so any other
+	// value is bad_request, including the correct name of the plugin actually
+	// asking.
+	Controller string `json:"controller,omitempty"`
 	// caller is who sent this message, as the adapter resolved it. It is
 	// UNEXPORTED and has no tag, so encoding/json can never fill it: no
 	// sequence of bytes on the wire can claim an identity, which is what makes

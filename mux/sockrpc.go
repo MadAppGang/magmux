@@ -53,6 +53,7 @@ const (
 	sockCodeInternal      = protocol.CodeInternal
 	sockCodeNoController  = protocol.CodeNoController
 	sockCodeNoTranscript  = protocol.CodeNoTranscript
+	sockCodePluginGone    = protocol.CodePluginGone
 )
 
 // sockVerbs and sockEvents are what `capabilities` advertises. Maintained by
@@ -560,6 +561,11 @@ func (m *Magmux) sockOpenPane(msg sockMsg) (map[string]any, error) {
 		focus = *msg.Focus
 	}
 
+	controller, err := resolveOpenPaneController(msg)
+	if err != nil {
+		return nil, err
+	}
+
 	// Run-level until the reply names an id: there is no pane to route to yet.
 	seq := m.control.recordRequest(-1, "open_pane", cmd)
 	id, err := m.OpenPane(OpenPaneRequest{
@@ -570,10 +576,11 @@ func (m *Magmux) sockOpenPane(msg sockMsg) (map[string]any, error) {
 			Env:   msg.Env,
 			Label: msg.Label,
 		},
-		Target: target,
-		Split:  split,
-		Ratio:  msg.Ratio,
-		Focus:  focus,
+		Target:     target,
+		Split:      split,
+		Ratio:      msg.Ratio,
+		Focus:      focus,
+		Controller: controller,
 	})
 	if err != nil {
 		m.control.recordAck(seq, false, verbErrCode(err), err.Error())
@@ -596,6 +603,38 @@ func (m *Magmux) sockOpenPane(msg sockMsg) (map[string]any, error) {
 		res["label"] = msg.Label
 	}
 	return res, nil
+}
+
+// resolveOpenPaneController turns open_pane's `controller` field into a
+// resolved controller name, or refuses it.
+//
+// There is exactly one accepted value, "self", and it means "the plugin on THIS
+// connection". The name it resolves to comes from msg.caller.Plugin, which the
+// adapter filled in from the connection's own registration through an
+// unexported field no wire bytes can reach — so a plugin claims a pane by BEING
+// one, not by naming one.
+//
+// Any other non-empty value is bad_request, `"plugin:ticket"` included and
+// especially when ticket is the plugin actually asking. Accepting a name would
+// make the field an identity claim, and then the only thing standing between a
+// pane and the wrong observer would be whoever remembered to check it next.
+// HTTP, WebSocket and Firebase never carry the field at all: none of them can
+// be a plugin connection.
+func resolveOpenPaneController(msg sockMsg) (string, error) {
+	switch msg.Controller {
+	case "":
+		return "", nil
+	case "self":
+		if msg.caller.Plugin == "" {
+			return "", sockErrf(sockCodeForbidden,
+				`open_pane {"controller":"self"} is for plugins: this connection has not registered `+
+					`as one, so there is nothing for "self" to mean`)
+		}
+		return pluginControllerPrefix + msg.caller.Plugin, nil
+	}
+	return "", sockErrf(sockCodeBadRequest,
+		`open_pane takes controller:"self" and nothing else (got %q); a connection claims a pane `+
+			`by being a registered plugin, never by naming one`, msg.Controller)
 }
 
 // sockClosePane detaches a pane and reaps its child. The id is retained as a

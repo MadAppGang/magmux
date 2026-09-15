@@ -142,6 +142,13 @@ type mcpServer struct {
 
 	clientName string
 
+	// dialOpts qualify every client.Dial this server makes. Empty in
+	// production, where the client's own defaults are right; a test that wants
+	// to watch a capability verdict being reached shortens the probe budgets
+	// HERE rather than through package variables, so one fixture's impatience
+	// cannot reach another test's connection.
+	dialOpts []client.DialOption
+
 	wg sync.WaitGroup
 }
 

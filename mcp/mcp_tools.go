@@ -413,7 +413,7 @@ func (s *mcpServer) attach(ctx context.Context, id, sock string, pid int) (*clie
 	}
 	s.sessMu.Unlock()
 
-	sess, err := client.Dial(ctx, id, sock, pid)
+	sess, err := client.Dial(ctx, id, sock, pid, s.dialOpts...)
 	if err != nil {
 		return nil, err
 	}

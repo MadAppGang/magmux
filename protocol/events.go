@@ -33,4 +33,13 @@ const (
 	// EventOpsChanged says the op list has a new revision, because a plugin
 	// registered or died.
 	EventOpsChanged = "ops_changed"
+	// EventPlugin is one plugin's own event, forwarded to every subscriber. It
+	// names the plugin and the event, so a client filters on two fields rather
+	// than on a namespaced string it has to parse.
+	EventPlugin = "plugin"
+	// EventPluginExited says a plugin's process or connection is gone. Its ops
+	// are already unregistered by the time this is published (ops_changed comes
+	// first), so a client that reacts by re-fetching `ops` cannot see the dead
+	// plugin's ops again.
+	EventPluginExited = "plugin_exited"
 )

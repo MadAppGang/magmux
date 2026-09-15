@@ -309,26 +309,15 @@ func (c *ClaudeCodeController) NotifyInput() {
 // idle heuristics settle the pane again and applyTerminalIdle promotes it
 // back, so a dropped instruction surfaces as a fast empty turn rather than a
 // permanent "working".
+// The demotion itself is demoteSettled (controller_plugin.go), shared with the
+// plugin-backed controller so the two cannot drift: what a new turn must clear
+// — the previous turn's answer above all — is one rule and has one copy.
 func (c *ClaudeCodeController) consumeInjected() {
 	if !c.injected.Swap(false) {
 		return
 	}
-	switch c.snap.State {
-	case CtrlAwaitingInput, CtrlAwaitingPermission, CtrlError:
-		c.snap.State = CtrlWorking
-		c.snap.StartedAt = time.Now()
-		c.snap.CompletedAt = time.Time{}
-		c.snap.LastTool = ""
-		// A new turn must not inherit the previous turn's answer. The
-		// transcript's own user entry clears this too (applyLine), but this
-		// path exists precisely for when the transcript is lagging or was
-		// never found — and pollControllers emits `response` on every
-		// snapshot, so anything left here is broadcast as if the new turn had
-		// said it. A tool-only turn would then re-settle still carrying it.
-		c.snap.LastResponse = ""
-		if dbgFile != nil {
-			fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p input injected → working\n", c.pane)
-		}
+	if demoteSettled(&c.snap) && dbgFile != nil {
+		fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p input injected → working\n", c.pane)
 	}
 }
 
@@ -344,54 +333,26 @@ func (c *ClaudeCodeController) Poll() (Snapshot, error) {
 	return c.snap, err
 }
 
-// applyTerminalIdle promotes the snapshot to CtrlAwaitingInput when the pane
-// itself has detected that its child is idle at a prompt.
+// applyTerminalIdle reconciles this controller's view with the pane's own.
 //
-// The transcript only announces "turn finished" via a stop_hook_summary
-// entry, which Claude Code emits only when a Stop hook is configured. A pane
-// can therefore sit at CtrlStarting indefinitely while it is visibly idle —
-// and if transcript discovery failed outright, forever. The pane's own idle
-// detection (OSC 9 notification, bracketed-paste cycle, window title, text
-// idle) already knows better, and buildPaneResults has always reported from
-// it. Promoting here is what stops the live `snapshot` event and the final
-// `results` event from disagreeing.
+// The rule, and every reason for it, is mergeTerminalIdle's
+// (controller_plugin.go): this controller's freshest evidence is the last
+// transcript entry it consumed, so lastApplyAt is what a terminal idle signal
+// is judged against.
 //
-// Promotion is one-way and ordered: it applies only when the terminal went
-// idle *after* the last transcript entry we consumed. A new turn arriving on
-// the transcript is therefore authoritative and the state cannot flap
-// between working and awaiting_input.
+// It is SHARED rather than duplicated because both controllers have the same
+// hole in the same place. The transcript only announces "turn finished" via a
+// stop_hook_summary entry, which Claude Code emits only when a Stop hook is
+// configured, so a pane can sit at CtrlStarting indefinitely while it is
+// visibly idle — and if transcript discovery failed outright, forever. A plugin
+// watching for a pattern that never appears is in exactly that position. One
+// merge is what keeps the live `snapshot` and the final `results` from
+// disagreeing, for both of them.
 func (c *ClaudeCodeController) applyTerminalIdle() {
 	if c.pane == nil {
 		return
 	}
-	switch c.snap.State {
-	case CtrlAwaitingInput, CtrlAwaitingPermission, CtrlError, CtrlGone:
-		return // already settled; nothing to promote
-	}
-
-	c.pane.mu.Lock()
-	ready, signal, readyAt := c.pane.inputReady, c.pane.inputSignal, c.pane.inputReadyAt
-	c.pane.mu.Unlock()
-
-	// "ctrl"/"perm" are set *by* a controller snapshot — reading them back
-	// would be a feedback loop, not evidence.
-	if !ready || signal == "ctrl" || signal == "perm" {
-		return
-	}
-	// The transcript moved at or after the terminal went idle, so the
-	// transcript is the fresher signal. Leave the state alone.
-	if !readyAt.After(c.lastApplyAt) {
-		return
-	}
-
-	c.snap.State = CtrlAwaitingInput
-	if c.snap.CompletedAt.IsZero() {
-		c.snap.CompletedAt = readyAt
-	}
-	if dbgFile != nil {
-		fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p terminal idle (%s) → awaiting_input\n",
-			c.pane, signal)
-	}
+	mergeTerminalIdle(&c.snap, paneTerminalIdle(c.pane), c.lastApplyAt, "claude")
 }
 
 func (c *ClaudeCodeController) pollTranscript() error {

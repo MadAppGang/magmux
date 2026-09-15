@@ -473,15 +473,21 @@ func startBusyFakeMagmux(t *testing.T, probes int) *fakeMagmux {
 	return f
 }
 
-// shortProbes shrinks the capability-probe budgets so a test can watch both
-// verdicts being reached without paying real seconds of silence for them.
-// Nothing in this package runs in parallel, so the swap is safe.
-func shortProbes(t *testing.T) {
-	t.Helper()
-	probe, confirm := client.ProbeTimeout, client.ProbeConfirmTimeout
-	client.ProbeTimeout = 150 * time.Millisecond
-	client.ProbeConfirmTimeout = 400 * time.Millisecond
-	t.Cleanup(func() { client.ProbeTimeout, client.ProbeConfirmTimeout = probe, confirm })
+// shortProbes shrinks THIS SERVER's capability-probe budgets so a test can
+// watch both verdicts being reached without paying real seconds of silence for
+// them, and optionally shortens the legacy re-check interval.
+//
+// Per server rather than per process since the budgets became Dial options: the
+// package variables it used to swap were shared by every connection in the
+// process, so one fixture's impatience reached connections it knew nothing
+// about — including, once there are plugins, a plugin's own.
+func shortProbes(s *mcpServer, recheck ...time.Duration) {
+	s.dialOpts = append(s.dialOpts,
+		client.WithProbeTimeout(150*time.Millisecond),
+		client.WithProbeConfirmTimeout(400*time.Millisecond))
+	for _, d := range recheck {
+		s.dialOpts = append(s.dialOpts, client.WithLegacyRecheckAfter(d))
+	}
 }
 
 func (f *fakeMagmux) accept() {
@@ -1010,9 +1016,9 @@ func TestAttachStaysSilentWithoutAClientName(t *testing.T) {
 }
 
 func TestLegacyMagmuxRefusesEverythingButSending(t *testing.T) {
-	shortProbes(t)
 	f := startFakeMagmux(t, false)
 	s := newMCPServer(io.Discard, io.Discard)
+	shortProbes(s)
 	ctx := context.Background()
 
 	sess, err := s.attach(ctx, "old", f.path, 0)
@@ -1063,9 +1069,9 @@ func TestLegacyMagmuxRefusesEverythingButSending(t *testing.T) {
 // used to refuse open_pane, close_pane and every read for the whole life of the
 // server — against a magmux that was perfectly current.
 func TestBusyMagmuxIsNotWrittenOffAsLegacy(t *testing.T) {
-	shortProbes(t)
 	f := startBusyFakeMagmux(t, 1)
 	s := newMCPServer(io.Discard, io.Discard)
+	shortProbes(s)
 	ctx := context.Background()
 
 	sess, err := s.attach(ctx, "busy", f.path, 0)
@@ -1094,13 +1100,11 @@ func TestBusyMagmuxIsNotWrittenOffAsLegacy(t *testing.T) {
 // guess made from an absence, so it must not outlive the absence. A magmux
 // wedged past BOTH probes is refused — and then re-probed, not condemned.
 func TestLegacyVerdictExpiresAndIsRechecked(t *testing.T) {
-	shortProbes(t)
-	recheck := client.LegacyRecheckAfter
-	client.LegacyRecheckAfter = 50 * time.Millisecond
-	t.Cleanup(func() { client.LegacyRecheckAfter = recheck })
+	const recheck = 50 * time.Millisecond
 
 	f := startBusyFakeMagmux(t, 2)
 	s := newMCPServer(io.Discard, io.Discard)
+	shortProbes(s, recheck)
 	ctx := context.Background()
 
 	sess, err := s.attach(ctx, "wedged", f.path, 0)
@@ -1111,7 +1115,7 @@ func TestLegacyVerdictExpiresAndIsRechecked(t *testing.T) {
 		t.Fatal("two silences in a row must produce the legacy verdict, or a genuinely " +
 			"old magmux is never detected")
 	}
-	time.Sleep(2 * client.LegacyRecheckAfter)
+	time.Sleep(2 * recheck)
 	if sess.IsLegacy(ctx) {
 		t.Error("the legacy verdict was never re-tested: a magmux that was busy for a " +
 			"minute stays refused for the life of the server")

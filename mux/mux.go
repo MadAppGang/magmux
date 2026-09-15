@@ -19,6 +19,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/MadAppGang/magmux/hub"
+	"github.com/MadAppGang/magmux/plugin"
 	"github.com/MadAppGang/magmux/theme"
 )
 
@@ -200,6 +201,22 @@ type Magmux struct {
 	// nothing of magmux's is held while calling into it.
 	hub     *hub.Hub
 	hubOnce sync.Once
+	// pluginHost is the plugin registry and router (package plugin). Reached
+	// ONLY through m.plugins(), lazily, for the reason the hub is: a
+	// struct-literal Magmux has to work, and every socket line asks the host
+	// whether it is a plugin message.
+	//
+	// plugMu (inside the host) sits ABOVE hub.mu in the order and below nothing
+	// of magmux's: Sub.Caller resolves a connection's plugin name with no hub
+	// lock held, which is what keeps plugMu -> hub.mu -> sub.mu the only path.
+	pluginHost *plugin.Host
+	pluginOnce sync.Once
+	// remoteToken is the session's bearer token when --listen resolved one. It
+	// reaches exactly one place — the plugin host, so a plugin an operator ran
+	// by hand can authenticate with the credential they already have — and is
+	// never written anywhere else. Empty means no remote control, and then only
+	// plugins magmux spawned can register.
+	remoteToken string
 	// stream is the frame streamer (stream.go), magmux's implementation of
 	// hub.Watcher. Lazy for the same reason the hub is — a struct-literal
 	// Magmux must work — and reached only through m.streamer(), which also

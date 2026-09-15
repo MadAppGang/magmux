@@ -1,6 +1,8 @@
 package mux
 
 import (
+	"fmt"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -36,6 +38,14 @@ type OpenPaneRequest struct {
 	Split  SplitType // SplitNone = auto (split the longer axis)
 	Ratio  float64   // 0 => 0.5
 	Focus  bool
+	// Controller names a plugin that will observe this pane, as
+	// `plugin:<name>`. Empty means the ordinary path: the registered factories
+	// decide, which today means Claude Code or nothing.
+	//
+	// It is a RESOLVED name and never a caller's claim — sockOpenPane fills it
+	// from the connection's own registration — because p.controller is
+	// write-once and attaching the wrong observer to a pane is not undoable.
+	Controller string
 }
 
 // OpenPane splits an existing leaf and spawns a child in the new half.
@@ -112,7 +122,21 @@ func (m *Magmux) OpenPane(req OpenPaneRequest) (int, error) {
 	// treeMu). Missing gridMode here would give the pane different writePTY
 	// suppression and no DONE overlay compared with its siblings.
 	np.gridMode = gridMode
-	m.attachController(np)
+	// A plugin that claimed this pane IS its controller, and the factories are
+	// not consulted: the plugin asked to observe this session, and letting a
+	// factory win the race would silently give the pane a second opinion that
+	// the plugin's own snapshots could never override (p.controller is
+	// write-once). Still here, while the pane is private, for the same reason
+	// the factory path is.
+	if name, ok := strings.CutPrefix(req.Controller, pluginControllerPrefix); ok && name != "" {
+		np.mux = m
+		np.controller = newPluginController(name, np)
+		if dbgFile != nil {
+			fmt.Fprintf(dbgFile, "[ctrl] attached %s to a new pane\n", np.controller.Name())
+		}
+	} else {
+		m.attachController(np)
+	}
 
 	// 5. Publish.
 	m.treeMu.Lock()

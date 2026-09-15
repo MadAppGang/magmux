@@ -224,14 +224,24 @@ func (m *Magmux) watchArgsOf(msg sockMsg) (json.RawMessage, error) {
 	return raw, nil
 }
 
-// callerFor labels one socket connection for the ops it dispatches. Conn is
-// magmux's own label for the connection; Client is self-declared and is a panel
-// label only, never anything an op may authorise on.
+// callerFor labels one socket MESSAGE with the identity of the connection it
+// arrived on.
 //
-// Plugin identity is deliberately absent here and is resolved per message from
-// the connection's registration (P5): a connection registers as a plugin after
-// it already exists, so an identity captured once is the one that is always
-// wrong.
-func callerFor(conn string, msg sockMsg) hub.Caller {
-	return hub.Caller{Transport: "socket", Conn: conn, Client: msg.Client}
+// Per message, not per connection, and that is the whole point. Sub.Caller
+// resolves the connection's PLUGIN name through the host's conn→plugin registry
+// at the moment of the call, because a connection registers as a plugin after
+// it — and its Sub — already exist: an identity captured once at connect time
+// is the one that is always wrong, and it is the identity
+// open_pane {controller:"self"} authorises on.
+//
+// Client is the opposite kind of field. It is SELF-DECLARED, it rides on each
+// message, and it is a panel label and nothing else. Nothing may be authorised
+// on it, which is why it is safe for it to change from one line to the next.
+func callerFor(sub *hub.Sub, msg sockMsg) hub.Caller {
+	c := hub.Caller{Transport: "socket"}
+	if sub != nil {
+		c = sub.Caller()
+	}
+	c.Client = msg.Client
+	return c
 }
