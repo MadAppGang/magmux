@@ -1,6 +1,7 @@
 package mux
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -66,6 +67,12 @@ type sockMsg struct {
 	// plugin's arguments are not magmux's to reinterpret.
 	Op   string          `json:"op,omitempty"`
 	Args json.RawMessage `json:"args,omitempty"`
+	// Mode and FPS belong to `watch`: "frames" (the screen) or "notify" (only
+	// the news that it changed), and how often. Both are optional and both are
+	// resolved rather than refused when absent — a rate is a preference, not a
+	// claim that can be wrong, so 120 is clamped to 30 and the reply says so.
+	Mode string `json:"mode,omitempty"`
+	FPS  int    `json:"fps,omitempty"`
 	// caller is who sent this message, as the adapter resolved it. It is
 	// UNEXPORTED and has no tag, so encoding/json can never fill it: no
 	// sequence of bytes on the wire can claim an identity, which is what makes
@@ -80,6 +87,13 @@ type sockMsg struct {
 	// no connection behind it (an op called through the registry, a unit test),
 	// which keeps today's one-goroutine-per-send behaviour as the fallback.
 	sub *hub.Sub
+	// runCtx bounds the WORK a verb spawns, as opposed to the wait for its
+	// answer. It exists for `send`, whose delivery outlives the dispatch call:
+	// on a lane the item's ctx is cancelled by Quiesce, and a delivery that
+	// ignored it would keep typing into a session magmux has already reported
+	// on. Nil means context.Background, which is every path with nothing to
+	// cancel it.
+	runCtx context.Context
 }
 
 // socketDir is where this magmux binds. The field wins over the package
@@ -404,13 +418,13 @@ func (m *Magmux) dispatchSocketVerb(msg sockMsg, done func(map[string]any, error
 		// called through the registry, a unit test — keeps the old
 		// one-goroutine-per-send shape.
 		if done == nil {
-			return nil, m.sendToPaneVia(msg.sub, paneIdx, msg.Text, msg.Keys, enter, msg.Label, nil)
+			return nil, m.sendToPaneVia(msg.runCtx, msg.sub, paneIdx, msg.Text, msg.Keys, enter, msg.Label, nil)
 		}
 		// Delivery outlives this call, so the reply does too: it means "the
 		// bytes reached the PTY", which is the failure mode that used to live
 		// and die inside sendToPane's goroutine.
 		result := map[string]any{"pane": paneIdx, "bytes": len(msg.Text), "keys": len(msg.Keys), "enter": enter}
-		if err := m.sendToPaneVia(msg.sub, paneIdx, msg.Text, msg.Keys, enter, msg.Label, func(err error) {
+		if err := m.sendToPaneVia(msg.runCtx, msg.sub, paneIdx, msg.Text, msg.Keys, enter, msg.Label, func(err error) {
 			done(result, err)
 		}); err != nil {
 			return nil, err

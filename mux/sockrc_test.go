@@ -86,9 +86,14 @@ func TestOpsAdvertisesEveryBuiltinVerb(t *testing.T) {
 		"close_pane":   protocol.ClassControl,
 		"focus":        protocol.ClassControl,
 		"send":         protocol.ClassControl,
-		"status":       protocol.ClassDisplay,
-		"tint":         protocol.ClassDisplay,
-		"overlay":      protocol.ClassDisplay,
+		// input is its own class, not control: `send` is a controller's
+		// instruction and is recorded as one, input is what a keyboard would
+		// have done. The view token is enforced on the class, so collapsing the
+		// two would be a permissions decision disguised as a tidy-up.
+		"input":   protocol.ClassInput,
+		"status":  protocol.ClassDisplay,
+		"tint":    protocol.ClassDisplay,
+		"overlay": protocol.ClassDisplay,
 	} {
 		spec, ok := byName[name]
 		if !ok {
@@ -115,7 +120,7 @@ func TestOpsAdvertisesEveryBuiltinVerb(t *testing.T) {
 			t.Errorf("op %q is missing from sockVerbs, so a client that feature-detects cannot see it", s.Name)
 		}
 	}
-	for _, v := range []string{"ops", "call"} {
+	for _, v := range []string{"ops", "call", "watch", "unwatch", "resync"} {
 		if !verbs[v] {
 			t.Errorf("capabilities does not advertise the %q verb", v)
 		}

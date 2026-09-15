@@ -160,18 +160,27 @@ func (p *Pane) pasteWrap(text string) []byte {
 //
 // Caller must NOT hold p.mu.
 func (m *Magmux) sendToPane(idx int, text string, keys []string, enter bool, label string, done func(error)) error {
-	return m.sendToPaneVia(nil, idx, text, keys, enter, label, done)
+	return m.sendToPaneVia(nil, nil, idx, text, keys, enter, label, done)
 }
 
 // sendToPaneVia is sendToPane with the connection named, so its delivery can be
 // ordered against that connection's other sends to the same pane.
-func (m *Magmux) sendToPaneVia(sub *hub.Sub, idx int, text string, keys []string, enter bool, label string, done func(error)) error {
+//
+// ctx bounds the DELIVERY, not the wait for it: it is the lane item's context
+// when there is one, so Quiesce can stop a send between keystrokes. Nil means
+// nothing can cancel it, which is the right answer for an in-process caller.
+func (m *Magmux) sendToPaneVia(ctx context.Context, sub *hub.Sub, idx int, text string, keys []string, enter bool, label string, done func(error)) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	d, err := m.admitSend(idx, text, keys, enter, label)
 	if err != nil {
 		return err
 	}
 	if sub == nil {
-		go d.deliver(context.Background(), done)
+		// No connection to order against: today's one-goroutine-per-send shape,
+		// now carrying whatever ctx the caller had.
+		go d.deliver(ctx, done)
 		return nil
 	}
 	err = sub.Deliver(idx, hub.LaneItem{

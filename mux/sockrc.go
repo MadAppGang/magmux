@@ -17,6 +17,7 @@ package mux
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -90,6 +91,137 @@ func callTimeout(ms int) time.Duration {
 func (m *Magmux) callIsDriving(msg sockMsg) bool {
 	spec, ok := m.bus().Spec(strings.TrimSpace(msg.Op))
 	return ok && spec.Class != protocol.ClassRead
+}
+
+// laneKeyFor tells the hub which ops are DELIVERED to a pane, and which pane's
+// lane they belong on.
+//
+// Two ops reach a PTY — `send` and `input` — and both are paced or blocking
+// enough that two of them to one pane from one connection must not be
+// interleaved. Everything else runs concurrently.
+//
+// The pane is resolved HERE rather than in the hub because every rule about it
+// is magmux's: the wire takes an index or a string, `"*"` is a fan-out that
+// neither op has, and an absent pane means the pilot's announced target for
+// `send` and nothing at all for `input`. Resolving it at enqueue time is what
+// makes a pane-less `send` through `call` land on the same lane as one that
+// named the pane.
+func (m *Magmux) laneKeyFor(op string, args json.RawMessage) (int, bool, error) {
+	switch op {
+	case "send", "input":
+	default:
+		return 0, false, nil
+	}
+	var a struct {
+		Pane any `json:"pane"`
+	}
+	if len(args) > 0 {
+		// A payload that will not decode is the op's problem to report, with
+		// its own wording. Here it simply means "no pane named".
+		_ = json.Unmarshal(args, &a)
+	}
+	switch idx := m.parsePaneIndex(a.Pane); {
+	case idx >= 0:
+		return idx, true, nil
+	case idx == paneAll:
+		return 0, true, sockErrf(sockCodeBadRequest, `%s has no fan-out: "*" is not a target`, op)
+	case idx == paneUnspecified:
+		if op == "input" {
+			return 0, true, sockErrf(sockCodeBadRequest, "input needs a pane index")
+		}
+		// One open route means the single-session case. Several means the
+		// default would be a guess, and targetPane refuses rather than typing
+		// into whichever session happened to be first.
+		t, err := m.control.targetPane()
+		if err != nil {
+			return 0, true, err
+		}
+		return t, true, nil
+	}
+	return 0, true, sockErrf(sockCodeBadRequest, "pane is not an index")
+}
+
+// subCall hands one request to the connection's Sub, which decides how it runs:
+// inline for the watch verbs, on the pane's lane for `send` and `input`, on its
+// own goroutine for everything else. It never blocks the socket reader.
+//
+// This is what closes P2's open item. The direct `send` verb was already
+// lane-ordered while `call {op:"send"}` still spawned a goroutine per send, so
+// two identical requests by two different routes had different ordering
+// guarantees. They now share one.
+func (m *Magmux) subCall(msg sockMsg, sub *hub.Sub) {
+	op := msg.Type
+	args := msg.Args
+	if op == "call" {
+		op = strings.TrimSpace(msg.Op)
+		if op == "" {
+			m.replyTo(sub, msg.ID, nil, sockErrf(sockCodeBadRequest,
+				`call needs an op: {"type":"call","op":"list","id":1}`))
+			return
+		}
+	} else {
+		// watch/unwatch/resync carry their fields at the top level on this
+		// transport, because they are socket VERBS here and an `args` object
+		// would be a second shape for the same request.
+		var err error
+		if args, err = m.watchArgsOf(msg); err != nil {
+			m.replyTo(sub, msg.ID, nil, err)
+			return
+		}
+	}
+	if sub == nil {
+		// No connection behind this message (a unit test, an in-process
+		// caller): run it on the hub directly, which is what the Sub would have
+		// done minus the ordering.
+		ctx, cancel := context.WithTimeout(context.Background(), callTimeout(msg.TimeoutMs))
+		defer cancel()
+		result, err := m.bus().Call(ctx, msg.caller, op, args)
+		m.replyTo(sub, msg.ID, result, err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout(msg.TimeoutMs))
+	id := msg.ID
+	sub.Call(ctx, op, args, func(result map[string]any, err error) []byte {
+		// The reply is what ends this request, so it is also what releases the
+		// budget: Sub.Call calls this exactly once on every path, including the
+		// timeout, so cancel is never missed and never early.
+		cancel()
+		return m.replyBytes(id, result, err)
+	})
+}
+
+// watchArgsOf builds the args object for the three Sub-level verbs out of the
+// message's own top-level fields.
+//
+// The pane is normalised to an INTEGER here, and refused here: the hub accepts
+// only an index, because "which strings name a pane" is magmux's question and
+// the answer (parsePaneIndex) lives on this side of the boundary. An absent
+// pane is left out entirely rather than passed as a sentinel, so the hub's own
+// "watch needs a pane" is what a caller reads instead of "no pane -2".
+func (m *Magmux) watchArgsOf(msg sockMsg) (json.RawMessage, error) {
+	out := map[string]any{}
+	switch idx := m.parsePaneIndex(msg.Pane); {
+	case idx >= 0:
+		out["pane"] = idx
+	case idx == paneAll:
+		return nil, sockErrf(sockCodeBadRequest,
+			`%s takes one pane: "*" is not a target (watch each pane you want)`, msg.Type)
+	case idx == paneUnspecified:
+	default:
+		return nil, sockErrf(sockCodeBadRequest, "pane is not an index")
+	}
+	if msg.Mode != "" {
+		out["mode"] = msg.Mode
+	}
+	if msg.FPS != 0 {
+		out["fps"] = msg.FPS
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return nil, sockErrf(sockCodeInternal, "%s: args could not be encoded", msg.Type)
+	}
+	return raw, nil
 }
 
 // callerFor labels one socket connection for the ops it dispatches. Conn is

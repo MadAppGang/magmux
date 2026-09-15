@@ -70,6 +70,7 @@ type Sub struct {
 	done      chan struct{}
 	doneOnce  sync.Once
 	closeOnce sync.Once
+	watchOnce sync.Once
 
 	mu sync.Mutex
 	// head is the connect-time aggregate. It is NOT in the FIFO because it
@@ -102,6 +103,21 @@ type Sub struct {
 	// lane.go: a lane outlives its Sub, so this map is only how a PUSHER finds
 	// one — the hub keeps its own set for Quiesce.
 	lanes map[int]*lane
+	// slots is the frame side of this connection: one latest-wins slot per
+	// watched pane, which the writer drains AFTER the FIFO. See watch.go —
+	// frames are state, not news, so they merge rather than queue.
+	slots     map[int]*slot
+	slotOrder []int
+	slotNext  int
+	// closedPanes is every pane that has closed while this connection was
+	// alive. An Offer for one is dropped, which is what stops a frame arriving
+	// after the pane_closed that announced its end. Ids are never reused, so it
+	// never needs pruning.
+	closedPanes map[int]bool
+	// calls counts the ops running concurrently for this connection, bounded by
+	// maxInFlightCalls. It is per SUB: one client that fires sixteen slow
+	// requests spends its own budget and nobody else's.
+	calls int
 }
 
 func newSub(h *Hub, c Caller, sink Sink, pluginOf func() string) *Sub {
@@ -165,6 +181,10 @@ func (s *Sub) Send(msg []byte) {
 // first one's pacing when the socket closes.
 func (s *Sub) Close(reason string) {
 	defer s.closeLanes()
+	// The watches go with the connection: a framer running for a Sub nobody
+	// reads is a goroutine diffing a screen into a slot that will never be
+	// written. Outside sub.mu, because Drop reaches into the streamer.
+	defer s.dropWatches()
 	s.mu.Lock()
 	if s.closed || s.dead {
 		s.mu.Unlock()
@@ -230,6 +250,10 @@ func (s *Sub) finalize(finals [][]byte, cut, deadline time.Time) {
 	// "the session ended".
 	s.fifo = nil
 	s.bytes = 0
+	// The slots go with the backlog, and for the same reason: `results` is the
+	// authoritative final state of every pane, and a screen written after it
+	// would be a picture of a session that has already been reported on.
+	s.dropSlotsLocked()
 	s.finals = finals
 	s.cut = cut
 	s.deadline = deadline
@@ -256,6 +280,7 @@ func (s *Sub) kill(reason string) {
 	// merely hung up — losing it because the peer stopped READING would make
 	// delivery depend on something it has nothing to do with.
 	defer s.closeLanes()
+	defer s.dropWatches()
 	s.mu.Lock()
 	if s.dead {
 		s.mu.Unlock()
@@ -314,6 +339,11 @@ func (s *Sub) take() (msg []byte, stop bool, reason string) {
 	case len(s.fifo) > 0:
 		msg, s.fifo = s.fifo[0], s.fifo[1:]
 		s.bytes -= len(msg)
+	case s.hasSlotLocked():
+		// Frames go LAST, behind every event and every reply. A frame is the
+		// current screen and stays current while it waits; an event behind a
+		// frame would be news delayed by a picture.
+		msg = s.takeSlotLocked()
 	case s.closed:
 		return nil, true, s.reason
 	default:

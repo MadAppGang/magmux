@@ -457,6 +457,10 @@ func (vt *VTParser) doEscape(w rune) {
 		s.scrollBot = s.rows
 		s.originMode = false
 		s.autoWrap = true
+		// DECTCEM is pane state (see the 25 case in doCSI), and a full reset is
+		// the one thing that puts it back: `reset` after a crashed TUI must give
+		// the cursor back to the shell.
+		vt.node.curHidden = false
 	case 'D': // IND - index
 		vt.index()
 	case 'M': // RI - reverse index
@@ -559,7 +563,20 @@ func (vt *VTParser) doCSI(w rune) {
 				case 7: // DECAWM - auto-wrap
 					s.autoWrap = set
 				case 12: // Cursor blink (cosmetic, ignore)
-				case 25: // DECTCEM - cursor visibility (ignore for now)
+				case 25: // DECTCEM - cursor visibility
+					// Recorded on the PANE, not on the Screen, which is xterm's
+					// behaviour: visibility survives an alternate-screen switch. A
+					// per-screen flag would hand the shell back a cursor magmux
+					// believes is hidden, every time a full-screen app that hid it
+					// exited.
+					//
+					// magmux's own renderer does not consult it — it parks the real
+					// terminal cursor over the focused pane and lets the terminal
+					// draw it — so this is state magmux OBSERVES, for the frame
+					// stream, rather than state it acts on. Ignoring it meant every
+					// remote viewer drew a cursor in the middle of a TUI that had
+					// deliberately taken it away.
+					vt.node.curHidden = !set
 				case 47: // Alt screen (legacy)
 					vt.setAltScreen(set)
 				case 1000, 1002, 1003, 1006: // Mouse tracking — consumed by magmux

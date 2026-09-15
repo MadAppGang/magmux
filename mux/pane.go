@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -64,6 +65,30 @@ type Pane struct {
 	charsetG1     byte
 	useG1         bool // SO (shift out) active — use G1 instead of G0
 	lastChar      rune // last printed character (for REP command)
+	// curHidden is DECTCEM: the child asked for the cursor not to be drawn.
+	//
+	// It lives on the PANE and not on the Screen, which is xterm's behaviour and
+	// is the point: a full-screen app hides the cursor, switches to the
+	// alternate screen and exits, and a per-screen flag would hand the shell
+	// back a cursor magmux believes is hidden. Reset by RIS. Guarded by mu, and
+	// written only by the VT parser inside readLoop's lock.
+	//
+	// magmux's own RENDERER does not use it — it positions the real terminal
+	// cursor over the focused pane and lets the terminal draw it — so this is
+	// state magmux observes for its stream rather than state it acts on.
+	curHidden bool
+	// frameGen counts writes into this pane's screen. The frame streamer reads
+	// it to answer "has anything happened since I last looked?" without taking
+	// p.mu, which is what makes an idle watched pane cost nothing.
+	//
+	// It is an atomic and not a mu-guarded int for one reason: the readLoop hook
+	// must be free. One atomic add and one nil load per read, zero allocations,
+	// on the hottest path magmux has (TestReadLoopHookIsAllocationFree).
+	frameGen atomic.Uint64
+	// stream is this pane's framer handle, or nil when nobody is watching. The
+	// nil is the whole optimisation: an unwatched pane's hook is one atomic load
+	// that finds nothing.
+	stream atomic.Pointer[paneStream]
 	// Grid mode fields
 	gridMode bool // pane is in grid mode (don't delete on exit)
 	// reaped is set by waitForChild once cmd.Wait has returned, i.e. once the
@@ -472,6 +497,7 @@ func (p *Pane) readLoop(wg *sync.WaitGroup) {
 			p.mu.Lock()
 			p.vt.write(buf[:n])
 			p.dirty = true
+			p.noteOutputLocked()
 			p.mu.Unlock()
 		}
 		if err != nil {
@@ -513,6 +539,11 @@ func (p *Pane) resize(y, x, h, w int) {
 				prim.altScreen.resize(h, w)
 			}
 		}
+		// A resize is not "the screen changed", it is "the screen is a different
+		// shape", and a watcher cannot apply a row-by-row delta across it. The
+		// flag turns the next frame into a keyframe; the counter makes sure there
+		// IS a next frame, even for a pane that has printed nothing since.
+		p.noteGeometryLocked()
 		p.mu.Unlock()
 		if p.ptmx != nil {
 			pty.SetWinSize(p.ptmx, h, w)

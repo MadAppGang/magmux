@@ -54,17 +54,29 @@ func (s *Screen) rowsText(y0, y1, x0, x1 int) []string {
 	return lines
 }
 
-// rowText is THE cell walk — the loop selCopy has always used, now that
-// scrollback rows are read by it too. It is extracted rather than duplicated for
-// the reason stated at the top of this file: a second copy drifts on the first
-// wide-character or NUL-cell fix, and history and selection disagreeing about
-// what a row said is a bug nobody would look for.
+// rowText is rowWalk with nothing recorded: the text alone, which is what
+// selection, capture and the exit events want.
+func rowText(row []Cell, x0, x1 int) string { return rowWalk(row, x0, x1, nil) }
+
+// rowWalk is THE cell walk — the loop selCopy has always used, now that
+// scrollback rows and the live frame stream are read by it too. It is extracted
+// rather than duplicated for the reason stated at the top of this file: a second
+// copy drifts on the first wide-character or NUL-cell fix, and history,
+// selection and the stream disagreeing about what a row said is a bug nobody
+// would look for.
 //
 // x1 is inclusive and both ends are clamped to the row. A SCROLLBACK row keeps
 // the width it had when it was evicted (Screen.resize reflows nothing), so it
 // can be wider or narrower than the screen showing it; clamping to len(row)
 // here is what lets one walk serve both.
-func rowText(row []Cell, x0, x1 int) string {
+//
+// st is optional. With nil this is exactly the walk it has always been. With one
+// it also records the STYLE, as merged runs in cell columns, and the code-point
+// indexes that occupy two cells — both of which only the frame encoder wants,
+// and neither of which is worth a second pass over the row. Run columns are
+// relative to x0, so a caller that walked a window gets runs in that window's
+// coordinates.
+func rowWalk(row []Cell, x0, x1 int, st *rowStyle) string {
 	if x0 < 0 {
 		x0 = 0
 	}
@@ -72,15 +84,28 @@ func rowText(row []Cell, x0, x1 int) string {
 		x1 = len(row) - 1
 	}
 	var line strings.Builder
+	n := 0 // code points written so far, which is what `wd` indexes
 	for c := x0; c <= x1; c++ {
-		ch := row[c].Ch
+		cell := row[c]
+		ch := cell.Ch
 		if ch == 0 {
 			ch = ' '
 		}
-		if !row[c].Cont {
+		if !cell.Cont {
 			line.WriteRune(ch)
+			if st != nil && cell.Wide {
+				st.wide = append(st.wide, n)
+			}
+			n++
+		}
+		if st != nil {
+			st.add(c-x0, cell)
 		}
 	}
+	// Trailing spaces go, and the runs do NOT: a styled blank — a selection, a
+	// filled status bar, a cleared line with a background — is real screen
+	// content with no character in it, and a run that extends past the text is
+	// how it survives the trim.
 	return strings.TrimRight(line.String(), " ")
 }
 

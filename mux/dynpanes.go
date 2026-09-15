@@ -169,6 +169,12 @@ func (m *Magmux) OpenPane(req OpenPaneRequest) (int, error) {
 		ev["label"] = req.Label
 	}
 	m.broadcastEvent(ev)
+
+	// 8. Attach every watch-all subscriber, AFTER the event. The order is the
+	// guarantee: pane_opened is in each subscriber's queue before the first
+	// keyframe can be offered into its slot, so a client learns a pane exists
+	// before it is shown one.
+	m.streamer().paneOpened(id)
 	return id, nil
 }
 
@@ -262,6 +268,21 @@ func (m *Magmux) ClosePane(id int, force bool) error {
 	// project stuck in `starting` silently and forever.
 	m.releaseSessions(p)
 	m.reapPane(p, force)
+
+	// Streaming stops BEFORE the news, in three steps that each close a
+	// different hole:
+	//
+	//  1. hub.PaneClosed refuses every later Offer for this pane and clears the
+	//     slot it may already be sitting in, under each subscriber's own lock.
+	//  2. The framer is stopped AND JOINED, so by the time the event goes out
+	//     no goroutine exists that could still be mid-tick on this pane.
+	//  3. Only then is pane_closed published.
+	//
+	// Either of the first two would be enough on its own; together they mean a
+	// frame after pane_closed is not merely unlikely but unreachable. Ids are
+	// never reused, so the closed-pane set never has to be pruned.
+	m.bus().PaneClosed(id)
+	m.streamer().paneClosed(id)
 	m.broadcastEvent(map[string]any{"type": "pane_closed", "pane": id})
 
 	if lastOne {

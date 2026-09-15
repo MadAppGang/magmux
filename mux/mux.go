@@ -200,6 +200,12 @@ type Magmux struct {
 	// nothing of magmux's is held while calling into it.
 	hub     *hub.Hub
 	hubOnce sync.Once
+	// stream is the frame streamer (stream.go), magmux's implementation of
+	// hub.Watcher. Lazy for the same reason the hub is — a struct-literal
+	// Magmux must work — and reached only through m.streamer(), which also
+	// registers it with the hub.
+	stream     *Streamer
+	streamOnce sync.Once
 	// autoCloseAfter is how long to wait after a pilot declares the run over
 	// before quitting (-x). Zero means wait for an explicit keypress, which
 	// is the default: a finished run that vanishes before it is read is

@@ -78,6 +78,12 @@ type Hub struct {
 	// item, so it has to be able to reach a lane its connection has already
 	// outlived (see lane.go).
 	lanes map[*lane]struct{}
+	// watcher is the streaming port (watch.go). Installed once at startup; nil
+	// means this magmux does not stream, and every watch is `unsupported`.
+	watcher Watcher
+	// laneKey decides which ops are DELIVERED rather than merely called, and
+	// onto which pane's lane. See call.go.
+	laneKey LaneKeyFunc
 }
 
 // New returns an empty hub.

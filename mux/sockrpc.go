@@ -61,9 +61,11 @@ const (
 // adding it in both places.
 var (
 	sockVerbs = []string{"capabilities", "list", "capture", "transcript", "open_pane", "close_pane",
-		"focus", "status", "tint", "overlay", "send", "pilot", "agent", "ops", "call"}
+		"focus", "status", "tint", "overlay", "send", "pilot", "agent", "ops", "call",
+		"watch", "unwatch", "resync", "input"}
 	sockEvents = []string{protocol.EventSnapshot, protocol.EventExit, protocol.EventControl, protocol.EventPaneOpened, protocol.EventPaneClosed,
-		protocol.EventResults, protocol.EventShutdown, protocol.EventReply}
+		protocol.EventResults, protocol.EventShutdown, protocol.EventReply,
+		protocol.EventFrame, protocol.EventChanged}
 )
 
 // sockErr is protocol.Error under its old name, so every call site, and every
@@ -100,8 +102,24 @@ var errReplyDeferred = errors.New("reply deferred")
 // to a client that connects during teardown, and a stale reply arriving there
 // would break the results → shutdown → EOF ordering.
 func (m *Magmux) replyTo(sub *hub.Sub, id json.RawMessage, result map[string]any, err error) {
-	if sub == nil || len(id) == 0 {
+	if sub == nil {
 		return
+	}
+	if data := m.replyBytes(id, result, err); len(data) > 0 {
+		sub.Send(data)
+	}
+}
+
+// replyBytes renders one reply as the line it goes out as, or nil when the
+// request asked for no answer.
+//
+// It is split out from replyTo for the one caller that must queue the reply
+// under the same lock as a state change: `watch`, whose frame slot has to go
+// active in the same breath as the answer that announced it (hub's
+// Sub.replyAndActivate). Everything else goes through replyTo.
+func (m *Magmux) replyBytes(id json.RawMessage, result map[string]any, err error) []byte {
+	if len(id) == 0 {
+		return nil
 	}
 	reply := map[string]any{"type": "reply", "id": id, "ok": err == nil}
 	switch {
@@ -127,11 +145,10 @@ func (m *Magmux) replyTo(sub *hub.Sub, id json.RawMessage, result map[string]any
 			"code": sockCodeInternal, "error": "reply payload could not be encoded",
 		})
 		if mErr != nil {
-			return
+			return nil
 		}
 	}
-	data = append(data, '\n')
-	sub.Send(data)
+	return append(data, '\n')
 }
 
 // handleSocketMsg runs one inbound message and answers it if — and only if — it
@@ -167,8 +184,24 @@ func (m *Magmux) handleSocketMsg(msg sockMsg, sub *hub.Sub) bool {
 		return false
 	}
 	if len(msg.ID) == 0 {
-		// Legacy path, unchanged: dispatch and discard both returns.
+		// Legacy path, unchanged: dispatch and discard both returns. `call`,
+		// `watch`, `unwatch` and `resync` are ID-PATH ONLY and fall through to
+		// it, where an unknown verb is silently ignored — which is exactly the
+		// contract every pre-reply client was written against, and the reason a
+		// verb whose whole purpose is to return a result says nothing to a
+		// caller that asked for no reply.
 		m.dispatchSocketMsg(msg)
+		return driving
+	}
+	switch msg.Type {
+	case "call", "watch", "unwatch", "resync":
+		// These four go through the connection's Sub, on every transport
+		// including this one. It is the one path, and that is what makes two
+		// guarantees hold at once: a `call {op:"send"}` takes the same lane as
+		// the direct verb, and a `watch` reply can never be overtaken by the
+		// first frame, because the reply is queued and the frame slot activated
+		// under one lock.
+		m.subCall(msg, sub)
 		return driving
 	}
 	id := msg.ID

@@ -22,4 +22,15 @@ const (
 	// EventReply answers one request that carried an "id", and goes only to
 	// the connection that sent it.
 	EventReply = "reply"
+	// EventFrame is one pane's screen, delivered to the connections that asked
+	// for it with `watch`. It never queues: each (connection, pane) has one
+	// latest-wins slot, so a subscriber that falls behind sees fewer frames and
+	// never an older screen.
+	EventFrame = "frame"
+	// EventChanged is the cheap half of watching: a pane moved, go and read it.
+	// Rate-limited to one per pane per second.
+	EventChanged = "changed"
+	// EventOpsChanged says the op list has a new revision, because a plugin
+	// registered or died.
+	EventOpsChanged = "ops_changed"
 )

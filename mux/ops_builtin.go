@@ -43,6 +43,16 @@ func (m *Magmux) bus() *hub.Hub {
 		if m.hub == nil {
 			m.hub = hub.New()
 		}
+		// Which ops are DELIVERED to a pane rather than merely called. The hub
+		// cannot answer that on its own: resolving a `pane` field means knowing
+		// that the wire takes an index or a string, that `send` with no pane
+		// falls back to the pilot's target, and that ids are sparse.
+		m.hub.SetLaneKey(m.laneKeyFor)
+		// The streaming port, installed with the hub rather than on first use.
+		// A `watch` can arrive at any moment — before a pane has been opened
+		// dynamically, before the panel is shown — and a hub with no Watcher
+		// answers every one of them `unsupported`.
+		m.hub.SetWatcher(m.streamer())
 		if err := m.hub.Register(opSource, m.builtinOps()...); err != nil {
 			// The op table is a compile-time constant in everything but type,
 			// so a failure here is a magmux bug and not a caller's. Say so
@@ -144,6 +154,11 @@ func (m *Magmux) builtinOps() []hub.Op {
 				"label": strProp("Short tag for the panel's OUT row, e.g. \"step 2/5\"."),
 			})),
 
+		// input is built by hand: it is the one built-in that does not wrap a
+		// socket verb, because there is no `{"type":"input"}` to wrap. See
+		// input.go for why it must not join the verb table.
+		m.inputOp(),
+
 		m.op("status", protocol.ClassDisplay,
 			"Set magmux's status bar text.",
 			objectSchema(map[string]any{"text": strProp("Status bar text. Empty clears it.")})),
@@ -226,6 +241,12 @@ func (m *Magmux) dispatchOp(ctx context.Context, msg sockMsg) (map[string]any, e
 	// already given up, the delivery goroutine must not block on a channel
 	// nobody is reading.
 	answered := make(chan outcome, 1)
+	// The verb's own work gets this ctx; the wait below gets it too, but they
+	// are different things. On a lane, ctx is the item's, which Quiesce cancels
+	// — so a `send` reached through `call` stops between keystrokes exactly as
+	// the direct verb does, instead of typing on into a session teardown has
+	// already reported on.
+	msg.runCtx = ctx
 	result, err := m.dispatchSocketVerbExt(msg, func(r map[string]any, e error) {
 		select {
 		case answered <- outcome{r, e}:

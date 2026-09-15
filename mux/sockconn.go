@@ -176,6 +176,14 @@ const (
 func (m *Magmux) shutdownSocket() {
 	h := m.bus()
 
+	// 0. Stop the framers. A frame is a picture of a session that is still
+	//    moving, and from here on magmux is answering the opposite question:
+	//    `results` is the authoritative final state, and a screen written after
+	//    it would contradict the report. Finalize discards every slot anyway;
+	//    stopping the producers first means no goroutine is still diffing a
+	//    screen while teardown is measured.
+	m.streamer().Shutdown()
+
 	// 1. Stop taking work, cancel what is running, and wait for it — BEFORE
 	//    results is built, so the aggregate reports a session that has stopped
 	//    moving rather than one still typing into a PTY.
