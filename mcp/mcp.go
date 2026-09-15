@@ -25,6 +25,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MadAppGang/magmux/buildinfo"
@@ -136,6 +137,22 @@ type mcpServer struct {
 	sessMu   sync.Mutex
 	sessions map[string]*client.Session
 	defID    string
+	// binds carries everything ABOUT an attached session that is MCP's rather
+	// than the client's: its op table, its dynamic tool names, its
+	// subscriptions and its once-only announce. Keyed and guarded exactly like
+	// sessions, so the two can never disagree about what is attached.
+	binds map[string]*binding
+
+	// notif coalesces and paces every server->client notification. See rc.go.
+	notif *notifier
+
+	// The one quiet resolve fired by notifications/initialized. eagerRunning
+	// says whether waiting on eagerDone would mean anything: a server that
+	// never saw the notification must not make tools/list wait for a resolve
+	// that will never start.
+	eagerOnce    sync.Once
+	eagerRunning atomic.Bool
+	eagerDone    chan struct{}
 
 	ancMu     sync.Mutex
 	ancestors map[int]bool
@@ -153,11 +170,15 @@ type mcpServer struct {
 }
 
 func newMCPServer(out io.Writer, logw io.Writer) *mcpServer {
-	return &mcpServer{
-		out:      bufio.NewWriter(out),
-		logw:     logw,
-		sessions: map[string]*client.Session{},
+	s := &mcpServer{
+		out:       bufio.NewWriter(out),
+		logw:      logw,
+		sessions:  map[string]*client.Session{},
+		binds:     map[string]*binding{},
+		eagerDone: make(chan struct{}),
 	}
+	s.notif = newNotifier(s)
+	return s
 }
 
 // Run is the `magmux mcp` entry point. It returns a process exit code and
@@ -261,12 +282,16 @@ func (s *mcpServer) serve(in io.Reader) int {
 // shutdown closes every attached session. In-flight tool calls are abandoned:
 // stdin closing means the client is gone, so there is nobody left to answer.
 func (s *mcpServer) shutdown() {
+	// Before the sessions, so a broadcast arriving as they close cannot start
+	// the notifier's goroutine again on the way out.
+	s.notif.stop()
 	s.sessMu.Lock()
 	sessions := make([]*client.Session, 0, len(s.sessions))
 	for _, sess := range s.sessions {
 		sessions = append(sessions, sess)
 	}
 	s.sessions = map[string]*client.Session{}
+	s.binds = map[string]*binding{}
 	s.defID = ""
 	s.sessMu.Unlock()
 	for _, sess := range sessions {
@@ -288,6 +313,13 @@ func (s *mcpServer) handleLine(line []byte) {
 	// either, however malformed they are. `notifications/*` is checked before
 	// the id so a client that (wrongly) tags one with an id still gets silence.
 	if req.Method == "" || strings.HasPrefix(req.Method, "notifications/") || req.ID == nil {
+		if req.Method == "notifications/initialized" {
+			// The handshake is over, so the client is about to ask what this
+			// server has. Resolving a session here — quietly, on a goroutine —
+			// is what lets tools/list and resources/list answer with something
+			// other than the static nine and an empty array.
+			s.startEagerResolve()
+		}
 		if req.Method == "" && req.ID != nil {
 			s.respondError(req.ID, rpcInvalidRequest, "invalid request: no method", nil)
 		}
@@ -302,7 +334,10 @@ func (s *mcpServer) handleLine(line []byte) {
 		// which would emit a response with no result member at all.
 		s.respond(req.ID, struct{}{})
 	case "tools/list":
-		s.respond(req.ID, map[string]any{"tools": mcpToolSchemas()})
+		// On the reader goroutine on purpose: a client that asks for the tool
+		// list and then pings expects the answers in that order, and the list
+		// is a cache read once the eager resolve has settled.
+		s.respond(req.ID, s.toolsListResult())
 	case "tools/call":
 		// Off the reader goroutine: send_and_wait can legitimately block for
 		// fifteen minutes, and a client's pings must still be answered.
@@ -312,7 +347,17 @@ func (s *mcpServer) handleLine(line []byte) {
 			s.handleToolCall(req)
 		}()
 	case "resources/list":
-		s.respond(req.ID, map[string]any{"resources": []any{}})
+		s.respond(req.ID, s.resourcesListResult())
+	case "resources/templates/list":
+		s.respond(req.ID, s.resourceTemplatesResult())
+	case "resources/read", "resources/subscribe", "resources/unsubscribe":
+		// Off the reader goroutine: each of these makes a request to magmux,
+		// and a client's pings must still be answered while one is in flight.
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.handleResourceCall(req)
+		}()
 	case "prompts/list":
 		s.respond(req.ID, map[string]any{"prompts": []any{}})
 	case "shutdown":
@@ -355,8 +400,13 @@ func (s *mcpServer) initializeResult(params json.RawMessage) map[string]any {
 
 	return map[string]any{
 		"protocolVersion": version,
+		// listChanged is true on both halves because both lists really do
+		// change while the server runs: a plugin registering adds tools, and a
+		// pane opening adds a resource. `subscribe` is the third: a pane
+		// resource is watched, not polled.
 		"capabilities": map[string]any{
-			"tools": map[string]any{"listChanged": false},
+			"tools":     map[string]any{"listChanged": true},
+			"resources": map[string]any{"subscribe": true, "listChanged": true},
 		},
 		"serverInfo": map[string]any{
 			"name":    "magmux",

@@ -437,6 +437,41 @@ func (st *SessionState) mergeCommonLocked(p *PaneInfo, e map[string]any) {
 	}
 }
 
+// MarkOpened applies a `pane_opened` broadcast.
+//
+// magmux announces a new pane and then says nothing more about it until its
+// state changes, so a client that ignored the event would keep a pane table
+// that is missing a pane for as long as that pane sits at its first prompt.
+// Explicitly un-closing it matters too: ids are never reused, but a `list` that
+// raced a close could have marked it, and the open is the newer fact.
+func (st *SessionState) MarkOpened(idx int, e map[string]any) {
+	if idx < 0 {
+		return
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	p := st.paneLocked(idx)
+	p.Closed = false
+	st.mergeCommonLocked(p, e)
+	st.bumpLocked()
+}
+
+// MarkClosed applies a `pane_closed` broadcast. The entry is KEPT and flagged
+// rather than deleted: magmux keeps the id as a tombstone forever, and a caller
+// that asks about it deserves "that pane has been closed" rather than "there is
+// no such pane".
+func (st *SessionState) MarkClosed(idx int) {
+	if idx < 0 {
+		return
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	p := st.paneLocked(idx)
+	p.Closed = true
+	p.State = "closed"
+	st.bumpLocked()
+}
+
 func (st *SessionState) markExit(idx, code int) {
 	if idx < 0 {
 		return
@@ -479,6 +514,12 @@ func (st *SessionState) pane(idx int) (PaneInfo, bool) {
 	}
 	return *p, true
 }
+
+// Pane returns a copy of one pane's state, and whether this session has ever
+// mentioned it. The bool is the whole point for a resource lookup: "no such
+// pane" and "a pane that has closed" are different answers, and only the second
+// one is a resource that used to exist.
+func (st *SessionState) Pane(idx int) (PaneInfo, bool) { return st.pane(idx) }
 
 // All returns a copy of every pane, in the order magmux first mentioned them.
 func (st *SessionState) All() []PaneInfo {
@@ -586,6 +627,15 @@ type Session struct {
 	// nonsense — the second would watch the first one's turn.
 	turnMu   sync.Mutex
 	inFlight map[int]bool
+
+	// The plugin-event rings (rc.go): one bounded history per plugin, a
+	// session-local sequence shared across them, and the epoch that tells a
+	// re-dialled session's rings from the ones they replaced. Written on the
+	// reader goroutine, read by anything.
+	evMu    sync.Mutex
+	evRings map[string]*pluginRing
+	evSeq   uint64
+	epoch   uint64
 }
 
 // State is the client's live view of this session's panes.
@@ -613,6 +663,8 @@ func Dial(ctx context.Context, id, sockPath string, pid int, opts ...DialOption)
 		closed:   make(chan struct{}),
 		inFlight: map[int]bool{},
 		cfg:      cfg,
+		evRings:  map[string]*pluginRing{},
+		epoch:    epochSeq.Add(1),
 	}
 
 	br := bufio.NewReaderSize(conn, 64*1024)
@@ -688,6 +740,18 @@ func (s *Session) ingest(line []byte) {
 		s.state.markEnded()
 	case protocol.EventReply:
 		s.routeReply(line)
+	case protocol.EventPaneOpened:
+		if idx, ok := evInt(ev, "pane"); ok {
+			s.state.MarkOpened(idx, ev)
+		}
+	case protocol.EventPaneClosed:
+		if idx, ok := evInt(ev, "pane"); ok {
+			s.state.MarkClosed(idx)
+		}
+	case protocol.EventPlugin:
+		// Recorded before the hook fires, so a hook that turns this into a
+		// "go and read it" notice cannot outrun the ring it points at.
+		s.recordPluginEvent(ev)
 	default:
 		// `control`, `pilot` and anything we do not know about: ignore. A
 		// reply never touches pane state, and pane state never comes from a

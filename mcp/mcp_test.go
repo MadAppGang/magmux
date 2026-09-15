@@ -446,6 +446,63 @@ type fakeMagmux struct {
 	msgs     []map[string]any
 	replies  bool // answer `capabilities`, i.e. not a legacy magmux
 	busyCaps int  // swallow this many `capabilities` probes, then behave normally
+
+	// The remote-control half (P6). conns is every live connection, because
+	// `magmux mcp` may hold several — one per attached session, and a test that
+	// drives two of them at once used to be impossible against a fake that
+	// accepted one connection and then returned.
+	conns []*fakeConn
+	ops   []any // the `ops` reply payload
+	rev   int
+	// onVerb, when set, gets first refusal on every message. Returning
+	// handled=true suppresses the default answer; returning a nil result with
+	// handled=true answers nothing at all, which is how a test stages silence.
+	onVerb func(f *fakeMagmux, fc *fakeConn, verb string, msg map[string]any) (map[string]any, bool)
+}
+
+// fakeConn is one accepted connection. Its mutex matters: a test pushes
+// broadcasts from its own goroutine while the reader goroutine writes replies,
+// and two interleaved fmt.Fprintln calls produce one unparseable line.
+type fakeConn struct {
+	c  net.Conn
+	mu sync.Mutex
+}
+
+func (fc *fakeConn) send(line string) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fmt.Fprintln(fc.c, line)
+}
+
+// push broadcasts a raw line to every connection, which is how this fake plays
+// magmux's own events: `changed`, `plugin`, `pane_opened`, `ops_changed`.
+func (f *fakeMagmux) push(line string) {
+	f.mu.Lock()
+	conns := append([]*fakeConn(nil), f.conns...)
+	f.mu.Unlock()
+	for _, fc := range conns {
+		fc.send(line)
+	}
+}
+
+// setOps installs the `ops` reply. The shape is magmux's: a qualified name and
+// the SOURCE the registry stamped, which is what tells a plugin op from a
+// built-in.
+func (f *fakeMagmux) setOps(rev int, ops ...any) {
+	f.mu.Lock()
+	f.ops, f.rev = ops, rev
+	f.mu.Unlock()
+}
+
+// pluginOp is one plugin op as `ops` reports it.
+func pluginOp(plugin, op, desc string, schema map[string]any) map[string]any {
+	if schema == nil {
+		schema = map[string]any{"type": "object"}
+	}
+	return map[string]any{
+		"name": plugin + "." + op, "description": desc,
+		"schema": schema, "class": "control", "source": plugin,
+	}
 }
 
 func startFakeMagmux(t *testing.T, replies bool) *fakeMagmux {
@@ -490,18 +547,32 @@ func shortProbes(s *mcpServer, recheck ...time.Duration) {
 	}
 }
 
+// accept takes connections until the listener closes. It is a LOOP because
+// `magmux mcp` holds one connection per attached session, and the eager resolve
+// plus an attach_session is already two.
 func (f *fakeMagmux) accept() {
-	conn, err := f.ln.Accept()
-	if err != nil {
-		return
+	for {
+		conn, err := f.ln.Accept()
+		if err != nil {
+			return
+		}
+		fc := &fakeConn{c: conn}
+		f.mu.Lock()
+		f.conns = append(f.conns, fc)
+		f.mu.Unlock()
+		go f.serve(fc)
 	}
+}
+
+func (f *fakeMagmux) serve(fc *fakeConn) {
+	conn := fc.c
 	defer conn.Close()
 
 	// Pane 2 has no controller: a dev server is a pane you can type into but
 	// whose turns magmux cannot see, which is what refuseUnturnable is for.
-	fmt.Fprintln(conn, `{"type":"snapshot","panes":[`+
-		`{"pane":0,"state":"awaiting_input","controller":"claude-code","label":"api","cmd":"claude","pid":424242},`+
-		`{"pane":1,"state":"panel","control":true},`+
+	fc.send(`{"type":"snapshot","panes":[` +
+		`{"pane":0,"state":"awaiting_input","controller":"claude-code","label":"api","cmd":"claude","pid":424242},` +
+		`{"pane":1,"state":"panel","control":true},` +
 		`{"pane":2,"state":"running","label":"dev","cmd":"npm run dev","pid":424243}]}`)
 
 	sc := bufio.NewScanner(conn)
@@ -531,7 +602,18 @@ func (f *fakeMagmux) accept() {
 			out, _ := json.Marshal(map[string]any{
 				"type": "reply", "id": id, "ok": true, "result": result,
 			})
-			fmt.Fprintln(conn, string(out))
+			fc.send(string(out))
+		}
+		f.mu.Lock()
+		hook := f.onVerb
+		f.mu.Unlock()
+		if hook != nil {
+			if result, handled := hook(f, fc, verb, msg); handled {
+				if result != nil {
+					reply(result)
+				}
+				continue
+			}
 		}
 		switch verb {
 		case "capabilities":
@@ -545,7 +627,7 @@ func (f *fakeMagmux) accept() {
 				out, _ := json.Marshal(map[string]any{"type": "reply", "id": id, "ok": false,
 					"code": "no_controller", "error": fmt.Sprintf(
 						"pane %d is not running a tool magmux follows", pane)})
-				fmt.Fprintln(conn, string(out))
+				fc.send(string(out))
 				continue
 			}
 			reply(map[string]any{
@@ -579,10 +661,36 @@ func (f *fakeMagmux) accept() {
 			// that skips the first half is what phase one exists to catch.
 			go func() {
 				time.Sleep(20 * time.Millisecond)
-				fmt.Fprintln(conn, `{"type":"snapshot","pane":0,"state":"working","tool":"Bash"}`)
+				fc.send(`{"type":"snapshot","pane":0,"state":"working","tool":"Bash"}`)
 				time.Sleep(20 * time.Millisecond)
-				fmt.Fprintln(conn, `{"type":"snapshot","pane":0,"state":"awaiting_input","response":"all green","tool":"Bash"}`)
+				fc.send(`{"type":"snapshot","pane":0,"state":"awaiting_input","response":"all green","tool":"Bash"}`)
 			}()
+		case "ops":
+			f.mu.Lock()
+			ops, rev := f.ops, f.rev
+			f.mu.Unlock()
+			if ops == nil {
+				ops = []any{}
+			}
+			reply(map[string]any{"ops": ops, "rev": rev})
+		case "call":
+			op, _ := evStr(msg, "op")
+			switch op {
+			case "capture":
+				reply(map[string]any{"pane": 0, "rows": 24, "cols": 80, "text": "MARKER-7\n$ "})
+			default:
+				reply(map[string]any{"op": op})
+			}
+		case "watch":
+			pane, _ := evInt(msg, "pane")
+			mode, _ := evStr(msg, "mode")
+			if mode == "" {
+				mode = "frames"
+			}
+			reply(map[string]any{"pane": pane, "rows": 24, "cols": 80, "mode": mode, "fps": 15})
+		case "unwatch":
+			pane, _ := evInt(msg, "pane")
+			reply(map[string]any{"pane": pane, "watching": false})
 		default:
 			reply(map[string]any{})
 		}
@@ -973,6 +1081,13 @@ func TestOpenPaneOmitsTargetWhenNotGiven(t *testing.T) {
 // TestAttachAnnouncesTheClientToTheControlPanel covers the identity that was
 // dead plumbing: clientName was captured at initialize and never used, so the
 // panel could not name the controller and picked its layout by accident.
+//
+// It asserts the announce on the first TOOL CALL rather than on attach, which
+// is where it moved once attach became something a mere resource read does:
+// announcing on attach would put a phantom controller in the panel for a client
+// that has driven nothing, and reset the counters of the pilot that is really
+// driving. The message itself — event, client, no id — is unchanged, and that
+// is what this test is about.
 func TestAttachAnnouncesTheClientToTheControlPanel(t *testing.T) {
 	f := startFakeMagmux(t, true)
 	s := newMCPServer(io.Discard, io.Discard)
@@ -984,6 +1099,14 @@ func TestAttachAnnouncesTheClientToTheControlPanel(t *testing.T) {
 		t.Fatalf("attach: %v", err)
 	}
 	defer sess.Close()
+
+	if f.sawVerb("pilot") {
+		t.Fatal("attach announced a controller before anything was driven")
+	}
+	if _, rerr := toolListPanes(context.Background(), s,
+		json.RawMessage(`{"session_id":"fake"}`)); rerr != nil {
+		t.Fatalf("list_panes: %v", rerr)
+	}
 
 	msg := f.waitForVerb(t, "pilot", 2*time.Second)
 	if ev, _ := evStr(msg, "event"); ev != "start" {

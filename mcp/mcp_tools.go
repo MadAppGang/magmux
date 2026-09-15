@@ -309,6 +309,14 @@ func (s *mcpServer) handleToolCall(req rpcRequest) {
 	}
 	tool, ok := mcpToolByName(p.Name)
 	if !ok {
+		// A plugin op, resolved through the table `ops` built — never by
+		// splitting the name the client sent. A name no attached session
+		// advertises stays a JSON-RPC error, because the model cannot fix a
+		// tool that does not exist and must not be invited to retry.
+		if s.isDynamicTool(p.Name) {
+			s.callDynamicTool(req, p.Name, p.Arguments)
+			return
+		}
 		s.respondError(req.ID, rpcMethodNotFound, "unknown tool: "+p.Name, nil)
 		return
 	}
@@ -328,11 +336,41 @@ func (s *mcpServer) handleToolCall(req rpcRequest) {
 
 // ── session resolution ──────────────────────────────────────────────────────
 
-// resolveSession finds the session a tool should act on: an explicit id, then
-// the current default, then the magmux we are running inside, then the only
-// reachable one. Ambiguity is an error rather than a guess — picking the wrong
-// session means typing into someone else's terminal.
+// resolveSession is what a TOOL calls: it resolves the session and then
+// announces this client to that session's control panel, once.
+//
+// The announce lives here rather than in attach because attach now runs for
+// reasons that are not driving — the eager resolve after
+// notifications/initialized, a resource read, a tools/list that needs the op
+// table — and `pilot start` names the panel's header AND resets its counters.
+// Announcing on attach would therefore turn every agent that merely loads this
+// server inside a controlled pane into a phantom controller, and zero the
+// ledger of the pilot that is really driving it.
+//
+// announceOnce blocks every concurrent first caller until the announce is on
+// the wire, which is what stops a second tools/call's request reaching magmux
+// ahead of the `pilot start` that zeroes the counters its turn is counted in.
 func (s *mcpServer) resolveSession(ctx context.Context, id string) (*client.Session, error) {
+	sess, err := s.resolveSessionQuiet(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if b := s.bindingByID(sess.ID); b != nil {
+		b.announceOnce()
+	}
+	return sess, nil
+}
+
+// resolveSessionQuiet finds the session a tool should act on: an explicit id,
+// then the current default, then the magmux we are running inside, then the
+// only reachable one. Ambiguity is an error rather than a guess — picking the
+// wrong session means typing into someone else's terminal.
+//
+// Quiet: it has no effect on the control panel. Everything that is not a
+// tools/call — the eager resolve, resource reads, subscriptions — uses this
+// form, and that is what keeps a client which has driven nothing out of the
+// panel's controller ledger.
+func (s *mcpServer) resolveSessionQuiet(ctx context.Context, id string) (*client.Session, error) {
 	s.sessMu.Lock()
 	if id != "" {
 		if sess, ok := s.sessions[id]; ok {
@@ -395,6 +433,11 @@ func (s *mcpServer) resolveSession(ctx context.Context, id string) (*client.Sess
 
 // attach dials a session and registers it, becoming the default if there is
 // none yet.
+//
+// It is QUIET: dial, register, install the raw event hook, and nothing else. No
+// `pilot`, no verb magmux counts as driving. That is what makes it safe to call
+// from the eager resolve and from a resource read; the announce is
+// resolveSession's, and it fires from the first tools/call.
 func (s *mcpServer) attach(ctx context.Context, id, sock string, pid int) (*client.Session, error) {
 	if sock == "" {
 		if id == "" {
@@ -413,7 +456,13 @@ func (s *mcpServer) attach(ctx context.Context, id, sock string, pid int) (*clie
 	}
 	s.sessMu.Unlock()
 
-	sess, err := client.Dial(ctx, id, sock, pid, s.dialOpts...)
+	// The hook sees every line this session sends, which is how a `changed`
+	// becomes notifications/resources/updated and an `ops_changed` becomes
+	// notifications/tools/list_changed. It runs on the session's reader
+	// goroutine — see onSessionEvent for what that forbids.
+	opts := append(append([]client.DialOption(nil), s.dialOpts...),
+		client.WithEventHook(func(line []byte) { s.onSessionEvent(id, line) }))
+	sess, err := client.Dial(ctx, id, sock, pid, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -426,32 +475,12 @@ func (s *mcpServer) attach(ctx context.Context, id, sock string, pid int) (*clie
 		return existing, nil
 	}
 	s.sessions[id] = sess
+	s.binds[id] = newBinding(s, id, sess)
 	if s.defID == "" {
 		s.defID = id
 	}
-	client := s.clientName
 	s.sessMu.Unlock()
 
-	// Announce who is driving, once per session, with the same `pilot` event the
-	// pi pilot has always used — the promise being that anything speaking these
-	// verbs fills the control panel in, with no MCP-specific verb.
-	//
-	// It is not decoration: `client` is what the panel names in its header, and
-	// what makes it choose the routing layout (a controller driving N panes)
-	// over the legacy single-lane one. Without this the panel could only ever
-	// land on the legacy layout by accident, for a run that is not a pilot's.
-	//
-	// Fire-and-forget: it needs no reply, so it also works against a legacy
-	// magmux, which has always understood `pilot`. Sent only when the client
-	// named itself at initialize — an anonymous controller gains nothing from
-	// the event, and `pilot start` resets the panel's counters.
-	if client != "" {
-		if err := sess.Fire(map[string]any{
-			"type": "pilot", "event": "start", "client": client,
-		}); err != nil {
-			s.logf("could not announce %q to session %s: %v", client, id, err)
-		}
-	}
 	s.logf("attached session %s (%s), capabilities=%s", id, sock, sess.CapsNote())
 	return sess, nil
 }
@@ -727,8 +756,23 @@ func toolAttachSession(ctx context.Context, s *mcpServer, raw json.RawMessage) (
 	}
 
 	s.sessMu.Lock()
+	changed := s.defID != sess.ID
 	s.defID = sess.ID
 	s.sessMu.Unlock()
+
+	// attach_session IS a tools/call that resolves a session, so it announces
+	// like any other — and it is the moment dynamic tools and resources appear,
+	// so both lists change.
+	if b := s.bindingByID(sess.ID); b != nil {
+		b.announceOnce()
+		if err := b.ensureOps(ctx); err != nil {
+			s.logf("ops for %s: %v", sess.ID, err)
+		}
+		if changed || len(b.toolNames()) > 0 {
+			s.notif.toolsChanged()
+		}
+		s.notif.resourcesChanged()
+	}
 
 	panes, listErr := sess.ListPanes(ctx)
 	reliable := s.markSelfPanes(panes)
