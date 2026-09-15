@@ -1198,3 +1198,68 @@ func TestControlPanelDump(t *testing.T) {
 		dump(cp.frame(sampleFrameState(cp), cp.steplogOf(0), size[0], size[1]), size[0])
 	}
 }
+
+// TestRouteRowKeepsItsTail pins the width at which the route table's right-hand
+// group — duration, sparkline, tool — starts rendering.
+//
+// padBetween drops that whole group the moment the gap closes, rather than
+// trimming it, so the failure is silent: the row still looks deliberate, it
+// just has no moving information in it. Moving the state from coloured text to
+// a chip widened the head by 2 columns (badge() adds its own margins) and
+// pushed the cutoff from 59 to 61 before the three-band split below brought it
+// to 50.
+//
+// The test asserts the PROPERTY — the tail survives at a width two panes fit
+// into on an ordinary terminal — rather than the exact number, so a future
+// column can be spent without rewriting the test, but not silently.
+func TestRouteRowKeepsItsTail(t *testing.T) {
+	defer useTheme(currentTheme)()
+	r := ctrlRoute{
+		pane: 0, title: "reviewer", state: "awaiting_permission",
+		sent: 4, observed: 4, tool: "Bash", durs: []float64{1, 2, 3, 4},
+	}
+	r.lastSent = time.Now()
+
+	// 50 columns is a 100-column terminal split in two, minus borders — the
+	// narrowest split a person actually works in.
+	const want = 50
+	for w := want; w <= 80; w++ {
+		row := stripSGR(routeRow(r, 0, w))
+		if !strings.Contains(row, "Bash") {
+			t.Errorf("inner=%d: tool column missing, row=%q", w, row)
+		}
+		if vis := visWidth(routeRow(r, 0, w)); vis > w {
+			t.Errorf("inner=%d: row is %d columns, must not exceed inner", w, vis)
+		}
+	}
+
+	// The short label is what buys the tail in the middle band; the long one
+	// must come back once there is room for both.
+	if row := stripSGR(routeRow(r, 0, 61)); !strings.Contains(row, "PERMISSION") {
+		t.Errorf("inner=61 should use the long label, got %q", row)
+	}
+	if row := stripSGR(routeRow(r, 0, 55)); !strings.Contains(row, "PERM") ||
+		strings.Contains(row, "PERMISSION") {
+		t.Errorf("inner=55 should use the short label, got %q", row)
+	}
+}
+
+// stripSGR removes colour escapes so a test can assert on visible text.
+func stripSGR(s string) string {
+	var b strings.Builder
+	inEsc := false
+	for _, r := range s {
+		if inEsc {
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEsc = true
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}

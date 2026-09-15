@@ -39,3 +39,30 @@ jobs:
       # so they only run on darwin/linux — which is exactly the matrix here.
       - name: Test
         run: go test -race ./...
+
+  # Validate the release config on every push, because otherwise nothing does
+  # until a tag is pushed — and by then the tag is immutable and the failure
+  # costs a renumbered release. This is not theoretical: the v0.12.0 cask
+  # migration was written with `binary:` where the schema wants `binaries:`,
+  # and the only thing that caught it was running `check` by hand.
+  #
+  # Its own job, not a step in the matrix above: the config does not vary by
+  # OS, so running it on both is pure duplication.
+  #
+  # The version is pinned to the SAME `~> v2` that .github/workflows/release.yml
+  # uses. A gate that validates a different version of the tool than the one
+  # that will do the release is not a gate.
+  release-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: GoReleaser check
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: check

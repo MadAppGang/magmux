@@ -173,20 +173,40 @@ const COLS = Math.min(
 const badge = (label: string, bgCol: string) =>
   `${bgCol}${C.ink}${C.bold} ${label} ${C.reset}`;
 
-// wrap breaks a body to the pane, never mid-word where it can be helped.
+// wrap breaks a body to the pane, never mid-word where it can be helped — and
+// HARD-SPLITS where it cannot.
+//
+// The hard split is the whole point and was missing at first. A body carrying a
+// transcript path, a URL or a filename routinely exceeds the pane on its own,
+// and without the split that one token is emitted whole: the terminal then soft
+// wraps it, and the continuation starts at column 0 with no gutter, breaking
+// exactly the vertical rule this shape exists to draw. Measured on a real path:
+// an 85-character token in a 40-column pane.
+//
+// It mirrors wrapText in control.go, which has hard-split since it was written.
+// Two implementations of one job in two languages is already a drift risk; the
+// behaviour at least should not differ.
+//
+// Empty paragraphs are dropped rather than emitted as a bare gutter row with
+// nothing after it, which is what a body ending in a newline used to produce.
 function wrap(text: string, width: number): string[] {
+  const w = Math.max(width, 4);
   const out: string[] = [];
   for (const para of text.split("\n")) {
     let line = "";
     for (const word of para.split(/\s+/).filter(Boolean)) {
       if (!line) line = word;
-      else if (line.length + 1 + word.length <= width) line += " " + word;
+      else if (line.length + 1 + word.length <= w) line += " " + word;
       else {
         out.push(line);
         line = word;
       }
+      while (line.length > w) {
+        out.push(line.slice(0, w));
+        line = line.slice(w);
+      }
     }
-    out.push(line);
+    if (line) out.push(line);
   }
   return out.length ? out : [""];
 }
@@ -536,17 +556,45 @@ async function main() {
   // finish". Diagnosed once against an ANTHROPIC_API_KEY with no credit
   // balance, where the truth was a 400 on every single request and the pilot
   // never had a turn to misbehave in.
+  // Scoped to the attempt it belongs to, NOT to the run. It used to be sticky —
+  // set once and never cleared — so a run that recovered from a refusal and
+  // then ended for an unrelated reason still closed with "could not reach its
+  // model: <the old, recovered error>". That is the same misattribution this
+  // whole mechanism exists to remove, pointed the other way.
   let providerError = "";
+
+  // pi does not publish the message shape, so the read below is an unchecked
+  // cast over someone else's field names. If `errorMessage` is ever renamed,
+  // detection silently reverts to the pre-v0.11.0 behaviour with no error
+  // anywhere — the exact silence ai-docs/bugs/pilot-provider-error-swallowed.md
+  // was written about. So a stopReason of "error" with no message we can read
+  // is reported as an oddity rather than passed over.
   session.subscribe((event) => {
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       process.stdout.write(C.grey + event.assistantMessageEvent.delta + C.reset);
       return;
     }
     const msg = (event as { message?: { stopReason?: string; errorMessage?: string } }).message;
-    if (msg?.stopReason === "error" && msg.errorMessage && !providerError) {
+    if (!msg?.stopReason) return;
+    // A later message that did NOT error proves the model was reached, so the
+    // earlier refusal is stale and must not decide the summary. pi can make
+    // several model calls inside one session.prompt(), so this is the case the
+    // per-attempt reset cannot see: refusal then successful retry, both within
+    // one attempt. Clearing here is what makes the flag mean "the LAST thing we
+    // know about reaching the model" rather than "it once failed".
+    if (msg.stopReason !== "error") {
+      providerError = "";
+      return;
+    }
+    if (providerError) return;
+    if (msg.errorMessage) {
       providerError = describeProviderError(msg.errorMessage);
       log(C.err, badge("PROVIDER", C.bgErr), "refused the request", providerError);
+      return;
     }
+    providerError = "the model reported an error with no message attached";
+    log(C.err, badge("PROVIDER", C.bgErr), "refused the request",
+      `${providerError} — pi's message shape may have changed; check for a renamed errorMessage field`);
   });
 
   // A weaker model will sometimes narrate its plan instead of calling a tool,
@@ -578,6 +626,9 @@ async function main() {
       `to do.`;
 
     for (let attempt = 0; ; attempt++) {
+      // Cleared per attempt: the flag answers "did THIS turn fail to reach the
+      // model", which is the only question either of its two readers asks.
+      providerError = "";
       await session.prompt(prompt);
       if (done) break;
       // Nudging a provider that refused the request buys nothing but two more
