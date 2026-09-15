@@ -18,6 +18,8 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/term"
+
+	"github.com/MadAppGang/magmux/theme"
 )
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -501,7 +503,7 @@ func (m *Magmux) init() error {
 		// Still called: --theme / MAGMUX_THEME / TERM_THEME / COLORFGBG still
 		// choose a palette, and the palette is what children are told about
 		// the background. Only the PROBE is skipped, by initTheme's own guard,
-		// which hands resolveTheme a nil probe so the walk reaches COLORFGBG.
+		// which hands theme.Resolve a nil probe so the walk reaches COLORFGBG.
 		m.initTheme(fd)
 		return nil
 	}
@@ -539,12 +541,12 @@ func (m *Magmux) init() error {
 // initTheme resolves the palette once, in the order stated in theme.go:
 // --theme, MAGMUX_THEME, TERM_THEME, the OSC 11 probe, COLORFGBG, dark. It
 // gathers the inputs and decides whether a probe is POSSIBLE; the walk itself
-// is resolveTheme, and the write half is applyTheme. Any keystrokes the probe
+// is theme.Resolve, and the write half is applyTheme. Any keystrokes the probe
 // swallowed are parked in m.pendingInput for inputLoop; see the field's
 // comment for why that matters.
 func (m *Magmux) initTheme(fd int) {
-	in := themeEnv()
-	in.flag = m.themePref
+	in := theme.Env()
+	in.Flag = m.themePref
 	// Nothing to ask and nobody to answer: a piped stdin has no background
 	// colour, and a dumb terminal has no OSC at all. Both would otherwise cost
 	// every run the probe timeout for nothing.
@@ -557,48 +559,48 @@ func (m *Magmux) initTheme(fd int) {
 	//
 	// The guard is OUTSIDE the closure, so "cannot ask" is a nil probe and the
 	// walk carries on to COLORFGBG instead of stopping at dark.
-	var probe func() themeProbeResult
+	var probe func() theme.ProbeResult
 	if !(m.headless || !term.IsTerminal(fd) || os.Getenv("TERM") == "dumb") {
-		probe = func() themeProbeResult {
+		probe = func() theme.ProbeResult {
 			// Recorded before the probe writes, and only on the path that
 			// actually writes: a word-valued answer (--theme, MAGMUX_THEME,
 			// TERM_THEME) never asks the terminal anything, so inputLoop must
 			// not then go looking for a reply.
 			m.themeAskedAt = time.Now()
-			k, c, ok, rest := detectThemeColor(m.stdinFile(), themeProbeTimeout)
-			return themeProbeResult{kind: k, color: c, ok: ok, leftover: rest}
+			k, c, ok, rest := theme.DetectColor(m.stdinFile(), theme.ProbeTimeout)
+			return theme.ProbeResult{Kind: k, Color: c, OK: ok, Leftover: rest}
 		}
 	}
-	m.applyTheme(resolveTheme(in, probe))
+	m.applyTheme(theme.Resolve(in, probe))
 }
 
 // applyTheme is initTheme's write half, split out so a test can run it on a
 // resolution it built by hand and then ask a pane what colour the terminal is.
-func (m *Magmux) applyTheme(res themeResolution) {
-	setTheme(res.kind)
-	// After setTheme, which resets the reported colours to the palette's
+func (m *Magmux) applyTheme(res theme.Resolution) {
+	theme.Set(res.Kind)
+	// After theme.Set, which resets the reported colours to the palette's
 	// assumptions. Only a probe that answered carries a measured colour; every
 	// other source keeps the palette's stand-in — a coherent guess, which is
 	// all a child needs.
-	if res.probedOK {
-		setDetectedBackground(res.probed)
+	if res.ProbedOK {
+		theme.SetDetectedBackground(res.Probed)
 	}
-	m.pendingInput = append(m.pendingInput, res.leftover...)
+	m.pendingInput = append(m.pendingInput, res.Leftover...)
 	if dbgFile != nil {
 		// Names the source that answered. "probe skipped" is a statement about
 		// the probe, never about the theme: when TERM_THEME decided, the line
 		// says so and claims nothing about detection.
 		fmt.Fprintf(dbgFile, "theme: %s via %s (probe %s; %d bytes of input preserved; background %s)\n",
-			res.kind, res.source, probeState(res), len(res.leftover), xColorString(termBack))
+			res.Kind, res.Source, probeState(res), len(res.Leftover), theme.XColorString(theme.TermBack))
 	}
 }
 
 // probeState is the debug line's word for what the OSC 11 step did.
-func probeState(res themeResolution) string {
+func probeState(res theme.Resolution) string {
 	switch {
-	case !res.probeRan:
+	case !res.ProbeRan:
 		return "skipped"
-	case res.probedOK:
+	case res.ProbedOK:
 		return "answered"
 	}
 	return "no answer"
@@ -1133,7 +1135,7 @@ func findPaneAtRecursive(p *Pane, row, col int) *Pane {
 // themeReplyWindow is how long after the OSC 11 query inputLoop keeps
 // swallowing the terminal's answer to it.
 //
-// detectTheme waits themeProbeTimeout (150ms) and then gives up, but giving up
+// detectTheme waits theme.ProbeTimeout (150ms) and then gives up, but giving up
 // is a decision about the palette, not about the bytes: a terminal behind an
 // ssh hop or another multiplexer can answer a second or two later, and those
 // bytes land in stdin, where inputLoop would type them into the focused pane as

@@ -37,6 +37,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/MadAppGang/magmux/theme"
 )
 
 // ── Palette ───────────────────────────────────────────────────────────────────
@@ -45,7 +47,7 @@ import (
 // Chrome (borders, timestamps, labels) recedes; data and state badges are
 // saturated and carry the eye. The values themselves live in theme.go, because
 // there are two sets of them and which one is in force is a startup decision —
-// see `pal`.
+// see `theme.Pal`.
 
 const sgrReset = "\x1b[0m"
 const sgrBold = "\x1b[1m"
@@ -61,32 +63,32 @@ const sgrBold = "\x1b[1m"
 // the one being fixed. The reported bug was the FOREGROUND — Mocha's #CDD6F4
 // body text on a light terminal — and that is what the two palettes cure.
 //
-// The one exception is badge(), which fills a small chip and writes pal.ink on
+// The one exception is badge(), which fills a small chip and writes theme.Pal.Ink on
 // top of it: it controls both halves, so it is legible whatever the terminal is.
-func sgrBase() string { return sgrReset + fg(pal.text) }
+func sgrBase() string { return sgrReset + theme.Fg(theme.Pal.Text) }
 
 // paint wraps s in a foreground colour and returns to the panel ground state.
-func paint(c rgb, s string) string { return fg(c) + s + sgrBase() }
+func paint(c theme.RGB, s string) string { return theme.Fg(c) + s + sgrBase() }
 
 // badge renders a status chip: ink on a saturated background. Reads as a
 // discrete state at a glance, which plain coloured text does not.
-func badge(label string, c rgb) string {
-	return bg(c) + fg(pal.ink) + sgrBold + " " + label + " " + sgrBase()
+func badge(label string, c theme.RGB) string {
+	return theme.Bg(c) + theme.Fg(theme.Pal.Ink) + sgrBold + " " + label + " " + sgrBase()
 }
 
 // blend interpolates n colours from `from` to `to`. One colour per cell makes
 // a meter read as a continuous ramp instead of four chunky steps.
-func blend(n int, from, to rgb) []rgb {
+func blend(n int, from, to theme.RGB) []theme.RGB {
 	if n <= 1 {
-		return []rgb{to}
+		return []theme.RGB{to}
 	}
-	out := make([]rgb, n)
+	out := make([]theme.RGB, n)
 	for i := 0; i < n; i++ {
 		t := float64(i) / float64(n-1)
-		out[i] = rgb{
-			r: uint8(float64(from.r) + (float64(to.r)-float64(from.r))*t),
-			g: uint8(float64(from.g) + (float64(to.g)-float64(from.g))*t),
-			b: uint8(float64(from.b) + (float64(to.b)-float64(from.b))*t),
+		out[i] = theme.RGB{
+			R: uint8(float64(from.R) + (float64(to.R)-float64(from.R))*t),
+			G: uint8(float64(from.G) + (float64(to.G)-float64(from.G))*t),
+			B: uint8(float64(from.B) + (float64(to.B)-float64(from.B))*t),
 		}
 	}
 	return out
@@ -94,7 +96,7 @@ func blend(n int, from, to rgb) []rgb {
 
 // meter renders a gradient progress bar. The fill ratio and the colour both
 // encode magnitude, so it survives greyscale and colour-blind viewing.
-func meter(frac float64, width int, from, to rgb) string {
+func meter(frac float64, width int, from, to theme.RGB) string {
 	if width <= 0 {
 		return ""
 	}
@@ -109,9 +111,9 @@ func meter(frac float64, width int, from, to rgb) string {
 	var b strings.Builder
 	for i := 0; i < width; i++ {
 		if i < filled {
-			b.WriteString(fg(cols[i]) + "█")
+			b.WriteString(theme.Fg(cols[i]) + "█")
 		} else {
-			b.WriteString(fg(pal.border) + "░")
+			b.WriteString(theme.Fg(theme.Pal.Border) + "░")
 		}
 	}
 	b.WriteString(sgrBase())
@@ -122,7 +124,7 @@ var sparkRunes = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 
 // spark renders a one-line trend. Used for per-turn durations, so a session
 // that is getting progressively slower is visible without reading numbers.
-func spark(values []float64, c rgb) string {
+func spark(values []float64, c theme.RGB) string {
 	if len(values) == 0 {
 		return ""
 	}
@@ -136,7 +138,7 @@ func spark(values []float64, c rgb) string {
 		max = 1
 	}
 	var b strings.Builder
-	b.WriteString(fg(c))
+	b.WriteString(theme.Fg(c))
 	for _, v := range values {
 		idx := int(v / max * float64(len(sparkRunes)-1))
 		if idx < 0 {
@@ -921,18 +923,18 @@ func (cp *ControlPanel) recordFinish(summary string, failed bool) {
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 // stateColor maps an observed session state to its fixed palette entry.
-func stateColor(state string) rgb {
+func stateColor(state string) theme.RGB {
 	switch state {
 	case "awaiting_input", "finished":
-		return pal.success
+		return theme.Pal.Success
 	case "working":
-		return pal.warn
+		return theme.Pal.Warn
 	case "error", "failed", "awaiting_permission":
-		return pal.fail
+		return theme.Pal.Fail
 	case "starting":
-		return pal.running
+		return theme.Pal.Running
 	default:
-		return pal.subtle
+		return theme.Pal.Subtle
 	}
 }
 
@@ -1310,7 +1312,7 @@ func (cp *ControlPanel) frameRoute(s ctrlFrameState, steps []ctrlStep, w, h int)
 		inner = w
 	}
 	pad := " "
-	rule := func(c rgb) string { return pad + paint(c, strings.Repeat("─", maxInt(inner, 1))) }
+	rule := func(c theme.RGB) string { return pad + paint(c, strings.Repeat("─", maxInt(inner, 1))) }
 
 	since := time.Since(s.startedAt)
 	if since < 0 {
@@ -1320,55 +1322,55 @@ func (cp *ControlPanel) frameRoute(s ctrlFrameState, steps []ctrlStep, w, h int)
 	// ── link ──────────────────────────────────────────────────────────────
 	// PILOT ══▶ SESSION reads as a control plane at a glance; a timestamped
 	// list reads as a log. The arrow is the identity of this pane.
-	title := paint(pal.accent, sgrBold+"CONTROL PLANE")
-	out = append(out, pad+padBetween(title, paint(pal.subtle, formatDuration(since)), inner))
-	out = append(out, rule(pal.border))
+	title := paint(theme.Pal.Accent, sgrBold+"CONTROL PLANE")
+	out = append(out, pad+padBetween(title, paint(theme.Pal.Subtle, formatDuration(since)), inner))
+	out = append(out, rule(theme.Pal.Border))
 
 	linkColor := stateColor(s.state)
-	link := paint(pal.accent, sgrBold+"PILOT") +
+	link := paint(theme.Pal.Accent, sgrBold+"PILOT") +
 		paint(linkColor, " ══▶ ") +
-		paint(pal.accent, sgrBold+"SESSION")
+		paint(theme.Pal.Accent, sgrBold+"SESSION")
 	out = append(out, pad+padBetween(link, badge(stateBadge(s.state), linkColor), inner))
 
-	who := paint(pal.subtle, shortModel(s.model))
-	where := paint(pal.subtle, "pane ")
+	who := paint(theme.Pal.Subtle, shortModel(s.model))
+	where := paint(theme.Pal.Subtle, "pane ")
 	if s.target >= 0 {
-		where += paint(pal.text, fmt.Sprint(s.target))
+		where += paint(theme.Pal.Text, fmt.Sprint(s.target))
 	} else {
-		where += paint(pal.dead, "—")
+		where += paint(theme.Pal.Dead, "—")
 	}
 	out = append(out, pad+padBetween(who, where, inner))
 
 	// Counters as discrete figures, not prose.
 	inFlight := s.sent - s.observed
-	counts := paint(pal.running, fmt.Sprint(s.sent)) + paint(pal.subtle, " sent") +
-		paint(pal.border, "  │  ") +
-		paint(pal.success, fmt.Sprint(s.observed)) + paint(pal.subtle, " done")
+	counts := paint(theme.Pal.Running, fmt.Sprint(s.sent)) + paint(theme.Pal.Subtle, " sent") +
+		paint(theme.Pal.Border, "  │  ") +
+		paint(theme.Pal.Success, fmt.Sprint(s.observed)) + paint(theme.Pal.Subtle, " done")
 	if inFlight > 0 {
-		counts += paint(pal.border, "  │  ") +
-			paint(pal.warn, fmt.Sprint(inFlight)) + paint(pal.subtle, " in flight")
+		counts += paint(theme.Pal.Border, "  │  ") +
+			paint(theme.Pal.Warn, fmt.Sprint(inFlight)) + paint(theme.Pal.Subtle, " in flight")
 	}
 	var right string
 	if s.steps > 0 {
 		frac := float64(s.observed) / float64(s.steps)
-		right = meter(frac, minInt(maxInt(inner/3, 6), 18), pal.running, pal.success)
+		right = meter(frac, minInt(maxInt(inner/3, 6), 18), theme.Pal.Running, theme.Pal.Success)
 	}
 	out = append(out, pad+padBetween(counts, right, inner))
 
 	if s.goal != "" && inner > 20 {
-		out = append(out, pad+paint(pal.subtle, "goal ")+
-			paint(pal.text, oneLine(s.goal, inner-6)))
+		out = append(out, pad+paint(theme.Pal.Subtle, "goal ")+
+			paint(theme.Pal.Text, oneLine(s.goal, inner-6)))
 	}
 
 	// ── ledger ────────────────────────────────────────────────────────────
-	out = append(out, rule(pal.border))
+	out = append(out, rule(theme.Pal.Border))
 	avail := h - len(out)
 	if avail < 1 {
 		return out
 	}
 
 	if len(steps) == 0 {
-		out = append(out, pad+paint(pal.dead, "no instructions yet"))
+		out = append(out, pad+paint(theme.Pal.Dead, "no instructions yet"))
 		return out
 	}
 
@@ -1424,14 +1426,14 @@ func (cp *ControlPanel) frameRoute(s ctrlFrameState, steps []ctrlStep, w, h int)
 	}
 
 	hidden := maxInt(0, len(convo)-view-scroll)
-	head := paint(pal.border, strings.Repeat("─", maxInt(inner-24, 1)))
+	head := paint(theme.Pal.Border, strings.Repeat("─", maxInt(inner-24, 1)))
 	switch {
 	case scroll > 0:
-		head += paint(pal.warn, fmt.Sprintf("  ▲ %d back · End to follow", scroll))
+		head += paint(theme.Pal.Warn, fmt.Sprintf("  ▲ %d back · End to follow", scroll))
 	case hidden > 0:
-		head += paint(pal.subtle, fmt.Sprintf("  ▲ %d earlier", hidden))
+		head += paint(theme.Pal.Subtle, fmt.Sprintf("  ▲ %d earlier", hidden))
 	default:
-		head += paint(pal.border, strings.Repeat("─", 24))
+		head += paint(theme.Pal.Border, strings.Repeat("─", 24))
 	}
 	out = append(out, pad+truncANSI(head, inner))
 
@@ -1440,9 +1442,9 @@ func (cp *ControlPanel) frameRoute(s ctrlFrameState, steps []ctrlStep, w, h int)
 	out = append(out, convo[start:end]...)
 
 	if s.note != "" && !s.finished {
-		c := pal.subtle
+		c := theme.Pal.Subtle
 		if s.noteBad {
-			c = pal.fail
+			c = theme.Pal.Fail
 		}
 		out = append(out, pad+paint(c, "• "+s.note))
 	}
@@ -1466,7 +1468,7 @@ func (cp *ControlPanel) frameRouted(s ctrlFrameState, w, h int) []string {
 		inner = w
 	}
 	pad := " "
-	rule := func(c rgb) string { return pad + paint(c, strings.Repeat("─", maxInt(inner, 1))) }
+	rule := func(c theme.RGB) string { return pad + paint(c, strings.Repeat("─", maxInt(inner, 1))) }
 
 	since := time.Since(s.startedAt)
 	if since < 0 {
@@ -1487,19 +1489,19 @@ func (cp *ControlPanel) frameRouted(s ctrlFrameState, w, h int) []string {
 	case 1:
 		subject = "1 PANE"
 	}
-	title := paint(pal.accent, sgrBold+"CONTROLLER") +
+	title := paint(theme.Pal.Accent, sgrBold+"CONTROLLER") +
 		paint(arrow, " ══▶ ") +
-		paint(pal.accent, sgrBold+subject)
+		paint(theme.Pal.Accent, sgrBold+subject)
 	// The elapsed time is the last thing to go: it is what tells an operator
 	// whether a quiet panel is finished or wedged. The client id yields first.
-	right := paint(pal.subtle, formatDuration(since))
+	right := paint(theme.Pal.Subtle, formatDuration(since))
 	if who := shortClient(s.client, s.model); who != "" {
-		withWho := paint(pal.debug, who) + "  " + right
+		withWho := paint(theme.Pal.Debug, who) + "  " + right
 		if visWidth(title)+visWidth(withWho)+1 <= inner {
 			right = withWho
 		}
 	}
-	out := []string{pad + padBetween(title, right, inner), rule(pal.border)}
+	out := []string{pad + padBetween(title, right, inner), rule(theme.Pal.Border)}
 
 	inFlight, blocked := 0, 0
 	for _, r := range s.routes {
@@ -1510,23 +1512,23 @@ func (cp *ControlPanel) frameRouted(s ctrlFrameState, w, h int) []string {
 			blocked++
 		}
 	}
-	counts := paint(pal.running, fmt.Sprint(s.sent)) + paint(pal.subtle, " sent") +
-		paint(pal.border, " │ ") +
-		paint(pal.success, fmt.Sprint(s.observed)) + paint(pal.subtle, " done")
+	counts := paint(theme.Pal.Running, fmt.Sprint(s.sent)) + paint(theme.Pal.Subtle, " sent") +
+		paint(theme.Pal.Border, " │ ") +
+		paint(theme.Pal.Success, fmt.Sprint(s.observed)) + paint(theme.Pal.Subtle, " done")
 	if inFlight > 0 {
-		counts += paint(pal.border, " │ ") +
-			paint(pal.warn, fmt.Sprint(inFlight)) + paint(pal.subtle, " in flight")
+		counts += paint(theme.Pal.Border, " │ ") +
+			paint(theme.Pal.Warn, fmt.Sprint(inFlight)) + paint(theme.Pal.Subtle, " in flight")
 	}
 	if blocked > 0 {
-		counts += paint(pal.border, " │ ") +
-			paint(pal.fail, fmt.Sprint(blocked)) + paint(pal.subtle, " blocked")
+		counts += paint(theme.Pal.Border, " │ ") +
+			paint(theme.Pal.Fail, fmt.Sprint(blocked)) + paint(theme.Pal.Subtle, " blocked")
 	}
 	var bar string
 	if s.sent > 0 {
 		bar = meter(float64(s.observed)/float64(s.sent),
-			minInt(maxInt(inner/4, 6), 14), pal.running, pal.success)
+			minInt(maxInt(inner/4, 6), 14), theme.Pal.Running, theme.Pal.Success)
 	}
-	out = append(out, pad+padBetween(counts, bar, inner), rule(pal.border))
+	out = append(out, pad+padBetween(counts, bar, inner), rule(theme.Pal.Border))
 	if len(out) >= h {
 		return out[:h]
 	}
@@ -1572,7 +1574,7 @@ func (cp *ControlPanel) frameRouted(s ctrlFrameState, w, h int) []string {
 			shown := maxInt(1, tableCap-1)
 			hidden := len(table) - shown
 			table = append(table[:shown:shown],
-				pad+paint(pal.subtle, fmt.Sprintf("  +%d more routes", hidden)))
+				pad+paint(theme.Pal.Subtle, fmt.Sprintf("  +%d more routes", hidden)))
 		}
 	}
 	out = append(out, table...)
@@ -1590,16 +1592,16 @@ func (cp *ControlPanel) frameRouted(s ctrlFrameState, w, h int) []string {
 		cp.clampScroll(scroll)
 	}
 	hidden := maxInt(0, len(stream)-avail-scroll)
-	head := paint(pal.border, strings.Repeat("─", maxInt(inner-24, 1)))
+	head := paint(theme.Pal.Border, strings.Repeat("─", maxInt(inner-24, 1)))
 	switch {
 	case s.filter >= 0:
-		head += paint(pal.accent, fmt.Sprintf("  ▸%d only · 0 for all", s.filter))
+		head += paint(theme.Pal.Accent, fmt.Sprintf("  ▸%d only · 0 for all", s.filter))
 	case scroll > 0:
-		head += paint(pal.warn, fmt.Sprintf("  ▲ %d back · End to follow", scroll))
+		head += paint(theme.Pal.Warn, fmt.Sprintf("  ▲ %d back · End to follow", scroll))
 	case hidden > 0:
-		head += paint(pal.subtle, fmt.Sprintf("  ▲ %d earlier", hidden))
+		head += paint(theme.Pal.Subtle, fmt.Sprintf("  ▲ %d earlier", hidden))
 	default:
-		head += paint(pal.border, strings.Repeat("─", 24))
+		head += paint(theme.Pal.Border, strings.Repeat("─", 24))
 	}
 	out = append(out, pad+truncANSI(head, inner))
 
@@ -1608,9 +1610,9 @@ func (cp *ControlPanel) frameRouted(s ctrlFrameState, w, h int) []string {
 	out = append(out, stream[start:end]...)
 
 	if noteRows == 1 {
-		c := pal.subtle
+		c := theme.Pal.Subtle
 		if s.noteBad {
-			c = pal.fail
+			c = theme.Pal.Fail
 		}
 		out = append(out, pad+paint(c, "• "+s.note))
 	}
@@ -1622,12 +1624,12 @@ func (cp *ControlPanel) frameRouted(s ctrlFrameState, w, h int) []string {
 // pane you are looking at are visibly the same thing.
 func routeTag(pane, focused int) string {
 	if pane < 0 {
-		return paint(pal.border, padRight("··", 3))
+		return paint(theme.Pal.Border, padRight("··", 3))
 	}
-	c := pal.subtle
+	c := theme.Pal.Subtle
 	glyph := " "
 	if pane == focused {
-		c, glyph = pal.accent, "▸"
+		c, glyph = theme.Pal.Accent, "▸"
 	}
 	return paint(c, padRight(glyph+fmt.Sprint(pane), 3))
 }
@@ -1644,7 +1646,7 @@ func routeRow(r ctrlRoute, focused, inner int) string {
 	glyph := "◐"
 	switch {
 	case r.closed():
-		c, glyph = pal.dead, "✗"
+		c, glyph = theme.Pal.Dead, "✗"
 	case r.state == "awaiting_input":
 		glyph = "✓"
 	case r.state == "error":
@@ -1652,7 +1654,7 @@ func routeRow(r ctrlRoute, focused, inner int) string {
 	case r.state == "awaiting_permission":
 		glyph = "⚠"
 	case r.state == "idle" || r.state == "":
-		c, glyph = pal.subtle, "·"
+		c, glyph = theme.Pal.Subtle, "·"
 	}
 
 	titleW, badgeW := 9, 11
@@ -1678,9 +1680,9 @@ func routeRow(r ctrlRoute, focused, inner int) string {
 		mark = ""
 	}
 	head := routeTag(r.pane, focused) + " " +
-		paint(pal.text, padRight(oneLine(r.title, titleW), titleW)) + " " +
+		paint(theme.Pal.Text, padRight(oneLine(r.title, titleW), titleW)) + " " +
 		mark + badge(padRight(oneLine(label, badgeW), badgeW), c) + " " +
-		paint(pal.subtle, padLeft(fmt.Sprintf("%d/%d", r.sent, r.observed), 5))
+		paint(theme.Pal.Subtle, padLeft(fmt.Sprintf("%d/%d", r.sent, r.observed), 5))
 
 	// In flight has no duration yet, so it shows elapsed behind a ‹ marker: a
 	// number that is still growing must not read like a finished one.
@@ -1691,7 +1693,7 @@ func routeRow(r ctrlRoute, focused, inner int) string {
 	case len(r.durs) > 0:
 		dur = formatDuration(time.Duration(r.durs[len(r.durs)-1] * float64(time.Second)))
 	}
-	tail := paint(pal.subtle, padLeft(dur, 6))
+	tail := paint(theme.Pal.Subtle, padLeft(dur, 6))
 	if wide {
 		tool := r.tool
 		if tool == "" {
@@ -1708,7 +1710,7 @@ func routeRow(r ctrlRoute, focused, inner int) string {
 		if n := 8 - len(trend); n > 0 {
 			sp += strings.Repeat(" ", n)
 		}
-		tail += " " + sp + "  " + paint(pal.debug, padRight(oneLine(tool, 8), 8))
+		tail += " " + sp + "  " + paint(theme.Pal.Debug, padRight(oneLine(tool, 8), 8))
 	}
 	return padBetween(head, tail, inner)
 }
@@ -1723,7 +1725,7 @@ func routeStrip(routes []ctrlRoute, focused, inner int) string {
 		glyph := "◐"
 		switch {
 		case r.closed():
-			c, glyph = pal.dead, "✗"
+			c, glyph = theme.Pal.Dead, "✗"
 		case r.state == "awaiting_input":
 			glyph = "✓"
 		case r.state == "error":
@@ -1731,7 +1733,7 @@ func routeStrip(routes []ctrlRoute, focused, inner int) string {
 		case r.state == "awaiting_permission":
 			glyph = "⚠"
 		case r.state == "idle" || r.state == "":
-			c, glyph = pal.subtle, "·"
+			c, glyph = theme.Pal.Subtle, "·"
 		}
 		cell := routeTag(r.pane, focused) + paint(c, glyph+" ")
 		if visWidth(b.String())+visWidth(cell) > inner-6 {
@@ -1741,7 +1743,7 @@ func routeStrip(routes []ctrlRoute, focused, inner int) string {
 		shown++
 	}
 	if shown < len(routes) {
-		b.WriteString(paint(pal.subtle, fmt.Sprintf("+%d more", len(routes)-shown)))
+		b.WriteString(paint(theme.Pal.Subtle, fmt.Sprintf("+%d more", len(routes)-shown)))
 	}
 	return b.String()
 }
@@ -1788,7 +1790,7 @@ func signalLines(sigs []ctrlSignal, focused int, pad string, inner int) []string
 		}
 		var b strings.Builder
 		if showTime {
-			b.WriteString(paint(pal.subtle, sig.at.Format("15:04")) + " ")
+			b.WriteString(paint(theme.Pal.Subtle, sig.at.Format("15:04")) + " ")
 		}
 		// A direction-tinted rule down the left of every row. The stream
 		// interleaves two provenances — what the controller ASKED and what
@@ -1808,22 +1810,22 @@ func signalLines(sigs []ctrlSignal, focused int, pad string, inner int) []string
 			b.WriteString(paint(vc, padRight(oneLine(verb, verbW), verbW)) + " ")
 		}
 
-		body := paint(pal.text, oneLine(sig.text, maxInt(inner-visWidth(b.String()), 4)))
+		body := paint(theme.Pal.Text, oneLine(sig.text, maxInt(inner-visWidth(b.String()), 4)))
 		if sig.dir == "note" {
-			body = paint(pal.subtle, oneLine(sig.text, maxInt(inner-visWidth(b.String()), 4)))
+			body = paint(theme.Pal.Subtle, oneLine(sig.text, maxInt(inner-visWidth(b.String()), 4)))
 		}
 		if sig.turn && sig.dur > 0 {
 			gap := inner - visWidth(b.String())
-			body = padBetween(body, paint(pal.subtle, formatDuration(sig.dur)), maxInt(gap, 4))
+			body = padBetween(body, paint(theme.Pal.Subtle, formatDuration(sig.dur)), maxInt(gap, 4))
 		}
 		out = append(out, pad+truncANSI(b.String()+body, inner))
 
 		if sig.ok == nil {
 			continue
 		}
-		word, ac := "ok", pal.success
+		word, ac := "ok", theme.Pal.Success
 		if !*sig.ok {
-			word, ac = "err", pal.fail
+			word, ac = "err", theme.Pal.Fail
 			if sig.code != "" {
 				word = oneLine(sig.code, verbW)
 			}
@@ -1835,8 +1837,8 @@ func signalLines(sigs []ctrlSignal, focused int, pad string, inner int) []string
 			ackPad = strings.Repeat(" ", indent-2) + paint(gc, "▌") + " "
 		}
 		out = append(out, pad+truncANSI(ackPad+
-			paint(pal.border, "⇦ ")+paint(ac, padRight(word, verbW))+" "+
-			paint(pal.debug, oneLine(sig.ackText, maxInt(inner-indent-verbW-3, 4))), inner))
+			paint(theme.Pal.Border, "⇦ ")+paint(ac, padRight(word, verbW))+" "+
+			paint(theme.Pal.Debug, oneLine(sig.ackText, maxInt(inner-indent-verbW-3, 4))), inner))
 	}
 	return out
 }
@@ -1845,12 +1847,12 @@ func signalLines(sigs []ctrlSignal, focused int, pad string, inner int) []string
 // directions get the two arrows they have always had; a state change that did
 // NOT close a requested turn gets the state's own glyph instead of ◀, so a
 // completion and a progress report can never be mistaken for each other.
-func signalMark(sig ctrlSignal) (glyph string, gc, vc rgb, verb string) {
+func signalMark(sig ctrlSignal) (glyph string, gc, vc theme.RGB, verb string) {
 	switch sig.dir {
 	case "out":
-		return "▶", pal.running, pal.accent, sig.verb
+		return "▶", theme.Pal.Running, theme.Pal.Accent, sig.verb
 	case "note":
-		return "•", pal.subtle, pal.subtle, sig.verb
+		return "•", theme.Pal.Subtle, theme.Pal.Subtle, sig.verb
 	}
 	c := stateColor(sig.state)
 	if sig.turn {
@@ -1882,23 +1884,23 @@ func shortClient(client, model string) string {
 // and it must never vanish before it has been read — so the panel either
 // states the key that closes it, or counts down visibly.
 func finishFooter(s ctrlFrameState, pad string, inner int) []string {
-	c, label := pal.success, "FINISHED"
+	c, label := theme.Pal.Success, "FINISHED"
 	if s.noteBad || s.state == "failed" {
-		c, label = pal.fail, "FAILED"
+		c, label = theme.Pal.Fail, "FAILED"
 	}
 	line := badge(label, c)
 	if s.closeIn > 0 {
 		secs := int(s.closeIn.Seconds() + 0.5)
-		line += " " + paint(pal.warn, fmt.Sprintf("closing in %ds", secs)) +
-			paint(pal.subtle, " · any key cancels")
+		line += " " + paint(theme.Pal.Warn, fmt.Sprintf("closing in %ds", secs)) +
+			paint(theme.Pal.Subtle, " · any key cancels")
 	} else {
-		line += " " + paint(pal.subtle, "press ") + paint(pal.text, "q") +
-			paint(pal.subtle, " to close")
+		line += " " + paint(theme.Pal.Subtle, "press ") + paint(theme.Pal.Text, "q") +
+			paint(theme.Pal.Subtle, " to close")
 	}
 	out := []string{pad + padBetween(line, "", inner)}
 	if s.summary != "" {
 		for _, ln := range wrapText(s.summary, inner-2, 3) {
-			out = append(out, pad+paint(pal.subtle, "  "+ln))
+			out = append(out, pad+paint(theme.Pal.Subtle, "  "+ln))
 		}
 	}
 	return out
@@ -1927,9 +1929,9 @@ func (cp *ControlPanel) exchangeLines(steps []ctrlStep, pad string, inner int) [
 		// which is exactly the thing that does not survive being skimmed.
 		out = append(out, pad+stepHead(st, inner))
 		instr := wrapText(st.text, inner-2, ctrlMaxScroll)
-		out = append(out, block("▶", pal.running, pal.text, instr, pad, inner)...)
+		out = append(out, block("▶", theme.Pal.Running, theme.Pal.Text, instr, pad, inner)...)
 
-		replyColor := pal.success
+		replyColor := theme.Pal.Success
 		reply := st.reply
 		if reply == "" {
 			if st.done() {
@@ -1937,13 +1939,13 @@ func (cp *ControlPanel) exchangeLines(steps []ctrlStep, pad string, inner int) [
 			} else {
 				reply = "working…"
 			}
-			replyColor = pal.dead
+			replyColor = theme.Pal.Dead
 		}
 		if st.bad() {
-			replyColor = pal.fail
+			replyColor = theme.Pal.Fail
 		}
 		body := wrapText(reply, inner-2, ctrlMaxScroll)
-		out = append(out, block("◀", pal.success, replyColor, body, pad, inner)...)
+		out = append(out, block("◀", theme.Pal.Success, replyColor, body, pad, inner)...)
 	}
 	return out
 }
@@ -1960,19 +1962,19 @@ func stepHead(st ctrlStep, inner int) string {
 	if label == "" {
 		label = fmt.Sprintf("step %d", st.n)
 	}
-	left := badge(oneLine(label, 16), pal.running)
+	left := badge(oneLine(label, 16), theme.Pal.Running)
 
 	var right string
 	switch {
 	case !st.done():
-		right = badge("IN FLIGHT", pal.dead)
+		right = badge("IN FLIGHT", theme.Pal.Dead)
 	default:
 		right = badge(stateBadge(st.state), stateColor(st.state))
 		if st.dur > 0 {
-			right += " " + paint(pal.subtle, formatDuration(st.dur))
+			right += " " + paint(theme.Pal.Subtle, formatDuration(st.dur))
 		}
 		if st.tool != "" {
-			right = paint(pal.debug, oneLine(st.tool, 10)) + " " + right
+			right = paint(theme.Pal.Debug, oneLine(st.tool, 10)) + " " + right
 		}
 	}
 	return padBetween(left, right, inner)
@@ -1980,7 +1982,7 @@ func stepHead(st ctrlStep, inner int) string {
 
 // block renders a marked, wrapped paragraph: the glyph leads the first line
 // and continuations are indented to align under the text.
-func block(glyph string, glyphColor, textColor rgb, lines []string, pad string, inner int) []string {
+func block(glyph string, glyphColor, textColor theme.RGB, lines []string, pad string, inner int) []string {
 	out := make([]string, 0, len(lines))
 	for i, ln := range lines {
 		prefix := paint(glyphColor, glyph+" ")
@@ -1999,27 +2001,27 @@ func block(glyph string, glyphColor, textColor rgb, lines []string, pad string, 
 // Fixed columns on purpose — the value of the ledger is that row N is
 // comparable to row N+1 without reading either of them.
 func (cp *ControlPanel) stepRow(st ctrlStep, maxDur time.Duration, inner int) string {
-	glyph, c := "◐", pal.warn // in flight
+	glyph, c := "◐", theme.Pal.Warn // in flight
 	switch {
 	case st.state == "awaiting_input":
-		glyph, c = "✓", pal.success
+		glyph, c = "✓", theme.Pal.Success
 	case st.state == "error":
-		glyph, c = "✗", pal.fail
+		glyph, c = "✗", theme.Pal.Fail
 	case st.state == "awaiting_permission":
-		glyph, c = "⚠", pal.fail
+		glyph, c = "⚠", theme.Pal.Fail
 	case st.state == "gone":
-		glyph, c = "✗", pal.dead
+		glyph, c = "✗", theme.Pal.Dead
 	}
 
 	num := fmt.Sprintf("%2d ", st.n)
-	head := paint(pal.subtle, num) + paint(c, glyph+" ")
+	head := paint(theme.Pal.Subtle, num) + paint(c, glyph+" ")
 
 	// Label column, fixed width so the bars line up.
 	labelW := 12
 	if inner < 40 {
 		labelW = 8
 	}
-	head += paint(pal.text, padRight(oneLine(st.label, labelW), labelW)) + " "
+	head += paint(theme.Pal.Text, padRight(oneLine(st.label, labelW), labelW)) + " "
 
 	used := visWidth(head)
 	// Duration text and tool sit right of the bar; give the bar what is left.
@@ -2033,7 +2035,7 @@ func (cp *ControlPanel) stepRow(st ctrlStep, maxDur time.Duration, inner int) st
 	if tool == "" {
 		tool = "—"
 	}
-	tail := " " + paint(pal.subtle, padLeft(durTxt, 6)) + " " + paint(pal.debug, oneLine(tool, 8))
+	tail := " " + paint(theme.Pal.Subtle, padLeft(durTxt, 6)) + " " + paint(theme.Pal.Debug, oneLine(tool, 8))
 
 	barW := inner - used - visWidth(tail)
 	if barW < 3 {
@@ -2046,7 +2048,7 @@ func (cp *ControlPanel) stepRow(st ctrlStep, maxDur time.Duration, inner int) st
 	case !st.done():
 		frac = 0.15 // in flight: a stub, not a claim about length
 	}
-	return head + meter(frac, barW, pal.running, c) + tail
+	return head + meter(frac, barW, theme.Pal.Running, c) + tail
 }
 
 // shortModel trims a provider-qualified model id to something that fits a
@@ -2152,7 +2154,7 @@ func truncANSI(s string, w int) string {
 		}
 		cw := runeWidth(r)
 		if n+cw > w-1 {
-			b.WriteString(paint(pal.subtle, "…"))
+			b.WriteString(paint(theme.Pal.Subtle, "…"))
 			break
 		}
 		b.WriteRune(r)

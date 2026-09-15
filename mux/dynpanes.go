@@ -40,7 +40,7 @@ type OpenPaneRequest struct {
 
 // OpenPane splits an existing leaf and spawns a child in the new half.
 //
-// The ordering below is the whole design: the slow part (openPTY, fork/exec,
+// The ordering below is the whole design: the slow part (pty.Open, fork/exec,
 // the controller's filesystem probing) runs with NO lock held, and treeMu is
 // taken only for the pointer surgery and reflow, which are microseconds. That
 // is why this can run straight on the socket goroutine instead of being queued
@@ -391,7 +391,7 @@ func firstLiveLeaf(node *Pane) *Pane {
 // turning it into an internal node would strand every one of them.
 //
 // Reflow is the existing reshapeChildren → resize path, which for a leaf does
-// screen.resize + setWinSize. No new geometry code exists anywhere in this file.
+// screen.resize + pty.SetWinSize. No new geometry code exists anywhere in this file.
 //
 // Caller holds treeMu.Lock.
 func (m *Magmux) splitLeafLocked(t, np *Pane, st SplitType, ratio float64) {

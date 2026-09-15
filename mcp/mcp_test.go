@@ -1,4 +1,4 @@
-package mux
+package mcp
 
 // Tests for `magmux mcp`. All of them run without a magmux: pipes, a fake
 // socket, and a fake sessionState. The MCP server's failure modes are protocol
@@ -25,8 +25,8 @@ import (
 
 // ── handshake ───────────────────────────────────────────────────────────────
 
-// mcpPipe drives runMCP over real pipes on stdin/stdout, which is the only way
-// to prove the thing this test exists for: that runMCP itself writes protocol
+// mcpPipe drives Run over real pipes on stdin/stdout, which is the only way
+// to prove the thing this test exists for: that Run itself writes protocol
 // and nothing else to stdout.
 type mcpPipe struct {
 	t    *testing.T
@@ -52,7 +52,7 @@ func startMCP(t *testing.T) *mcpPipe {
 	os.Stdin, os.Stdout = inR, outW
 
 	done := make(chan int, 1)
-	go func() { done <- runMCP(nil) }()
+	go func() { done <- Run(nil) }()
 
 	p := &mcpPipe{t: t, in: inW, out: bufio.NewReader(outR), done: done}
 	p.restore = func() {
@@ -222,10 +222,10 @@ func TestMCPStdioHandshake(t *testing.T) {
 	select {
 	case code := <-p.done:
 		if code != 0 {
-			t.Errorf("runMCP exited %d after stdin closed, want 0", code)
+			t.Errorf("Run exited %d after stdin closed, want 0", code)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("runMCP did not exit after stdin closed")
+		t.Fatal("Run did not exit after stdin closed")
 	}
 }
 

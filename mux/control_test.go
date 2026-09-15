@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MadAppGang/magmux/theme"
 )
 
 // samplePanel builds a panel mid-run: a pilot part-way through a five-step
@@ -454,7 +456,7 @@ func TestControlPanelIgnoresOtherPanes(t *testing.T) {
 // never leaves a dangling escape — a half-written SGR would recolour the rest
 // of the pane.
 func TestTruncANSIKeepsColorIntact(t *testing.T) {
-	s := paint(pal.success, "0123456789") + paint(pal.fail, "abcdefghij")
+	s := paint(theme.Pal.Success, "0123456789") + paint(theme.Pal.Fail, "abcdefghij")
 	got := truncANSI(s, 8)
 	if visWidth(got) > 8 {
 		t.Errorf("truncated to %d visible columns, want <= 8", visWidth(got))
@@ -909,7 +911,7 @@ func TestControlPanelKnownClientNoRoutesRendersSanely(t *testing.T) {
 //
 // The reported bug was the panel's FOREGROUND: every colour was Catppuccin
 // Mocha, so on a light terminal #CDD6F4 body text sat on cream at 1.31:1. The
-// round that fixed it also made the panel fill every cell with pal.base, which
+// round that fixed it also made the panel fill every cell with theme.Pal.base, which
 // put a grey slab inside a cream terminal — a colour magmux has no business
 // choosing. A multiplexer blends into the terminal it runs in.
 //
@@ -920,25 +922,25 @@ func TestControlPanelKnownClientNoRoutesRendersSanely(t *testing.T) {
 // they produce after the real VT parser has run.
 func TestControlPanelImposesNoBackground(t *testing.T) {
 	// badgeOpen is exactly what badge() emits before its label: a truecolor
-	// background, pal.ink on top of it, bold. Any other 48;2; is the bug.
+	// background, theme.Pal.Ink on top of it, bold. Any other 48;2; is the bug.
 	badgeOpen := func(s string) bool {
 		i := strings.Index(s, "m")
 		if i < 0 {
 			return false
 		}
-		return strings.HasPrefix(s[i+1:], fg(pal.ink)+sgrBold)
+		return strings.HasPrefix(s[i+1:], theme.Fg(theme.Pal.Ink)+sgrBold)
 	}
 
-	for _, kind := range []themeKind{themeDark, themeLight} {
+	for _, kind := range []theme.Kind{theme.Dark, theme.Light} {
 		t.Run(kind.String(), func(t *testing.T) {
 			defer useTheme(kind)()
 
 			const w, h = 84, 26
 			// Every colour a badge is ever filled with. A cell background
 			// outside this set is a background the panel invented.
-			allowed := map[rgb]bool{
-				pal.success: true, pal.running: true, pal.warn: true,
-				pal.fail: true, pal.accent: true, pal.subtle: true, pal.dead: true,
+			allowed := map[theme.RGB]bool{
+				theme.Pal.Success: true, theme.Pal.Running: true, theme.Pal.Warn: true,
+				theme.Pal.Fail: true, theme.Pal.Accent: true, theme.Pal.Subtle: true, theme.Pal.Dead: true,
 			}
 
 			for name, cp := range map[string]*ControlPanel{
@@ -974,7 +976,7 @@ func TestControlPanelImposesNoBackground(t *testing.T) {
 						if !c.Bg.True {
 							continue // the terminal's own background: correct
 						}
-						if !allowed[rgb{c.Bg.R, c.Bg.G, c.Bg.B}] {
+						if !allowed[theme.RGB{R: c.Bg.R, G: c.Bg.G, B: c.Bg.B}] {
 							p.mu.Unlock()
 							t.Fatalf("%s: cell %d,%d carries background %+v, which is not a "+
 								"badge fill — the panel painted a background of its own",
@@ -994,7 +996,7 @@ func TestControlPanelImposesNoBackground(t *testing.T) {
 // so a palette swap is exactly the kind of change that can push a line over
 // the width if anything measures bytes instead of columns.
 func TestControlPanelRendersInBothPalettes(t *testing.T) {
-	for _, kind := range []themeKind{themeDark, themeLight} {
+	for _, kind := range []theme.Kind{theme.Dark, theme.Light} {
 		t.Run(kind.String(), func(t *testing.T) {
 			defer useTheme(kind)()
 			for _, cp := range []*ControlPanel{samplePanel(), routedPanel(4)} {
@@ -1040,9 +1042,9 @@ func TestControlPanelRendersInBothPalettes(t *testing.T) {
 
 	// The palettes have to actually differ, or the whole mechanism is inert.
 	cp := samplePanel()
-	defer useTheme(themeDark)()
+	defer useTheme(theme.Dark)()
 	dark := strings.Join(cp.frame(sampleFrameState(cp), cp.steplogOf(0), 80, 24), "\n")
-	setTheme(themeLight)
+	theme.Set(theme.Light)
 	light := strings.Join(cp.frame(sampleFrameState(cp), cp.steplogOf(0), 80, 24), "\n")
 	if dark == light {
 		t.Error("the light and dark frames are byte-identical; the palette is not being applied")
@@ -1157,8 +1159,8 @@ func TestControlPanelDump(t *testing.T) {
 	if os.Getenv("MAGMUX_PANEL_DUMP") == "" {
 		t.Skip("set MAGMUX_PANEL_DUMP=1 to print a frame for screenshotting")
 	}
-	if k, ok := themeWord(os.Getenv("MAGMUX_THEME")); ok && k == themeLight {
-		defer useTheme(themeLight)()
+	if k, ok := theme.Word(os.Getenv("MAGMUX_THEME")); ok && k == theme.Light {
+		defer useTheme(theme.Light)()
 	}
 	// No padding and no background: the panel is judged on the terminal it is
 	// dumped into, which is exactly how it is judged in use. Dumping it on a

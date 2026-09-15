@@ -1,4 +1,4 @@
-package mux
+package mcp
 
 // Session discovery for `magmux mcp`.
 //
@@ -29,9 +29,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/MadAppGang/magmux/sockdir"
 )
 
-// sockDir lives in sockdir.go now, alongside --sock-dir / MAGMUX_SOCK_DIR and
+// sockdir.Dir lives in sockdir.go now, alongside --sock-dir / MAGMUX_SOCK_DIR and
 // the startup reaper; the path itself is minted by Magmux.socketPath.
 
 // sockNamePattern matches both shapes: the pid default and a --id name. The
@@ -82,7 +84,7 @@ func discoverSessions(ctx context.Context, budget time.Duration) []SessionInfo {
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
-	entries, err := os.ReadDir(sockDir)
+	entries, err := os.ReadDir(sockdir.Dir)
 	if err != nil {
 		return nil
 	}
@@ -95,7 +97,7 @@ func discoverSessions(ctx context.Context, budget time.Duration) []SessionInfo {
 		if m == nil {
 			continue
 		}
-		path := filepath.Join(sockDir, e.Name())
+		path := filepath.Join(sockdir.Dir, e.Name())
 		info := SessionInfo{ID: m[1], SockPath: path}
 
 		// A pid-named socket can be checked for liveness before we dial: a

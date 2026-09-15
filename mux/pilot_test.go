@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/MadAppGang/magmux/pty"
 )
 
 // TestSendVerbReachesPane is the end-to-end proof that a controlled session
@@ -39,16 +41,16 @@ func TestSendVerbReachesPane(t *testing.T) {
 
 	binPath := magmuxBinForTest(t)
 
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Fatalf("openPTY: %v", err)
+		t.Fatalf("pty.Open: %v", err)
 	}
 	defer master.Close()
 	defer slave.Close()
 	// A freshly opened PTY reports 0x0, and magmux sizes its panes from the
 	// terminal — so without this every pane's screen is zero rows and the
 	// exit event's lastLine is empty no matter what the pane printed.
-	setWinSize(master, 24, 100)
+	pty.SetWinSize(master, 24, 100)
 
 	// The trailing sleep matters: the pane's exit event reports the last line
 	// on its *screen*, and the child's final write has to be read and parsed
@@ -174,15 +176,15 @@ func TestControlPaneDoesNotBlockAutoExit(t *testing.T) {
 	}
 
 	binPath := magmuxBinForTest(t)
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Fatalf("openPTY: %v", err)
+		t.Fatalf("pty.Open: %v", err)
 	}
 	defer master.Close()
 	defer slave.Close()
 	// A freshly opened PTY reports 0x0; without this magmux runs with zero-sized
 	// panes. See TestAutoExitNonTUIPane.
-	setWinSize(master, 24, 100)
+	pty.SetWinSize(master, 24, 100)
 
 	cmd := exec.Command(binPath, "-c", "-w", "-e", `sh -c "echo hi; sleep 0.5"`)
 	cmd.Stdin = slave

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/MadAppGang/magmux/theme"
 )
 
 // ── VT Parser ─────────────────────────────────────────────────────────────────
@@ -303,7 +305,7 @@ func colorQueryCode(osc string) (string, bool) {
 // grid mode and clears the completion state of a settled one — see replyLocked
 // for what each of those cost.
 func (vt *VTParser) answerColorQuery(code string) {
-	c, ok := terminalColor(code)
+	c, ok := theme.TerminalColor(code)
 	if !ok {
 		return
 	}
@@ -314,7 +316,7 @@ func (vt *VTParser) answerColorQuery(code string) {
 	if vt.oscTerm == 0x07 {
 		end = "\x07"
 	}
-	resp := "\x1b]" + code + ";" + xColorString(c) + end
+	resp := "\x1b]" + code + ";" + theme.XColorString(c) + end
 	if dbgFile != nil {
 		fmt.Fprintf(dbgFile, "[OSC] colour query %s → %q\n", code, resp)
 	}

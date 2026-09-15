@@ -10,7 +10,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"golang.org/x/sys/unix"
+	"github.com/MadAppGang/magmux/pty"
+	"github.com/MadAppGang/magmux/theme"
 )
 
 // ── Pane (NODE equivalent) ────────────────────────────────────────────────────
@@ -183,13 +184,13 @@ func newPaneFor(y, x, h, w int, cfg PaneConfig) (*Pane, error) {
 }
 
 func (p *Pane) spawnPTY(cfg PaneConfig) error {
-	ptmx, pts, err := openPTY()
+	ptmx, pts, err := pty.Open()
 	if err != nil {
 		return err
 	}
 
 	// Set initial size
-	setWinSize(ptmx, p.h, p.w)
+	pty.SetWinSize(ptmx, p.h, p.w)
 
 	cmd := exec.Command(cfg.Cmd, cfg.Args...)
 	cmd.Dir = cfg.Dir
@@ -221,7 +222,7 @@ func (p *Pane) spawnPTY(cfg PaneConfig) error {
 		// resolution chain, above the OSC 11 probe. That is the right answer:
 		// the inner magmux is looking at a PTY, not at the terminal, so the
 		// outer one's reading is better evidence than anything it can probe.
-		"MAGMUX_THEME="+currentTheme.String(),
+		"MAGMUX_THEME="+theme.Current.String(),
 	)
 	// Export socket path so children can discover it
 	if sockPath := os.Getenv("MAGMUX_SOCK"); sockPath != "" {
@@ -514,7 +515,7 @@ func (p *Pane) resize(y, x, h, w int) {
 		}
 		p.mu.Unlock()
 		if p.ptmx != nil {
-			setWinSize(p.ptmx, h, w)
+			pty.SetWinSize(p.ptmx, h, w)
 		}
 	} else {
 		p.reshapeChildren()
@@ -546,15 +547,6 @@ func (p *Pane) reshapeChildren() {
 		p.child1.resize(p.y, p.x, h1, w)
 		p.child2.resize(p.y+h1+1, p.x, h2, w)
 	}
-}
-
-// ── PTY helpers — see pty_darwin.go / pty_linux.go ────────────────────────────
-
-func setWinSize(f *os.File, rows, cols int) {
-	unix.IoctlSetWinsize(int(f.Fd()), unix.TIOCSWINSZ, &unix.Winsize{
-		Row: uint16(rows),
-		Col: uint16(cols),
-	})
 }
 
 // ── PaneConfig ────────────────────────────────────────────────────────────────

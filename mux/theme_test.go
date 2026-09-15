@@ -13,7 +13,6 @@ package mux
 //     against a light terminal is 1.3:1.
 
 import (
-	"bytes"
 	"fmt"
 	"math"
 	"os"
@@ -21,558 +20,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MadAppGang/magmux/theme"
 )
 
 // useTheme swaps the palette for the duration of a test and puts it back.
 // Tests do not run in parallel in this package (nothing calls t.Parallel), so
 // the global is safe to move.
-func useTheme(k themeKind) func() {
-	prev := currentTheme
-	setTheme(k)
-	return func() { setTheme(prev) }
-}
-
-// feedPipe returns a pipe whose read end is handed to the probe, and writes
-// `feed` into it. The write end is deliberately LEFT OPEN so an empty feed
-// means "the terminal never answered" rather than EOF — the timeout path is
-// the one that has to be proven bounded.
-func feedPipe(t *testing.T, feed string) *os.File {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	t.Cleanup(func() { r.Close(); w.Close() })
-	if feed != "" {
-		if _, err := w.Write([]byte(feed)); err != nil {
-			t.Fatalf("write feed: %v", err)
-		}
-	}
-	return r
-}
-
-// TestDetectThemeParsesOSC11 covers the reply shapes terminals really send:
-// both terminators, and components of 1, 2 and 4 hex digits.
-func TestDetectThemeParsesOSC11(t *testing.T) {
-	const timeout = 150 * time.Millisecond
-
-	cases := []struct {
-		name string
-		feed string
-		want themeKind
-	}{
-		{"mocha, BEL terminated", "\x1b]11;rgb:1e1e/1e1e/2e2e\x07", themeDark},
-		{"latte, ST terminated", "\x1b]11;rgb:efef/f1f1/f5f5\x1b\\", themeLight},
-		{"two hex digits, white", "\x1b]11;rgb:ff/ff/ff\x07", themeLight},
-		{"two hex digits, black", "\x1b]11;rgb:00/00/00\x07", themeDark},
-		{"one hex digit, white", "\x1b]11;rgb:f/f/f\x07", themeLight},
-		{"one hex digit, black", "\x1b]11;rgb:0/0/0\x07", themeDark},
-		{"three hex digits, solarized light", "\x1b]11;rgb:fdd/f66/e33\x1b\\", themeLight},
-		{"rgba, alpha ignored", "\x1b]11;rgba:ffff/ffff/ffff/ffff\x07", themeLight},
-		{"unparseable body", "\x1b]11;banana\x07", themeDark},
-		{"not a reply at all", "hello", themeDark},
-		{"no reply", "", themeDark},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			in := feedPipe(t, tc.feed)
-			var out bytes.Buffer
-
-			start := time.Now()
-			got, _ := probeTheme(&out, in, timeout)
-			elapsed := time.Since(start)
-
-			if got != tc.want {
-				t.Errorf("classified %q as %s, want %s", tc.feed, got, tc.want)
-			}
-			if out.String() != osc11Query {
-				t.Errorf("wrote %q to the terminal, want the OSC 11 query %q", out.String(), osc11Query)
-			}
-			// "Never block longer than the timeout, even if the terminal
-			// replies with a partial sequence." The slack is for a loaded
-			// machine, not for a second timeout.
-			if elapsed > 3*timeout {
-				t.Errorf("probe took %v with a %v timeout", elapsed, timeout)
-			}
-		})
-	}
-}
-
-// TestDetectThemePreservesNonReplyBytes is the important one.
-//
-// The probe reads stdin. Everything the user typed while the terminal was
-// thinking arrives on the same fd, interleaved with (or instead of) the reply,
-// and every one of those bytes has to come back out for the input loop, in
-// order. magmux's own PTY-driven tests type into the binary within
-// milliseconds of start, so this is not a theoretical case: dropping here
-// breaks them, and breaks real typing the same way.
-func TestDetectThemePreservesNonReplyBytes(t *testing.T) {
-	const (
-		timeout = 150 * time.Millisecond
-		reply   = "\x1b]11;rgb:1e1e/1e1e/2e2e\x07"
-	)
-
-	cases := []struct {
-		name string
-		feed string
-		want string
-		kind themeKind
-	}{
-		{"keystroke before the reply", "q" + reply, "q", themeDark},
-		{"keystroke after the reply", reply + "\x1b[A", "\x1b[A", themeDark},
-		{"keystrokes either side", "ab" + reply + "cd", "abcd", themeDark},
-		{"a whole chord around a light reply",
-			"\x07q" + "\x1b]11;rgb:efef/f1f1/f5f5\x1b\\" + "\x1b[B",
-			"\x07q\x1b[B", themeLight},
-		{"no reply, only keystrokes", "hello world", "hello world", themeDark},
-		{"reply we cannot parse still yields the keys", "x" + "\x1b]11;banana\x07" + "y", "xy", themeDark},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			in := feedPipe(t, tc.feed)
-			kind, rest := probeTheme(&bytes.Buffer{}, in, timeout)
-			if kind != tc.kind {
-				t.Errorf("theme = %s, want %s", kind, tc.kind)
-			}
-			if string(rest) != tc.want {
-				t.Errorf("probe returned %q for the input loop, want %q\n"+
-					"bytes the probe read that were not the reply are keystrokes; "+
-					"losing them means magmux eats input at startup",
-					string(rest), tc.want)
-			}
-		})
-	}
-
-	// Split across reads: the keystroke lands after the query has gone out but
-	// before the terminal answers, which is exactly the real interleaving.
-	t.Run("split across reads", func(t *testing.T) {
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatalf("pipe: %v", err)
-		}
-		defer r.Close()
-		defer w.Close()
-		go func() {
-			w.Write([]byte("q"))
-			time.Sleep(10 * time.Millisecond)
-			w.Write([]byte(reply[:6]))
-			time.Sleep(10 * time.Millisecond)
-			w.Write([]byte(reply[6:]))
-			w.Write([]byte("Z"))
-		}()
-		kind, rest := probeTheme(&bytes.Buffer{}, r, timeout)
-		if kind != themeDark {
-			t.Errorf("theme = %s, want dark", kind)
-		}
-		if string(rest) != "q" && string(rest) != "qZ" {
-			// "Z" may or may not have arrived in the same read as the
-			// terminator; either way "q" must survive and must come first.
-			t.Errorf("probe returned %q, want the keystrokes in order", string(rest))
-		}
-	})
-
-	// A truncated reply is the one thing that is NOT handed back: it starts
-	// with ESC, and an ESC replayed into a finished grid is the quit key.
-	t.Run("truncated reply is dropped, keystrokes are not", func(t *testing.T) {
-		in := feedPipe(t, "q\x1b]11;rgb:1e1e/1e")
-		_, rest := probeTheme(&bytes.Buffer{}, in, timeout)
-		if string(rest) != "q" {
-			t.Errorf("probe returned %q, want just the keystroke %q", string(rest), "q")
-		}
-	})
-}
-
-// TestThemeOverrideSkipsProbe pins the escape hatch. An explicit setting exists
-// for terminals that answer OSC 11 wrongly, so it must not ask them: nothing
-// written, nothing read.
-func TestThemeOverrideSkipsProbe(t *testing.T) {
-	probed := 0
-	probe := func() themeProbeResult {
-		probed++
-		return themeProbeResult{kind: themeDark, ok: true}
-	}
-
-	t.Run("env light", func(t *testing.T) {
-		t.Setenv("MAGMUX_THEME", "light")
-		probed = 0
-		res := resolveTheme(themeInputs{env: os.Getenv("MAGMUX_THEME")}, probe)
-		if res.kind != themeLight {
-			t.Errorf("MAGMUX_THEME=light gave %s", res.kind)
-		}
-		if probed != 0 {
-			t.Errorf("probed the terminal %d times despite an explicit setting", probed)
-		}
-		if len(res.leftover) != 0 {
-			t.Errorf("an unprobed terminal produced %q of leftover input", res.leftover)
-		}
-	})
-
-	t.Run("env dark", func(t *testing.T) {
-		t.Setenv("MAGMUX_THEME", "dark")
-		probed = 0
-		if res := resolveTheme(themeInputs{env: os.Getenv("MAGMUX_THEME")}, probe); res.kind != themeDark {
-			t.Errorf("MAGMUX_THEME=dark gave %s", res.kind)
-		}
-		if probed != 0 {
-			t.Errorf("probed the terminal %d times despite an explicit setting", probed)
-		}
-	})
-
-	t.Run("flag beats env", func(t *testing.T) {
-		t.Setenv("MAGMUX_THEME", "dark")
-		probed = 0
-		if res := resolveTheme(themeInputs{flag: "light", env: os.Getenv("MAGMUX_THEME")}, probe); res.kind != themeLight {
-			t.Error("--theme light did not override MAGMUX_THEME=dark")
-		}
-		if probed != 0 {
-			t.Errorf("probed the terminal %d times despite an explicit setting", probed)
-		}
-	})
-
-	// Five calls in four subtests: two of them here. No termTheme and no
-	// colorFGBG in the inputs, so the developer's shell cannot leak in.
-	t.Run("auto probes, and a typo falls back to auto", func(t *testing.T) {
-		t.Setenv("MAGMUX_THEME", "")
-		probed = 0
-		resolveTheme(themeInputs{}, probe)
-		resolveTheme(themeInputs{flag: "banana", env: "chartreuse"}, probe)
-		if probed != 2 {
-			t.Errorf("auto probed %d times, want 2", probed)
-		}
-		if validThemeSetting("banana") {
-			t.Error("banana is not a theme")
-		}
-	})
-
-	// themeWord is the one normaliser. Only light and dark are answers; auto,
-	// empty and garbage are all the same "no opinion".
-	t.Run("words normalise", func(t *testing.T) {
-		for in, want := range map[string]struct {
-			kind themeKind
-			ok   bool
-		}{
-			"":       {themeDark, false},
-			"LIGHT":  {themeLight, true},
-			" dark ": {themeDark, true},
-			"auto":   {themeDark, false},
-			"nope":   {themeDark, false},
-		} {
-			got, ok := themeWord(in)
-			if ok != want.ok || (ok && got != want.kind) {
-				t.Errorf("themeWord(%q) = (%s, %v), want (%s, %v)", in, got, ok, want.kind, want.ok)
-			}
-		}
-	})
-}
-
-// TestResolveThemeOrder is the whole order as one table:
-//
-//	--theme > MAGMUX_THEME > TERM_THEME > OSC 11 probe > COLORFGBG > dark
-//
-// Pure — no environment, no tty. Each row says who answered, not just what.
-func TestResolveThemeOrder(t *testing.T) {
-	latte := rgb{0xEF, 0xF1, 0xF5}
-	mocha := rgb{0x1E, 0x1E, 0x2E}
-	type probeStub int
-	const (
-		probeNone   probeStub = iota // nil: cannot ask
-		probeLight                   // answers light
-		probeDark                    // answers dark
-		probeSilent                  // ran, no answer, but read a keystroke
-	)
-	cases := []struct {
-		name           string
-		flag, env      string
-		termTheme      string
-		probe          probeStub
-		colorFGBG      string
-		wantKind       themeKind
-		wantSource     themeSource
-		wantProbeCalls int
-	}{
-		{"flag beats all", "light", "dark", "dark", probeLight, "15;0", themeLight, themeSourceFlag, 0},
-		{"flag auto is no opinion", "auto", "dark", "light", probeLight, "", themeDark, themeSourceEnv, 0},
-		{"flag garbage falls to env", "banana", "light", "", probeNone, "", themeLight, themeSourceEnv, 0},
-		{"env auto falls to TERM_THEME", "", "auto", "light", probeDark, "15;0", themeLight, themeSourceTermTheme, 0},
-		{"TERM_THEME is case-insensitive and skips the probe", "", "", "DARK", probeLight, "0;15", themeDark, themeSourceTermTheme, 0},
-		{"TERM_THEME is trimmed", "", "", " Light\t", probeDark, "", themeLight, themeSourceTermTheme, 0},
-		{"TERM_THEME auto probes", "", "", "auto", probeLight, "", themeLight, themeSourceProbe, 1},
-		{"TERM_THEME garbage probes, probe beats COLORFGBG", "", "", "system", probeDark, "0;15", themeDark, themeSourceProbe, 1},
-		{"silent probe falls to COLORFGBG", "", "", "", probeSilent, "0;15", themeLight, themeSourceColorFGBG, 1},
-		{"nil probe falls to COLORFGBG light", "", "", "", probeNone, "0;15", themeLight, themeSourceColorFGBG, 0},
-		{"nil probe falls to COLORFGBG dark", "", "", "", probeNone, "15;0", themeDark, themeSourceColorFGBG, 0},
-		{"silent probe, garbage COLORFGBG, default", "", "", "", probeSilent, "garbage", themeDark, themeSourceDefault, 1},
-		{"nothing at all", "", "", "", probeNone, "", themeDark, themeSourceDefault, 0},
-		{"auto at all three word levels falls to COLORFGBG", "AUTO", "AUTO", "AUTO", probeNone, "0;15", themeLight, themeSourceColorFGBG, 0},
-		{"answered probe beats a contradicting COLORFGBG", "", "", "", probeLight, "15;0", themeLight, themeSourceProbe, 1},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			calls := 0
-			var probe func() themeProbeResult
-			switch c.probe {
-			case probeLight:
-				probe = func() themeProbeResult {
-					calls++
-					return themeProbeResult{kind: themeLight, color: latte, ok: true}
-				}
-			case probeDark:
-				probe = func() themeProbeResult {
-					calls++
-					return themeProbeResult{kind: themeDark, color: mocha, ok: true}
-				}
-			case probeSilent:
-				probe = func() themeProbeResult {
-					calls++
-					return themeProbeResult{ok: false, leftover: []byte("q")}
-				}
-			}
-			in := themeInputs{flag: c.flag, env: c.env, termTheme: c.termTheme, colorFGBG: c.colorFGBG}
-			res := resolveTheme(in, probe)
-			if res.kind != c.wantKind || res.source != c.wantSource {
-				t.Errorf("got %s via %s, want %s via %s", res.kind, res.source, c.wantKind, c.wantSource)
-			}
-			if calls != c.wantProbeCalls {
-				t.Errorf("probe called %d times, want %d", calls, c.wantProbeCalls)
-			}
-			if res.probeRan != (calls > 0) {
-				t.Errorf("probeRan=%v with %d calls", res.probeRan, calls)
-			}
-			if res.probedOK != (res.source == themeSourceProbe) {
-				t.Errorf("probedOK=%v but source=%s", res.probedOK, res.source)
-			}
-			if res.probedOK {
-				want := latte
-				if c.probe == probeDark {
-					want = mocha
-				}
-				if res.probed != want {
-					t.Errorf("probed colour %v, want %v", res.probed, want)
-				}
-			}
-			switch {
-			case c.probe == probeSilent && calls > 0:
-				// Keystrokes survive a probe that fell through.
-				if string(res.leftover) != "q" {
-					t.Errorf("leftover %q, want the keystroke %q", res.leftover, "q")
-				}
-			case calls == 0:
-				if res.leftover != nil {
-					t.Errorf("leftover %q from a probe that never ran", res.leftover)
-				}
-			}
-		})
-	}
-}
-
-// TestClassifyColorFGBG: rxvt/konsole's "fg;bg" or "fg;x;bg". The last field is
-// the background; 0-6 and 8 are dark, 7 and 9-15 light; everything else is no
-// opinion.
-func TestClassifyColorFGBG(t *testing.T) {
-	cases := []struct {
-		in   string
-		kind themeKind
-		ok   bool
-	}{
-		{"15;0", themeDark, true},
-		{"0;15", themeLight, true},
-		{"7;0", themeDark, true},
-		{"0;7", themeLight, true},
-		{"0;8", themeDark, true},
-		{"0;9", themeLight, true},
-		{"0;6", themeDark, true},
-		{"0;7;15", themeLight, true},
-		{"15;default;8", themeDark, true},
-		{"15;default;0", themeDark, true},
-		{"0;default;15", themeLight, true},
-		{" 0;15 ", themeLight, true},
-		{"0; 15", themeLight, true},
-		{"default;default", themeDark, false},
-		{"0;16", themeDark, false},
-		{"0;255", themeDark, false},
-		{"0;-1", themeDark, false},
-		{"0", themeDark, false},
-		{"0;1;2;3", themeDark, false},
-		{"", themeDark, false},
-		{";", themeDark, false},
-		{"0;", themeDark, false},
-		{"garbage", themeDark, false},
-	}
-	for _, c := range cases {
-		got, ok := classifyColorFGBG(c.in)
-		if ok != c.ok || (ok && got != c.kind) {
-			t.Errorf("classifyColorFGBG(%q) = (%s, %v), want (%s, %v)", c.in, got, ok, c.kind, c.ok)
-		}
-	}
-}
-
-// TestTermThemeSkipsProbe proves FR1 at the byte level: with TERM_THEME set,
-// the probe closure is never invoked, so nothing is written to the terminal
-// and the reply a would-be terminal had ready is still sitting in the pipe.
-func TestTermThemeSkipsProbe(t *testing.T) {
-	t.Setenv("TERM_THEME", "dark")
-	const latteReply = "\x1b]11;rgb:efef/f1f1/f5f5\x1b\\"
-	in := feedPipe(t, latteReply)
-	var out bytes.Buffer
-	probe := func() themeProbeResult {
-		k, c, ok, rest := probeThemeColor(&out, in, 150*time.Millisecond)
-		return themeProbeResult{kind: k, color: c, ok: ok, leftover: rest}
-	}
-	res := resolveTheme(themeInputs{termTheme: os.Getenv("TERM_THEME")}, probe)
-	if res.kind != themeDark || res.source != themeSourceTermTheme {
-		t.Fatalf("got %s via %s, want dark via TERM_THEME", res.kind, res.source)
-	}
-	if out.Len() != 0 {
-		t.Errorf("TERM_THEME set, yet %d bytes were written to the terminal: %q", out.Len(), out.String())
-	}
-	if res.leftover != nil {
-		t.Errorf("leftover %q from a probe that must not have run", res.leftover)
-	}
-	if res.probeRan {
-		t.Error("probeRan is set")
-	}
-	// The reply is unread: the pipe is readable and gives back the Latte reply
-	// intact, which it could not if the probe had consumed it.
-	ready, err := waitReadable(int(in.Fd()), time.Now().Add(50*time.Millisecond))
-	if err != nil || !ready {
-		t.Fatalf("the terminal's reply is no longer in the pipe (ready=%v err=%v)", ready, err)
-	}
-	buf := make([]byte, 64)
-	n, _ := in.Read(buf)
-	if string(buf[:n]) != latteReply {
-		t.Errorf("pipe held %q, want the untouched reply %q", buf[:n], latteReply)
-	}
-}
-
-// ── contrast ─────────────────────────────────────────────────────────────────
-
-// wcagLuminance is the WCAG 2.x relative luminance: sRGB linearised, then
-// weighted. Distinct from screenLuminance, which classifies a background and
-// deliberately does not linearise — see the comment there.
-func wcagLuminance(c rgb) float64 {
-	lin := func(v uint8) float64 {
-		s := float64(v) / 255
-		if s <= 0.03928 {
-			return s / 12.92
-		}
-		return math.Pow((s+0.055)/1.055, 2.4)
-	}
-	return 0.2126*lin(c.r) + 0.7152*lin(c.g) + 0.0722*lin(c.b)
-}
-
-// contrastRatio is WCAG's (L1+0.05)/(L2+0.05), lighter over darker.
-func contrastRatio(a, b rgb) float64 {
-	la, lb := wcagLuminance(a), wcagLuminance(b)
-	if la < lb {
-		la, lb = lb, la
-	}
-	return (la + 0.05) / (lb + 0.05)
-}
-
-// TestPaletteContrast is the test that would have caught the reported bug.
-//
-// Every foreground has to be legible on the background it is actually drawn
-// on, and since magmux stopped painting a background of its own that is TWO
-// backgrounds, not one:
-//
-//   - assumedBack — the terminal this palette is for. magmux never paints it;
-//     it is where nearly every glyph magmux writes actually lands, so it is the
-//     yardstick. A light palette is used on a light terminal, so that is what
-//     its foregrounds are measured against.
-//   - bar — the status bar's background, which magmux does paint, and where
-//     the same foregrounds land instead.
-//
-// Body text and data carry the WCAG 4.5:1 bar; chrome — rules, labels,
-// timestamps — is held to 3:1, which is low enough to still recede and high
-// enough to exist. `ink` is measured against every colour a badge is filled
-// with, because that is the only place it appears — and a badge's fill is one
-// of the two backgrounds magmux legitimately chooses.
-func TestPaletteContrast(t *testing.T) {
-	const (
-		bodyMin   = 4.5
-		chromeMin = 3.0
-	)
-
-	for _, tc := range []struct {
-		name string
-		p    palette
-	}{{"dark", darkPalette}, {"light", lightPalette}} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := tc.p
-			body := map[string]rgb{
-				"text":    p.text,
-				"success": p.success,
-				"running": p.running,
-				"warn":    p.warn,
-				"fail":    p.fail,
-				"accent":  p.accent,
-			}
-			chrome := map[string]rgb{
-				"subtle": p.subtle,
-				"debug":  p.debug,
-				"dead":   p.dead,
-				"border": p.border,
-			}
-			backs := map[string]rgb{
-				"the terminal background this palette assumes": p.assumedBack,
-				"the status bar's own background":              p.bar,
-			}
-			for where, back := range backs {
-				for name, c := range body {
-					if got := contrastRatio(c, back); got < bodyMin {
-						t.Errorf("%s on %s is %.2f:1, want >= %.1f:1",
-							name, where, got, bodyMin)
-					}
-				}
-				for name, c := range chrome {
-					if got := contrastRatio(c, back); got < chromeMin {
-						t.Errorf("%s on %s is %.2f:1, want >= %.1f:1",
-							name, where, got, chromeMin)
-					}
-				}
-			}
-			// badge() and the status bar's pills fill with a state colour and
-			// write ink on top; every one of those fills is a background for
-			// ink, and they are the ONLY backgrounds magmux imposes.
-			for name, c := range map[string]rgb{
-				"success": p.success, "running": p.running, "warn": p.warn,
-				"fail": p.fail, "accent": p.accent, "subtle": p.subtle, "dead": p.dead,
-			} {
-				if got := contrastRatio(p.ink, c); got < bodyMin {
-					t.Errorf("badge ink on %s is %.2f:1, want >= %.1f:1", name, got, bodyMin)
-				}
-			}
-			// The hierarchy the panel is designed around: chrome recedes
-			// relative to body text, and rules recede relative to labels.
-			if contrastRatio(p.border, p.assumedBack) > contrastRatio(p.subtle, p.assumedBack) {
-				t.Error("rules are louder than labels; the chrome hierarchy is inverted")
-			}
-			if contrastRatio(p.subtle, p.assumedBack) > contrastRatio(p.text, p.assumedBack) {
-				t.Error("labels are louder than body text; the hierarchy is inverted")
-			}
-			// The bar is the one surface magmux fills, so it has to belong to
-			// the theme it is filled for — not merely be legible. A dark slab
-			// on a light terminal is the bug this replaced.
-			if (screenLuminance(p.bar) >= lightThreshold) !=
-				(screenLuminance(p.assumedBack) >= lightThreshold) {
-				t.Errorf("the %s theme's status bar is on the wrong side of the "+
-					"light/dark line from the terminal it is drawn in", tc.name)
-			}
-		})
-	}
-
-	// And the bug itself, stated as an assertion: the palette magmux always
-	// shipped is unreadable on a light terminal. This is why there are two.
-	if got := contrastRatio(darkPalette.text, lightPalette.assumedBack); got >= 4.5 {
-		t.Errorf("dark body text on a light background is %.2f:1 — if that is now "+
-			"legible, the palettes have drifted and this test has stopped meaning anything", got)
-	}
-	if got := contrastRatio(lightPalette.text, darkPalette.assumedBack); got >= 4.5 {
-		t.Errorf("light body text on a dark background is %.2f:1 — the two palettes "+
-			"are supposed to be non-interchangeable in both directions", got)
-	}
+func useTheme(k theme.Kind) func() {
+	prev := theme.Current
+	theme.Set(k)
+	return func() { theme.Set(prev) }
 }
 
 // ── the completion marker ─────────────────────────────────────────────────────
@@ -611,7 +69,7 @@ func replay(frame string, h, w int) *Pane {
 func TestTintDoesNotTouchThePaneInterior(t *testing.T) {
 	const h, w = 6, 24
 
-	for _, kind := range []themeKind{themeDark, themeLight} {
+	for _, kind := range []theme.Kind{theme.Dark, theme.Light} {
 		t.Run(kind.String(), func(t *testing.T) {
 			defer useTheme(kind)()
 
@@ -641,7 +99,7 @@ func TestTintDoesNotTouchThePaneInterior(t *testing.T) {
 // readable. It asserts on the cells a terminal would end up with, not on bytes.
 func TestTintedPaneKeepsTheChildsForeground(t *testing.T) {
 	const h, w = 4, 20
-	defer useTheme(themeLight)()
+	defer useTheme(theme.Light)()
 
 	p := newControlPane(0, 0, h, w, "leaf")
 	p.vt.write([]byte("\x1b[38;2;205;214;244mDONE-MARKER"))
@@ -672,7 +130,7 @@ func TestTintedPaneKeepsTheChildsForeground(t *testing.T) {
 // rule is it, and it is a foreground on the terminal's own background, so it
 // works on any terminal.
 func TestTintColoursTheBorder(t *testing.T) {
-	for _, kind := range []themeKind{themeDark, themeLight} {
+	for _, kind := range []theme.Kind{theme.Dark, theme.Light} {
 		t.Run(kind.String(), func(t *testing.T) {
 			defer useTheme(kind)()
 
@@ -689,17 +147,17 @@ func TestTintColoursTheBorder(t *testing.T) {
 
 			for _, tc := range []struct {
 				l, r string
-				want rgb
+				want theme.RGB
 				why  string
 			}{
-				{"", "", pal.border, "untinted panes get the palette's rule colour"},
-				{"green", "", pal.success, "a finished pane"},
-				{"", "green", pal.success, "…on either side of the split"},
-				{"red", "", pal.fail, "a failed pane"},
-				{"yellow", "", pal.warn, "a pane blocked on a permission prompt"},
-				{"green", "red", pal.fail, "the loudest tint wins, whichever side it is on"},
-				{"red", "green", pal.fail, "…and the old code took child1's, hiding it"},
-				{"green", "yellow", pal.warn, "amber outranks green"},
+				{"", "", theme.Pal.Border, "untinted panes get the palette's rule colour"},
+				{"green", "", theme.Pal.Success, "a finished pane"},
+				{"", "green", theme.Pal.Success, "…on either side of the split"},
+				{"red", "", theme.Pal.Fail, "a failed pane"},
+				{"yellow", "", theme.Pal.Warn, "a pane blocked on a permission prompt"},
+				{"green", "red", theme.Pal.Fail, "the loudest tint wins, whichever side it is on"},
+				{"red", "green", theme.Pal.Fail, "…and the old code took child1's, hiding it"},
+				{"green", "yellow", theme.Pal.Warn, "amber outranks green"},
 			} {
 				set(left, tc.l)
 				set(right, tc.r)
@@ -720,7 +178,7 @@ func TestTintColoursTheBorder(t *testing.T) {
 			r.renderBorder(split)
 			frame := r.frame()
 			if !strings.Contains(frame, fmt.Sprintf(";38;2;%d;%d;%dm",
-				pal.success.r, pal.success.g, pal.success.b)) {
+				theme.Pal.Success.R, theme.Pal.Success.G, theme.Pal.Success.B)) {
 				t.Errorf("the border frame does not carry the success colour: %q", frame)
 			}
 			if strings.Contains(frame, "\x1b[0;2;") || strings.Contains(frame, "\x1b[0;2m") {
@@ -739,7 +197,7 @@ func TestTintColoursTheBorder(t *testing.T) {
 func TestStatusBarFollowsThePalette(t *testing.T) {
 	const text = "*: magmux\tP: 2/3 done\tY: 1 running\tM: 1m 4s\tD: ctrl-g q quit"
 
-	render := func(kind themeKind) string {
+	render := func(kind theme.Kind) string {
 		defer useTheme(kind)()
 		var r Renderer
 		r.reset()
@@ -747,7 +205,7 @@ func TestStatusBarFollowsThePalette(t *testing.T) {
 		return r.frame()
 	}
 
-	dark, light := render(themeDark), render(themeLight)
+	dark, light := render(theme.Dark), render(theme.Light)
 
 	if dark == light {
 		t.Error("the status bar is byte-identical in both themes; it is not reading the palette")
@@ -756,16 +214,16 @@ func TestStatusBarFollowsThePalette(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		frame string
-		p     palette
-	}{{"dark", dark, darkPalette}, {"light", light, lightPalette}} {
+		p     theme.Palette
+	}{{"dark", dark, theme.DarkPalette}, {"light", light, theme.LightPalette}} {
 		t.Run(tc.name, func(t *testing.T) {
 			must := map[string]string{
-				"the bar's own background": bg(tc.p.bar),
-				"the accent label":         fg(tc.p.accent),
-				"the success pill":         bg(tc.p.success),
-				"the warning colour":       fg(tc.p.warn),
-				"the help text":            fg(tc.p.subtle),
-				"the divider rule":         fg(tc.p.border),
+				"the bar's own background": theme.Bg(tc.p.Bar),
+				"the accent label":         theme.Fg(tc.p.Accent),
+				"the success pill":         theme.Bg(tc.p.Success),
+				"the warning colour":       theme.Fg(tc.p.Warn),
+				"the help text":            theme.Fg(tc.p.Subtle),
+				"the divider rule":         theme.Fg(tc.p.Border),
 			}
 			for what, seq := range must {
 				if !strings.Contains(tc.frame, seq) {
@@ -814,46 +272,46 @@ func TestStatusBarFollowsThePalette(t *testing.T) {
 
 // xterm256 resolves an indexed colour to what a terminal actually shows: the 16
 // system colours, the 6x6x6 cube, and the 24-step grey ramp.
-func xterm256(i int) (rgb, bool) {
+func xterm256(i int) (theme.RGB, bool) {
 	switch {
 	case i < 0 || i > 255:
-		return rgb{}, false
+		return theme.RGB{}, false
 	case i < 16:
-		sys := []rgb{
-			{0, 0, 0}, {128, 0, 0}, {0, 128, 0}, {128, 128, 0},
-			{0, 0, 128}, {128, 0, 128}, {0, 128, 128}, {192, 192, 192},
-			{128, 128, 128}, {255, 0, 0}, {0, 255, 0}, {255, 255, 0},
-			{0, 0, 255}, {255, 0, 255}, {0, 255, 255}, {255, 255, 255},
+		sys := []theme.RGB{
+			{R: 0, G: 0, B: 0}, {R: 128, G: 0, B: 0}, {R: 0, G: 128, B: 0}, {R: 128, G: 128, B: 0},
+			{R: 0, G: 0, B: 128}, {R: 128, G: 0, B: 128}, {R: 0, G: 128, B: 128}, {R: 192, G: 192, B: 192},
+			{R: 128, G: 128, B: 128}, {R: 255, G: 0, B: 0}, {R: 0, G: 255, B: 0}, {R: 255, G: 255, B: 0},
+			{R: 0, G: 0, B: 255}, {R: 255, G: 0, B: 255}, {R: 0, G: 255, B: 255}, {R: 255, G: 255, B: 255},
 		}
 		return sys[i], true
 	case i < 232:
 		lv := []uint8{0, 95, 135, 175, 215, 255}
 		i -= 16
-		return rgb{lv[i/36], lv[(i/6)%6], lv[i%6]}, true
+		return theme.RGB{R: lv[i/36], G: lv[(i/6)%6], B: lv[i%6]}, true
 	default:
 		v := uint8(8 + (i-232)*10)
-		return rgb{v, v, v}, true
+		return theme.RGB{R: v, G: v, B: v}, true
 	}
 }
 
 // cellRGB resolves half a rendered cell to a colour, reporting whether the cell
 // set that half AT ALL. A cell that did not is showing whatever was in force
 // underneath it — which, for an overlay, is the child's output.
-func cellRGB(c Color) (rgb, bool) {
+func cellRGB(c Color) (theme.RGB, bool) {
 	if c.True {
-		return rgb{c.R, c.G, c.B}, true
+		return theme.RGB{R: c.R, G: c.G, B: c.B}, true
 	}
 	if c.Index >= 0 {
 		return xterm256(int(c.Index))
 	}
-	return rgb{}, false
+	return theme.RGB{}, false
 }
 
 // The child's own colours, chosen to be in neither palette so that a cell
 // wearing them can only have inherited them.
 var (
-	childFg = rgb{0xFF, 0x00, 0xFF}
-	childBg = rgb{0x00, 0x80, 0x80}
+	childFg = theme.RGB{R: 0xFF, G: 0x00, B: 0xFF}
+	childBg = theme.RGB{R: 0x00, G: 0x80, B: 0x80}
 )
 
 // overlayCells renders a pane twice — once with the overlay, once without — and
@@ -868,7 +326,7 @@ func overlayCells(t *testing.T, style string, h, w int) []Cell {
 		// A child that has painted every cell in colours of its own. The
 		// overlay lands on top of this, and every half-cell it fails to set is
 		// a half-cell of the child's showing through.
-		p.vt.write([]byte(fg(childFg) + bg(childBg) + strings.Repeat("x", h*w-1)))
+		p.vt.write([]byte(theme.Fg(childFg) + theme.Bg(childBg) + strings.Repeat("x", h*w-1)))
 		p.overlayText = text
 		p.overlayStyle = style
 		return p
@@ -915,7 +373,7 @@ func TestOverlayContrast(t *testing.T) {
 		surfaceMax = 3.0 // a panel magmux paints is a shade of the terminal
 	)
 
-	for _, kind := range []themeKind{themeDark, themeLight} {
+	for _, kind := range []theme.Kind{theme.Dark, theme.Light} {
 		for _, style := range []string{"success", "error"} {
 			t.Run(kind.String()+"/"+style, func(t *testing.T) {
 				defer useTheme(kind)()
@@ -935,7 +393,7 @@ func TestOverlayContrast(t *testing.T) {
 					t.Run(box.name, func(t *testing.T) {
 						cells := overlayCells(t, style, box.h, box.w)
 
-						darkestBg := rgb{0xFF, 0xFF, 0xFF}
+						darkestBg := theme.RGB{R: 0xFF, G: 0xFF, B: 0xFF}
 						for _, c := range cells {
 							f, okF := cellRGB(c.Fg)
 							b, okB := cellRGB(c.Bg)
@@ -959,23 +417,23 @@ func TestOverlayContrast(t *testing.T) {
 								}
 							}
 							if box.isBox {
-								if got := contrastRatio(b, pal.assumedBack); got > surfaceMax {
+								if got := contrastRatio(b, theme.Pal.AssumedBack); got > surfaceMax {
 									t.Errorf("the overlay paints %+v, which is %.2f:1 against "+
 										"this theme's terminal background — a slab, not a "+
 										"surface belonging to it", b, got)
 								}
-								if screenLuminance(b) < screenLuminance(darkestBg) {
+								if theme.ScreenLuminance(b) < theme.ScreenLuminance(darkestBg) {
 									darkestBg = b
 								}
 							}
 						}
 						if box.isBox &&
-							screenLuminance(darkestBg) >= screenLuminance(pal.assumedBack) {
+							theme.ScreenLuminance(darkestBg) >= theme.ScreenLuminance(theme.Pal.AssumedBack) {
 							// The darkest thing the box paints is its shadow.
 							t.Errorf("the drop shadow (%+v, luminance %.3f) is not darker than "+
 								"the terminal it falls on (%+v, %.3f) — that is a highlight",
-								darkestBg, screenLuminance(darkestBg),
-								pal.assumedBack, screenLuminance(pal.assumedBack))
+								darkestBg, theme.ScreenLuminance(darkestBg),
+								theme.Pal.AssumedBack, theme.ScreenLuminance(theme.Pal.AssumedBack))
 						}
 					})
 				}
@@ -988,7 +446,7 @@ func TestOverlayContrast(t *testing.T) {
 // the overlay must READ the palette, which means it cannot be byte-identical in
 // the two themes and cannot contain an indexed colour at all.
 func TestOverlayFollowsThePalette(t *testing.T) {
-	render := func(kind themeKind, style string) string {
+	render := func(kind theme.Kind, style string) string {
 		defer useTheme(kind)()
 		p := newControlPane(0, 0, 12, 40, "leaf")
 		p.overlayText = "✓ DONE\ntook 30.2s\n42 tests passed"
@@ -997,7 +455,7 @@ func TestOverlayFollowsThePalette(t *testing.T) {
 	}
 
 	for _, style := range []string{"success", "error", "info", ""} {
-		dark, light := render(themeDark, style), render(themeLight, style)
+		dark, light := render(theme.Dark, style), render(theme.Light, style)
 		if dark == light {
 			t.Errorf("the %q overlay is byte-identical in both themes; it is not reading "+
 				"the palette", style)
@@ -1256,165 +714,6 @@ func TestOSC11ShapedInputOutsideTheWindowIsForwarded(t *testing.T) {
 	}
 }
 
-// ── resolution order: the gaps the table does not state on its own ───────────
-
-// TestThemeWord is the section-3.1 normalisation table for the three
-// word-valued inputs. Only light and dark are answers; auto, empty and garbage
-// are all one "no opinion". Without the feature, auto came back ok==true as a
-// third value (the old themeSetting), and this reports themeWord("auto") =
-// (_, true).
-func TestThemeWord(t *testing.T) {
-	cases := []struct {
-		in   string
-		kind themeKind
-		ok   bool
-	}{
-		{"light", themeLight, true},
-		{"Light", themeLight, true},
-		{" LIGHT ", themeLight, true},
-		{"dark", themeDark, true},
-		{"DARK", themeDark, true},
-		{"dark\t", themeDark, true},
-		{"auto", themeDark, false},
-		{"AUTO", themeDark, false},
-		{"", themeDark, false},
-		{"system", themeDark, false},
-		{"banana", themeDark, false},
-		{"1", themeDark, false},
-		{"lightish", themeDark, false},
-		{"light dark", themeDark, false},
-	}
-	for _, c := range cases {
-		got, ok := themeWord(c.in)
-		if ok != c.ok || (ok && got != c.kind) {
-			t.Errorf("themeWord(%q) = (%s, %v), want (%s, %v)", c.in, got, ok, c.kind, c.ok)
-		}
-	}
-}
-
-// TestResolveThemeNeverCallsProbeWhenAWordAnswered is FR1's "the probe must
-// not run" stated independently of the order table: for each word level a
-// probe that fails the test outright. Without the TERM_THEME step the third
-// case reports "probe invoked although TERM_THEME=dark answered".
-func TestResolveThemeNeverCallsProbeWhenAWordAnswered(t *testing.T) {
-	cases := []struct {
-		name string
-		in   themeInputs
-		want themeSource
-		kind themeKind
-	}{
-		{"--theme dark", themeInputs{flag: "dark"}, themeSourceFlag, themeDark},
-		{"MAGMUX_THEME=light", themeInputs{env: "light"}, themeSourceEnv, themeLight},
-		{"TERM_THEME=dark", themeInputs{termTheme: "dark"}, themeSourceTermTheme, themeDark},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			probe := func() themeProbeResult {
-				t.Errorf("probe invoked although %s answered", c.name)
-				return themeProbeResult{kind: themeLight, ok: true, leftover: []byte("q")}
-			}
-			res := resolveTheme(c.in, probe)
-			if res.kind != c.kind || res.source != c.want {
-				t.Errorf("got %s via %s, want %s via %s", res.kind, res.source, c.kind, c.want)
-			}
-			if res.probeRan {
-				t.Error("probeRan is set")
-			}
-			if res.probedOK {
-				t.Error("probedOK is set for a word-sourced resolution")
-			}
-			if res.leftover != nil {
-				t.Errorf("leftover %q from a probe that must not have run", res.leftover)
-			}
-		})
-	}
-}
-
-// TestResolveThemeDefaultSourceIsZeroValue pins the vocabulary the debug line
-// is built from, and that a zero themeResolution reads as "dark, nobody
-// answered" — which is what every &Magmux{} struct literal in this package
-// silently relies on. Without the feature the constants do not exist or the
-// strings differ, and the debug-line test could not name a source.
-func TestResolveThemeDefaultSourceIsZeroValue(t *testing.T) {
-	var zero themeResolution
-	if zero.source != themeSourceDefault {
-		t.Errorf("zero themeResolution has source %s, want default", zero.source)
-	}
-	if zero.kind != themeDark {
-		t.Errorf("zero themeResolution has kind %s, want dark", zero.kind)
-	}
-	for src, want := range map[themeSource]string{
-		themeSourceDefault:   "default",
-		themeSourceFlag:      "--theme",
-		themeSourceEnv:       "MAGMUX_THEME",
-		themeSourceTermTheme: "TERM_THEME",
-		themeSourceProbe:     "OSC 11",
-		themeSourceColorFGBG: "COLORFGBG",
-	} {
-		if got := src.String(); got != want {
-			t.Errorf("themeSource(%d).String() = %q, want %q", int(src), got, want)
-		}
-	}
-}
-
-// TestColorFGBGConsultedOnlyWhenProbeCannotAnswer is the placement rule of
-// section 3.2 on its own: a measured colour beats an index, and the index is
-// read only when the probe was skipped or came back empty. Without the
-// feature (b) and (c) report "dark via default" — an unanswered probe used to
-// be dark unconditionally — and (a) reports light via COLORFGBG if the index
-// were placed before the probe.
-func TestColorFGBGConsultedOnlyWhenProbeCannotAnswer(t *testing.T) {
-	mocha := rgb{0x2B, 0x30, 0x3B}
-	in := themeInputs{colorFGBG: "0;15"} // says light
-
-	t.Run("answered probe wins over COLORFGBG", func(t *testing.T) {
-		calls := 0
-		res := resolveTheme(in, func() themeProbeResult {
-			calls++
-			return themeProbeResult{kind: themeDark, color: mocha, ok: true}
-		})
-		if res.kind != themeDark || res.source != themeSourceProbe {
-			t.Errorf("got %s via %s, want dark via OSC 11", res.kind, res.source)
-		}
-		if calls != 1 || !res.probeRan || !res.probedOK || res.probed != mocha {
-			t.Errorf("calls=%d probeRan=%v probedOK=%v probed=%v", calls, res.probeRan, res.probedOK, res.probed)
-		}
-	})
-
-	t.Run("silent probe falls to COLORFGBG", func(t *testing.T) {
-		calls := 0
-		res := resolveTheme(in, func() themeProbeResult {
-			calls++
-			return themeProbeResult{ok: false, leftover: []byte("q")}
-		})
-		if res.kind != themeLight || res.source != themeSourceColorFGBG {
-			t.Errorf("got %s via %s, want light via COLORFGBG", res.kind, res.source)
-		}
-		if calls != 1 || !res.probeRan {
-			t.Errorf("calls=%d probeRan=%v, want the probe to have run once", calls, res.probeRan)
-		}
-		if res.probedOK {
-			t.Error("probedOK set for a probe that did not answer")
-		}
-		if string(res.leftover) != "q" {
-			t.Errorf("leftover %q, want the keystroke %q", res.leftover, "q")
-		}
-	})
-
-	t.Run("nil probe falls to COLORFGBG", func(t *testing.T) {
-		res := resolveTheme(in, nil)
-		if res.kind != themeLight || res.source != themeSourceColorFGBG {
-			t.Errorf("got %s via %s, want light via COLORFGBG", res.kind, res.source)
-		}
-		if res.probeRan || res.probedOK {
-			t.Errorf("probeRan=%v probedOK=%v with a nil probe", res.probeRan, res.probedOK)
-		}
-		if res.leftover != nil {
-			t.Errorf("leftover %q with a nil probe", res.leftover)
-		}
-	})
-}
-
 // ── debug line ───────────────────────────────────────────────────────────────
 
 // themeDebugLine assembles the line initTheme logs, from the same pieces
@@ -1422,9 +721,9 @@ func TestColorFGBGConsultedOnlyWhenProbeCannotAnswer(t *testing.T) {
 // input preserved; background rgb:...)". The pieces are what the test owns;
 // the fully assembled line is also captured from initTheme through dbgFile
 // in TestThemeDebugLineNamesSource's last subtest.
-func themeDebugLine(res themeResolution, back rgb) string {
+func themeDebugLine(res theme.Resolution, back theme.RGB) string {
 	return fmt.Sprintf("theme: %s via %s (probe %s; %d bytes of input preserved; background %s)",
-		res.kind, res.source, probeState(res), len(res.leftover), xColorString(back))
+		res.Kind, res.Source, probeState(res), len(res.Leftover), theme.XColorString(back))
 }
 
 // TestThemeDebugLineNamesSource: the line names who decided, and never says
@@ -1433,26 +732,26 @@ func themeDebugLine(res themeResolution, back rgb) string {
 // TERM_THEME run reads as not detected, and the must-not-contain assertions
 // report it.
 func TestThemeDebugLineNamesSource(t *testing.T) {
-	latte := rgb{0xEF, 0xF1, 0xF5}
+	latte := theme.RGB{R: 0xEF, G: 0xF1, B: 0xF5}
 	cases := []struct {
 		name     string
-		res      themeResolution
+		res      theme.Resolution
 		contains []string
 	}{
 		{"dark via TERM_THEME, probe skipped",
-			themeResolution{kind: themeDark, source: themeSourceTermTheme},
+			theme.Resolution{Kind: theme.Dark, Source: theme.SourceTermTheme},
 			[]string{"dark via TERM_THEME", "probe skipped", "0 bytes of input preserved"}},
 		{"light via OSC 11, probe answered, one keystroke kept",
-			themeResolution{kind: themeLight, source: themeSourceProbe, probed: latte, probedOK: true, probeRan: true, leftover: []byte("q")},
+			theme.Resolution{Kind: theme.Light, Source: theme.SourceProbe, Probed: latte, ProbedOK: true, ProbeRan: true, Leftover: []byte("q")},
 			[]string{"light via OSC 11", "probe answered", "1 bytes of input preserved"}},
 		{"light via COLORFGBG, probe ran and did not answer",
-			themeResolution{kind: themeLight, source: themeSourceColorFGBG, probeRan: true},
+			theme.Resolution{Kind: theme.Light, Source: theme.SourceColorFGBG, ProbeRan: true},
 			[]string{"light via COLORFGBG", "probe no answer"}},
 		{"dark via default, probe skipped",
-			themeResolution{kind: themeDark, source: themeSourceDefault},
+			theme.Resolution{Kind: theme.Dark, Source: theme.SourceDefault},
 			[]string{"dark via default", "probe skipped"}},
 		{"dark via default, probe ran",
-			themeResolution{kind: themeDark, source: themeSourceDefault, probeRan: true},
+			theme.Resolution{Kind: theme.Dark, Source: theme.SourceDefault, ProbeRan: true},
 			[]string{"probe no answer"}},
 	}
 	for _, c := range cases {
@@ -1469,7 +768,7 @@ func TestThemeDebugLineNamesSource(t *testing.T) {
 		t.Setenv("MAGMUX_THEME", "")
 		t.Setenv("TERM_THEME", "dark")
 		t.Setenv("COLORFGBG", "0;15")
-		defer useTheme(currentTheme)()
+		defer useTheme(theme.Current)()
 
 		f, err := os.CreateTemp(t.TempDir(), "dbg")
 		if err != nil {
@@ -1533,9 +832,15 @@ func assertThemeLine(t *testing.T, line string, contains []string) {
 // It reports the file and line of any offender.
 func TestNoCouldNotDetectString(t *testing.T) {
 	needles := []string{"could not " + "detect", "undetec" + "ted"}
-	files, err := filepath.Glob("*.go")
-	if err != nil || len(files) == 0 {
-		t.Fatalf("glob *.go: %v (%d files)", err, len(files))
+	// The leaf packages R3 moved out of this one are scanned too, so the test
+	// still covers every line it covered when they were files in package mux.
+	var files []string
+	for _, pat := range []string{"*.go", "../theme/*.go", "../sockdir/*.go", "../pty/*.go", "../proc/*.go", "../mcp/*.go"} {
+		m, err := filepath.Glob(pat)
+		if err != nil || len(m) == 0 {
+			t.Fatalf("glob %s: %v (%d files)", pat, err, len(m))
+		}
+		files = append(files, m...)
 	}
 	for _, f := range files {
 		data, err := os.ReadFile(f)
@@ -1567,7 +872,9 @@ func TestThemeEnvReadsNoFile(t *testing.T) {
 		}
 		return l
 	}
-	for _, f := range []string{"theme.go", "cell.go", "screen.go", "scrollback.go", "vt.go", "pane.go", "render.go",
+	// theme.go is package theme's since R3, so it is read from there; the
+	// thirteen section files are the same lines as before.
+	for _, f := range []string{"../theme/theme.go", "cell.go", "screen.go", "scrollback.go", "vt.go", "pane.go", "render.go",
 		"mux.go", "selection.go", "chrome.go", "socket.go", "grid.go", "dynpanes.go", "cli.go"} {
 		data, err := os.ReadFile(f)
 		if err != nil {
@@ -1576,13 +883,13 @@ func TestThemeEnvReadsNoFile(t *testing.T) {
 		for i, l := range strings.Split(string(data), "\n") {
 			code := stripComment(l)
 			// A ".env" FILE: quoted or path-joined. (A field named env, as in
-			// in.env, is not a file.)
+			// in.Env, is not a file.)
 			for _, needle := range []string{`".env`, `/.env`, `.env"`} {
 				if strings.Contains(code, needle) {
 					t.Errorf("%s:%d names a .env file outside a comment: %q", f, i+1, l)
 				}
 			}
-			if f != "theme.go" {
+			if f != "../theme/theme.go" {
 				continue
 			}
 			for _, bad := range []string{"os.Open", "os.ReadFile", "ioutil.ReadFile", "godotenv", "bufio.NewScanner"} {
@@ -1600,7 +907,7 @@ func TestThemeEnvReadsNoFile(t *testing.T) {
 }
 
 // TestThemeEnvSeamReadsProcessEnv proves FR7 positively: the seam hands back
-// the raw process environment (untrimmed — normalisation is themeWord's job),
+// the raw process environment (untrimmed — normalisation is theme.Word's job),
 // and initTheme reads through the seam and nowhere else. Without the seam this
 // does not compile; with an initTheme that calls os.Getenv directly, the
 // second half reports "dark from the process env" although the seam said light.
@@ -1609,16 +916,16 @@ func TestThemeEnvSeamReadsProcessEnv(t *testing.T) {
 	t.Setenv("TERM_THEME", " Dark ")
 	t.Setenv("COLORFGBG", "0;15")
 
-	got := themeEnv()
-	want := themeInputs{env: "auto", termTheme: " Dark ", colorFGBG: "0;15"}
+	got := theme.Env()
+	want := theme.Inputs{Env: "auto", TermTheme: " Dark ", ColorFGBG: "0;15"}
 	if got != want {
-		t.Errorf("themeEnv() = %+v, want %+v", got, want)
+		t.Errorf("theme.Env() = %+v, want %+v", got, want)
 	}
 
-	old := themeEnv
-	themeEnv = func() themeInputs { return themeInputs{termTheme: "light"} }
-	defer func() { themeEnv = old }()
-	defer useTheme(currentTheme)()
+	old := theme.Env
+	theme.Env = func() theme.Inputs { return theme.Inputs{TermTheme: "light"} }
+	defer func() { theme.Env = old }()
+	defer useTheme(theme.Current)()
 
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -1628,8 +935,8 @@ func TestThemeEnvSeamReadsProcessEnv(t *testing.T) {
 	defer w.Close()
 	m := &Magmux{stdin: r, headless: true}
 	m.initTheme(int(r.Fd()))
-	if currentTheme != themeLight {
-		t.Errorf("theme is %s: initTheme read the process env (TERM_THEME=%q) instead of the seam", currentTheme, os.Getenv("TERM_THEME"))
+	if theme.Current != theme.Light {
+		t.Errorf("theme is %s: initTheme read the process env (TERM_THEME=%q) instead of the seam", theme.Current, os.Getenv("TERM_THEME"))
 	}
 }
 
@@ -1686,4 +993,29 @@ func TestChildIsToldTheResolvedTheme(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ── contrast ─────────────────────────────────────────────────────────────────
+
+// wcagLuminance is the WCAG 2.x relative luminance: sRGB linearised, then
+// weighted. Distinct from theme.ScreenLuminance, which classifies a background and
+// deliberately does not linearise — see the comment there.
+func wcagLuminance(c theme.RGB) float64 {
+	lin := func(v uint8) float64 {
+		s := float64(v) / 255
+		if s <= 0.03928 {
+			return s / 12.92
+		}
+		return math.Pow((s+0.055)/1.055, 2.4)
+	}
+	return 0.2126*lin(c.R) + 0.7152*lin(c.G) + 0.0722*lin(c.B)
+}
+
+// contrastRatio is WCAG's (L1+0.05)/(L2+0.05), lighter over darker.
+func contrastRatio(a, b theme.RGB) float64 {
+	la, lb := wcagLuminance(a), wcagLuminance(b)
+	if la < lb {
+		la, lb = lb, la
+	}
+	return (la + 0.05) / (lb + 0.05)
 }

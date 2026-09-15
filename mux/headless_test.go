@@ -3,7 +3,7 @@ package mux
 // Headless mode: a magmux with no terminal at all.
 //
 // This file holds the repo's FIRST subprocess tests that do not allocate a pty.
-// Every other end-to-end test goes through openPTY() (startRPCMagmux,
+// Every other end-to-end test goes through pty.Open() (startRPCMagmux,
 // sockrpc_test.go) because magmux refused to start without a terminal —
 // --headless is precisely the removal of that requirement, so this harness is
 // both the feature's test and its proof.
@@ -28,6 +28,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/MadAppGang/magmux/pty"
+	"github.com/MadAppGang/magmux/theme"
 )
 
 // ── harness ─────────────────────────────────────────────────────────────────
@@ -214,7 +217,7 @@ func TestInitAutoDegradesOnPipedStdin(t *testing.T) {
 	t.Setenv("MAGMUX_THEME", "")
 	t.Setenv("TERM_THEME", "")
 	t.Setenv("COLORFGBG", "")
-	defer useTheme(currentTheme)()
+	defer useTheme(theme.Current)()
 
 	m := &Magmux{stdin: r}
 	if err := m.init(); err != nil {
@@ -247,7 +250,7 @@ func TestInitHeadlessFlagIsNeverCleared(t *testing.T) {
 	t.Setenv("MAGMUX_THEME", "")
 	t.Setenv("TERM_THEME", "")
 	t.Setenv("COLORFGBG", "")
-	defer useTheme(currentTheme)()
+	defer useTheme(theme.Current)()
 
 	m := &Magmux{stdin: r, headless: true}
 	if err := m.init(); err != nil {
@@ -320,7 +323,7 @@ func TestHeadlessInheritsPaneGeometry(t *testing.T) {
 	t.Setenv("MAGMUX_THEME", "")
 	t.Setenv("TERM_THEME", "")
 	t.Setenv("COLORFGBG", "")
-	defer useTheme(currentTheme)()
+	defer useTheme(theme.Current)()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -482,11 +485,11 @@ func TestPTYRunStillPaintsStdout(t *testing.T) {
 	}
 	bin := magmuxBinForTest(t)
 
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Fatalf("openPTY: %v", err)
+		t.Fatalf("pty.Open: %v", err)
 	}
-	setWinSize(master, 24, 100)
+	pty.SetWinSize(master, 24, 100)
 
 	cmd := exec.Command(bin, "-e", "sleep 30")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave

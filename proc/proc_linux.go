@@ -1,6 +1,6 @@
 //go:build linux
 
-package mux
+package proc
 
 // Parent-process lookup, used by the MCP server's self-pane guard.
 //
@@ -17,14 +17,14 @@ import (
 	"strings"
 )
 
-// ppidOf returns the parent pid of pid, read from /proc/<pid>/stat.
+// PPIDOf returns the parent pid of pid, read from /proc/<pid>/stat.
 //
 // Field 4 is the ppid, but the fields cannot simply be split on spaces: field
 // 2 is the executable name in parentheses and may itself contain spaces and
 // parentheses (`(my prog (2))`). The only safe anchor is the LAST ')' in the
 // line — everything after it is fixed-width, space-separated fields starting
 // at field 3 (state).
-func ppidOf(pid int) (int, error) {
+func PPIDOf(pid int) (int, error) {
 	if pid <= 0 {
 		return 0, fmt.Errorf("ppidOf: invalid pid %d", pid)
 	}

@@ -1,4 +1,4 @@
-package mux
+package theme
 
 // Theme — which palette magmux paints its own chrome in.
 //
@@ -12,7 +12,7 @@ package mux
 //
 //  1. detectTheme asks the terminal what its background actually is (OSC 11)
 //     and classifies it by luminance.
-//  2. `pal` is the selected palette. It is a VALUE, chosen once at startup, so
+//  2. `Pal` is the selected palette. It is a VALUE, chosen once at startup, so
 //     "what colour is body text" has exactly one answer per run and adding a
 //     second theme costs a struct literal rather than eleven package vars.
 //
@@ -23,7 +23,7 @@ package mux
 // "auto" is no opinion at EVERY level, --theme and MAGMUX_THEME included: it
 // falls through to the next source rather than forcing the probe. (This is a
 // change from the earlier rule, where `--theme auto` beat a set MAGMUX_THEME
-// and probed.) See resolveTheme for the walk and themeWord for what counts as
+// and probed.) See Resolve for the walk and Word for what counts as
 // an answer.
 //
 // Fallback is always dark: an unanswered query, a malformed reply, a
@@ -51,38 +51,34 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type themeKind int
+type Kind int
 
 const (
-	themeDark themeKind = iota
-	themeLight
+	Dark Kind = iota
+	Light
 )
 
-func (k themeKind) String() string {
-	if k == themeLight {
+func (k Kind) String() string {
+	if k == Light {
 		return "light"
 	}
 	return "dark"
 }
 
-// rgb is a 24-bit colour. Panel colours are truecolor rather than indexed
+// RGB is a 24-bit colour. Panel colours are truecolor rather than indexed
 // because the palette has to be able to state its own contrast ratios, and an
 // index means whatever the user's theme decided it means.
-type rgb struct{ r, g, b uint8 }
+type RGB struct{ R, G, B uint8 }
 
-func fg(c rgb) string {
-	return "\x1b[38;2;" + itoa(c.r) + ";" + itoa(c.g) + ";" + itoa(c.b) + "m"
+func Fg(c RGB) string {
+	return "\x1b[38;2;" + itoa(c.R) + ";" + itoa(c.G) + ";" + itoa(c.B) + "m"
 }
 
-func bg(c rgb) string {
-	return "\x1b[48;2;" + itoa(c.r) + ";" + itoa(c.g) + ";" + itoa(c.b) + "m"
+func Bg(c RGB) string {
+	return "\x1b[48;2;" + itoa(c.R) + ";" + itoa(c.G) + ";" + itoa(c.B) + "m"
 }
 
 func itoa(v uint8) string { return strconv.Itoa(int(v)) }
-
-// toColor converts a palette entry to the renderer's Color, so main.go's own
-// chrome can be driven from the same palette as the panel.
-func toColor(c rgb) Color { return Color{R: c.r, G: c.g, B: c.b, True: true} }
 
 // ── Palettes ──────────────────────────────────────────────────────────────────
 //
@@ -104,11 +100,11 @@ func toColor(c rgb) Color { return Color{R: c.r, G: c.g, B: c.b, True: true} }
 // with. The dark palette's border/subtle/debug were lifted a step to meet that
 // bar — they still read as chrome, they are just no longer invisible, which was
 // half the reported bug.
-type palette struct {
+type Palette struct {
 	// assumedBack is the terminal background this palette is designed for.
 	// magmux never paints it: it is the yardstick the contrast test measures
 	// every foreground against, and the reason there are two palettes at all.
-	assumedBack rgb
+	AssumedBack RGB
 
 	// bar is the surface magmux paints on: the status bar's background, and —
 	// since the completion overlay stopped being hardcoded 256-colour — the
@@ -118,7 +114,7 @@ type palette struct {
 	// assumedBack. A surface that sets its own background is a convention worth
 	// keeping — it separates magmux's own pixels from the child's — but the
 	// colour has to belong to the active theme.
-	bar rgb
+	Bar RGB
 
 	// shadow is the overlay's drop shadow: a *shade* of the terminal's own
 	// background, in both directions. It is the one palette entry that is not a
@@ -127,75 +123,75 @@ type palette struct {
 	// darker than assumedBack, and near enough to it to read as a shadow rather
 	// than a hole. The old hardcoded 48;5;235 was a near-black slab, which on a
 	// light terminal was 13.4:1 against the background: not a shadow, a smear.
-	shadow rgb
+	Shadow RGB
 
-	success rgb // turn completed / session idle
-	running rgb // controller instruction in flight
-	warn    rgb // tool working
-	fail    rgb // error / permission block
-	accent  rgb // titles, focus
-	text    rgb // body text
-	subtle  rgb // labels, timestamps
-	border  rgb // rules, pane splits
-	ink     rgb // text on a saturated badge
-	dead    rgb // absent / not applicable
-	debug   rgb // secondary data (tool names)
+	Success RGB // turn completed / session idle
+	Running RGB // controller instruction in flight
+	Warn    RGB // tool working
+	Fail    RGB // error / permission block
+	Accent  RGB // titles, focus
+	Text    RGB // body text
+	Subtle  RGB // labels, timestamps
+	Border  RGB // rules, pane splits
+	Ink     RGB // text on a saturated badge
+	Dead    RGB // absent / not applicable
+	Debug   RGB // secondary data (tool names)
 }
 
-// darkPalette is Catppuccin Mocha, the palette magmux has always shipped.
-var darkPalette = palette{
-	assumedBack: rgb{0x1E, 0x1E, 0x2E}, // Mocha base
-	bar:         rgb{0x18, 0x18, 0x25}, // Mocha mantle — a step under the panes
-	shadow:      rgb{0x11, 0x11, 0x1B}, // Mocha crust — a step under the bar
-	success:     rgb{0x2E, 0xCC, 0x71},
-	running:     rgb{0x34, 0x98, 0xDB},
-	warn:        rgb{0xFF, 0xB4, 0x54},
-	fail:        rgb{0xFF, 0x6B, 0x6B},
-	accent:      rgb{0x89, 0xB4, 0xFA},
-	text:        rgb{0xCD, 0xD6, 0xF4},
-	subtle:      rgb{0x7F, 0x84, 0x97},
-	border:      rgb{0x6A, 0x6D, 0x82},
-	ink:         rgb{0x11, 0x11, 0x1B},
-	dead:        rgb{0x7F, 0x84, 0x97},
-	debug:       rgb{0x94, 0x9A, 0xAF},
+// DarkPalette is Catppuccin Mocha, the palette magmux has always shipped.
+var DarkPalette = Palette{
+	AssumedBack: RGB{0x1E, 0x1E, 0x2E}, // Mocha base
+	Bar:         RGB{0x18, 0x18, 0x25}, // Mocha mantle — a step under the panes
+	Shadow:      RGB{0x11, 0x11, 0x1B}, // Mocha crust — a step under the bar
+	Success:     RGB{0x2E, 0xCC, 0x71},
+	Running:     RGB{0x34, 0x98, 0xDB},
+	Warn:        RGB{0xFF, 0xB4, 0x54},
+	Fail:        RGB{0xFF, 0x6B, 0x6B},
+	Accent:      RGB{0x89, 0xB4, 0xFA},
+	Text:        RGB{0xCD, 0xD6, 0xF4},
+	Subtle:      RGB{0x7F, 0x84, 0x97},
+	Border:      RGB{0x6A, 0x6D, 0x82},
+	Ink:         RGB{0x11, 0x11, 0x1B},
+	Dead:        RGB{0x7F, 0x84, 0x97},
+	Debug:       RGB{0x94, 0x9A, 0xAF},
 }
 
-// lightPalette is Catppuccin Latte's ground, with the saturated states pulled
+// LightPalette is Catppuccin Latte's ground, with the saturated states pulled
 // darker than Latte's own: Latte picks its accents for large type, and these
 // are single glyphs and 4-column badges on a cream background.
-var lightPalette = palette{
-	assumedBack: rgb{0xEF, 0xF1, 0xF5}, // Latte base
-	bar:         rgb{0xE6, 0xE9, 0xEF}, // Latte mantle
+var LightPalette = Palette{
+	AssumedBack: RGB{0xEF, 0xF1, 0xF5}, // Latte base
+	Bar:         RGB{0xE6, 0xE9, 0xEF}, // Latte mantle
 	// Latte surface1. A shadow is dark in both themes — but on cream, "dark"
 	// means a grey a step under the page, not the near-black the dark theme
 	// uses. Getting this wrong in the other direction is what the old shadow
 	// did.
-	shadow:  rgb{0xBC, 0xC0, 0xCC},
-	success: rgb{0x14, 0x72, 0x2F},
-	running: rgb{0x0C, 0x63, 0xB4},
+	Shadow:  RGB{0xBC, 0xC0, 0xCC},
+	Success: RGB{0x14, 0x72, 0x2F},
+	Running: RGB{0x0C, 0x63, 0xB4},
 	// Darker than Latte's peach by two steps: it has to clear 4.5:1 on the
 	// status bar's own background as well as on the terminal's.
-	warn:   rgb{0x8F, 0x54, 0x00},
-	fail:   rgb{0xB3, 0x26, 0x1E},
-	accent: rgb{0x0B, 0x57, 0xD0},
-	text:   rgb{0x4C, 0x4F, 0x69},
-	subtle: rgb{0x6C, 0x6F, 0x85},
-	border: rgb{0x7C, 0x80, 0x95},
-	ink:    rgb{0xFF, 0xFF, 0xFF},
-	dead:   rgb{0x6C, 0x6F, 0x85},
-	debug:  rgb{0x5C, 0x5F, 0x77},
+	Warn:   RGB{0x8F, 0x54, 0x00},
+	Fail:   RGB{0xB3, 0x26, 0x1E},
+	Accent: RGB{0x0B, 0x57, 0xD0},
+	Text:   RGB{0x4C, 0x4F, 0x69},
+	Subtle: RGB{0x6C, 0x6F, 0x85},
+	Border: RGB{0x7C, 0x80, 0x95},
+	Ink:    RGB{0xFF, 0xFF, 0xFF},
+	Dead:   RGB{0x6C, 0x6F, 0x85},
+	Debug:  RGB{0x5C, 0x5F, 0x77},
 }
 
-// pal is the palette in force. Written once at startup (setTheme) before any
+// Pal is the palette in force. Written once at startup (Set) before any
 // goroutine that paints exists, and read-only from then on — which is why it
-// needs no lock, and why setTheme must never be called from a render path.
-var pal = darkPalette
+// needs no lock, and why Set must never be called from a render path.
+var Pal = DarkPalette
 
-// currentTheme is which palette pal holds, for the status line and for tests
+// Current is which palette Pal holds, for the status line and for tests
 // that swap themes and put the old one back.
-var currentTheme = themeDark
+var Current = Dark
 
-// termBack / termFore are what magmux answers when a CHILD asks what colour the
+// TermBack / termFore are what magmux answers when a CHILD asks what colour the
 // terminal is (OSC 11 / OSC 10 / OSC 12 — see answerColorQuery in main.go).
 //
 // magmux is the terminal as far as a child is concerned, so it owes an answer
@@ -205,56 +201,56 @@ var currentTheme = themeDark
 //
 // They track the palette, so the answer is always self-consistent with what
 // magmux itself is drawing, and they are OVERWRITTEN by the real value when the
-// probe managed to read one (setDetectedBackground). A guess that matches our
+// probe managed to read one (SetDetectedBackground). A guess that matches our
 // own chrome is a fine answer; no answer is the bug.
-var termBack, termFore = darkPalette.assumedBack, darkPalette.text
+var TermBack, termFore = DarkPalette.AssumedBack, DarkPalette.Text
 
-func setTheme(k themeKind) {
-	currentTheme = k
-	if k == themeLight {
-		pal = lightPalette
+func Set(k Kind) {
+	Current = k
+	if k == Light {
+		Pal = LightPalette
 	} else {
-		pal = darkPalette
+		Pal = DarkPalette
 	}
-	// The assumed values, not the measured one: setTheme is also the reset,
-	// which is why initTheme calls setDetectedBackground *after* it.
-	termBack, termFore = pal.assumedBack, pal.text
+	// The assumed values, not the measured one: Set is also the reset,
+	// which is why initTheme calls SetDetectedBackground *after* it.
+	TermBack, termFore = Pal.AssumedBack, Pal.Text
 }
 
-// setDetectedBackground records the background the probe actually read off the
+// SetDetectedBackground records the background the probe actually read off the
 // real terminal, so children are told the truth rather than the palette's
-// stand-in for it. Must be called after setTheme, which resets it.
-func setDetectedBackground(c rgb) { termBack = c }
+// stand-in for it. Must be called after Set, which resets it.
+func SetDetectedBackground(c RGB) { TermBack = c }
 
-// terminalColor answers "what colour is the terminal's X" for the OSC codes a
+// TerminalColor answers "what colour is the terminal's X" for the OSC codes a
 // child may query: 10 foreground, 11 background, 12 cursor. The cursor gets the
 // foreground, which is xterm's own default and the only answer we can give that
 // is certain to be visible against the background we just reported.
-func terminalColor(code string) (rgb, bool) {
+func TerminalColor(code string) (RGB, bool) {
 	switch code {
 	case "10", "12":
 		return termFore, true
 	case "11":
-		return termBack, true
+		return TermBack, true
 	}
-	return rgb{}, false
+	return RGB{}, false
 }
 
-// xColorString renders c the way terminals answer OSC 10/11/12: X11's
+// XColorString renders c the way terminals answer OSC 10/11/12: X11's
 // "rgb:RRRR/GGGG/BBBB" with 16-bit components. Each 8-bit value is doubled
 // rather than shifted so that 0xFF is 0xFFFF and full white stays full white —
-// and so parseXColor round-trips it exactly.
-func xColorString(c rgb) string {
-	return fmt.Sprintf("rgb:%02x%02x/%02x%02x/%02x%02x", c.r, c.r, c.g, c.g, c.b, c.b)
+// and so ParseXColor round-trips it exactly.
+func XColorString(c RGB) string {
+	return fmt.Sprintf("rgb:%02x%02x/%02x%02x/%02x%02x", c.R, c.R, c.G, c.G, c.B, c.B)
 }
 
 // ── Detection ─────────────────────────────────────────────────────────────────
 
-// themeProbeTimeout is how long detectTheme waits for the terminal to answer.
+// ProbeTimeout is how long detectTheme waits for the terminal to answer.
 // Terminals that implement OSC 11 answer in single-digit milliseconds; the
 // ones that do not never answer at all, and this is the whole cost of asking
 // them. It is paid once, before the first child is spawned.
-const themeProbeTimeout = 150 * time.Millisecond
+const ProbeTimeout = 150 * time.Millisecond
 
 // osc11Query asks for the background colour. ST-terminated, because a terminal
 // that does not understand the sequence must not be left waiting for a
@@ -268,33 +264,33 @@ const osc11Query = "\x1b]11;?\x1b\\"
 // and it is not droppable: the caller must feed it to the input loop, in
 // order, ahead of anything read later. A signature that returned only the
 // theme would be a signature that silently ate input, so there isn't one.
-func detectTheme(f *os.File, timeout time.Duration) (themeKind, []byte) {
-	kind, _, _, rest := detectThemeColor(f, timeout)
+func detectTheme(f *os.File, timeout time.Duration) (Kind, []byte) {
+	kind, _, _, rest := DetectColor(f, timeout)
 	return kind, rest
 }
 
-// detectThemeColor is detectTheme that also hands back the background it read,
+// DetectColor is detectTheme that also hands back the background it read,
 // and whether it read one at all. The colour is not just an input to the
 // light/dark decision: it is the answer magmux owes any child that asks the
 // same question (OSC 11), and a classification alone cannot be turned back into
 // one. Keep it.
-func detectThemeColor(f *os.File, timeout time.Duration) (themeKind, rgb, bool, []byte) {
+func DetectColor(f *os.File, timeout time.Duration) (Kind, RGB, bool, []byte) {
 	return probeThemeColor(f, f, timeout)
 }
 
 // probeTheme is detectTheme with the two halves of the tty separated, so a
 // test can drive it with a pipe it controls and assert on what was written.
-func probeTheme(out io.Writer, in *os.File, timeout time.Duration) (themeKind, []byte) {
+func probeTheme(out io.Writer, in *os.File, timeout time.Duration) (Kind, []byte) {
 	kind, _, _, rest := probeThemeColor(out, in, timeout)
 	return kind, rest
 }
 
-func probeThemeColor(out io.Writer, in *os.File, timeout time.Duration) (themeKind, rgb, bool, []byte) {
+func probeThemeColor(out io.Writer, in *os.File, timeout time.Duration) (Kind, RGB, bool, []byte) {
 	if out == nil || in == nil {
-		return themeDark, rgb{}, false, nil
+		return Dark, RGB{}, false, nil
 	}
 	if _, err := io.WriteString(out, osc11Query); err != nil {
-		return themeDark, rgb{}, false, nil
+		return Dark, RGB{}, false, nil
 	}
 
 	fd := int(in.Fd())
@@ -311,12 +307,12 @@ func probeThemeColor(out io.Writer, in *os.File, timeout time.Duration) (themeKi
 			buf = append(buf, chunk[:n]...)
 		}
 		if body, rest, ok := cutOSC11(buf); ok {
-			if kind, c, ok := classifyOSC11(body); ok {
+			if kind, c, ok := ClassifyOSC11(body); ok {
 				return kind, c, true, rest
 			}
 			// A reply we cannot parse is still a reply: it is consumed, and
 			// the fallback is dark, but the keystrokes around it survive.
-			return themeDark, rgb{}, false, rest
+			return Dark, RGB{}, false, rest
 		}
 		if rerr != nil {
 			break
@@ -327,7 +323,7 @@ func probeThemeColor(out io.Writer, in *os.File, timeout time.Duration) (themeKi
 			break
 		}
 	}
-	return themeDark, rgb{}, false, dropPartialOSC11(buf)
+	return Dark, RGB{}, false, dropPartialOSC11(buf)
 }
 
 // waitReadable blocks until fd has bytes or the deadline passes.
@@ -416,17 +412,17 @@ func dropPartialOSC11(buf []byte) []byte {
 	return []byte(s)
 }
 
-// classifyOSC11 turns a reply body ("rgb:1e1e/1e1e/2e2e") into a theme, and
+// ClassifyOSC11 turns a reply body ("rgb:1e1e/1e1e/2e2e") into a theme, and
 // hands back the colour it parsed so the caller can serve it to children.
-func classifyOSC11(body string) (themeKind, rgb, bool) {
-	c, ok := parseXColor(body)
+func ClassifyOSC11(body string) (Kind, RGB, bool) {
+	c, ok := ParseXColor(body)
 	if !ok {
-		return themeDark, rgb{}, false
+		return Dark, RGB{}, false
 	}
-	if screenLuminance(c) >= lightThreshold {
-		return themeLight, c, true
+	if ScreenLuminance(c) >= lightThreshold {
+		return Light, c, true
 	}
-	return themeDark, c, true
+	return Dark, c, true
 }
 
 // lightThreshold is the luminance at which a background stops being something
@@ -436,25 +432,25 @@ func classifyOSC11(body string) (themeKind, rgb, bool) {
 // classification is stable to within a factor of three either way.
 const lightThreshold = 0.5
 
-// screenLuminance is the Rec.709 weighting on plain 0..1 channel values.
+// ScreenLuminance is the Rec.709 weighting on plain 0..1 channel values.
 //
 // Deliberately NOT the gamma-corrected WCAG luminance used to check contrast
 // (see TestPaletteContrast): that one linearises, which drags every mid tone
 // down — plain #808080 scores 0.216 and would be classified as a dark
 // background, when a viewer would call it neither. For "which way round should
 // the text be", the perceptual value is the right one.
-func screenLuminance(c rgb) float64 {
-	r := float64(c.r) / 255
-	g := float64(c.g) / 255
-	b := float64(c.b) / 255
+func ScreenLuminance(c RGB) float64 {
+	r := float64(c.R) / 255
+	g := float64(c.G) / 255
+	b := float64(c.B) / 255
 	return 0.2126*r + 0.7152*g + 0.0722*b
 }
 
-// parseXColor parses X11's "rgb:RRRR/GGGG/BBBB" as terminals actually emit it.
+// ParseXColor parses X11's "rgb:RRRR/GGGG/BBBB" as terminals actually emit it.
 // Components may be 1 to 4 hex digits and the widths in one reply need not
 // agree; each is scaled to 8 bits rather than truncated, so "f" is 0xFF and
 // not 0x0F.
-func parseXColor(s string) (rgb, bool) {
+func ParseXColor(s string) (RGB, bool) {
 	s = strings.TrimSpace(s)
 	low := strings.ToLower(s)
 	switch {
@@ -463,21 +459,21 @@ func parseXColor(s string) (rgb, bool) {
 	case strings.HasPrefix(low, "rgb:"):
 		s = s[len("rgb:"):]
 	default:
-		return rgb{}, false
+		return RGB{}, false
 	}
 	parts := strings.Split(s, "/")
 	if len(parts) < 3 {
-		return rgb{}, false
+		return RGB{}, false
 	}
 	var out [3]uint8
 	for i := 0; i < 3; i++ {
 		v, ok := scaleHex(parts[i])
 		if !ok {
-			return rgb{}, false
+			return RGB{}, false
 		}
 		out[i] = v
 	}
-	return rgb{out[0], out[1], out[2]}, true
+	return RGB{out[0], out[1], out[2]}, true
 }
 
 // scaleHex reads a 1-4 digit hex component and scales it to 0..255.
@@ -495,106 +491,106 @@ func scaleHex(s string) (uint8, bool) {
 
 // ── Preference ────────────────────────────────────────────────────────────────
 
-// themeSource is which step of the resolution order answered. It exists so the
+// Source is which step of the resolution order answered. It exists so the
 // debug line can say who decided, and so a test can assert on it instead of on
 // a side effect. The zero value is "nothing answered; dark", so a zero
-// themeResolution reads the way every Magmux{} test literal expects.
-type themeSource int
+// Resolution reads the way every Magmux{} test literal expects.
+type Source int
 
 const (
-	themeSourceDefault   themeSource = iota // nothing answered; dark
-	themeSourceFlag                         // --theme
-	themeSourceEnv                          // MAGMUX_THEME
-	themeSourceTermTheme                    // TERM_THEME
-	themeSourceProbe                        // OSC 11 reply from the terminal
-	themeSourceColorFGBG                    // COLORFGBG
+	SourceDefault   Source = iota // nothing answered; dark
+	SourceFlag                    // --theme
+	SourceEnv                     // MAGMUX_THEME
+	SourceTermTheme               // TERM_THEME
+	SourceProbe                   // OSC 11 reply from the terminal
+	SourceColorFGBG               // COLORFGBG
 )
 
-func (s themeSource) String() string {
+func (s Source) String() string {
 	switch s {
-	case themeSourceFlag:
+	case SourceFlag:
 		return "--theme"
-	case themeSourceEnv:
+	case SourceEnv:
 		return "MAGMUX_THEME"
-	case themeSourceTermTheme:
+	case SourceTermTheme:
 		return "TERM_THEME"
-	case themeSourceProbe:
+	case SourceProbe:
 		return "OSC 11"
-	case themeSourceColorFGBG:
+	case SourceColorFGBG:
 		return "COLORFGBG"
 	}
 	return "default"
 }
 
-// themeInputs is every non-tty input to the order, as raw strings. resolveTheme
+// Inputs is every non-tty input to the order, as raw strings. Resolve
 // takes them as a value so it reads no environment itself: the os.Getenv calls
-// live in themeEnv and nowhere else, and a table test can cover the full order
+// live in Env and nowhere else, and a table test can cover the full order
 // without touching the process environment.
-type themeInputs struct {
-	flag      string // --theme, "" if not given
-	env       string // MAGMUX_THEME
-	termTheme string // TERM_THEME
-	colorFGBG string // COLORFGBG
+type Inputs struct {
+	Flag      string // --theme, "" if not given
+	Env       string // MAGMUX_THEME
+	TermTheme string // TERM_THEME
+	ColorFGBG string // COLORFGBG
 }
 
-// themeEnv reads the three environment-valued inputs. It is a variable so a
+// Env reads the three environment-valued inputs. It is a variable so a
 // test that drives init() can pin them without touching the process
 // environment; production reads os.Getenv and only os.Getenv — no file is
 // ever opened for TERM_THEME or COLORFGBG. The flag is not here: initTheme
 // fills it from m.themePref.
-var themeEnv = func() themeInputs {
-	return themeInputs{
-		env:       os.Getenv("MAGMUX_THEME"),
-		termTheme: os.Getenv("TERM_THEME"),
-		colorFGBG: os.Getenv("COLORFGBG"),
+var Env = func() Inputs {
+	return Inputs{
+		Env:       os.Getenv("MAGMUX_THEME"),
+		TermTheme: os.Getenv("TERM_THEME"),
+		ColorFGBG: os.Getenv("COLORFGBG"),
 	}
 }
 
-// themeProbeResult is what the OSC 11 step hands back. ok is false when the
+// ProbeResult is what the OSC 11 step hands back. ok is false when the
 // terminal did not answer or answered something unparseable; leftover is every
 // byte read that was not the reply, and is returned whether or not ok is set.
-type themeProbeResult struct {
-	kind     themeKind
-	color    rgb
-	ok       bool
-	leftover []byte
+type ProbeResult struct {
+	Kind     Kind
+	Color    RGB
+	OK       bool
+	Leftover []byte
 }
 
-// themeResolution is the answer. probedOK is true iff source ==
-// themeSourceProbe, and only then is probed meaningful. leftover is non-nil
+// Resolution is the answer. probedOK is true iff source ==
+// SourceProbe, and only then is probed meaningful. leftover is non-nil
 // only if the probe ran; probeRan says whether it did, so the debug line can
 // tell "skipped" from "no answer".
-type themeResolution struct {
-	kind     themeKind
-	source   themeSource
-	probed   rgb
-	probedOK bool
-	leftover []byte
-	probeRan bool
+type Resolution struct {
+	Kind     Kind
+	Source   Source
+	Probed   RGB
+	ProbedOK bool
+	Leftover []byte
+	ProbeRan bool
 }
 
-// themeWord reads one of the three word-valued inputs (--theme, MAGMUX_THEME,
+// Word reads one of the three word-valued inputs (--theme, MAGMUX_THEME,
 // TERM_THEME). Trimmed, case-insensitive. Only "light" and "dark" are answers;
 // "auto", "" and anything else are "no opinion" and the caller moves on.
 //
 // It deliberately does NOT distinguish auto from garbage: the chain treats both
 // as fall-through. The distinction matters only for the --theme warning, which
-// validThemeSetting makes at flag-parse time.
-func themeWord(v string) (themeKind, bool) {
+// ValidSetting makes at flag-parse time.
+func Word(v string) (Kind, bool) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "light":
-		return themeLight, true
+		return Light, true
 	case "dark":
-		return themeDark, true
+		return Dark, true
 	}
-	return themeDark, false
+	return Dark, false
 }
 
-// validThemeSetting reports whether v is a mode a user could have meant. Its
+// ValidSetting reports whether v is a mode a user could have meant. Its
 // ONLY caller is the --theme flag parser, which warns on stderr for anything
 // else; MAGMUX_THEME and TERM_THEME are never warned about (the latter is not
 // magmux's variable to police), and the chain itself never consults this.
-func validThemeSetting(v string) bool {
+func ValidSetting(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "light", "dark", "auto":
 		return true
@@ -606,25 +602,25 @@ func validThemeSetting(v string) bool {
 // "fg;x;bg", ANSI colour indexes) and classifies the LAST field, which is the
 // background. Index 0-6 and 8 are dark, 7 and 9-15 light; anything else —
 // "default", an index outside 0-15, the wrong number of fields — is no opinion.
-func classifyColorFGBG(v string) (themeKind, bool) {
+func classifyColorFGBG(v string) (Kind, bool) {
 	parts := strings.Split(strings.TrimSpace(v), ";")
 	if len(parts) != 2 && len(parts) != 3 {
-		return themeDark, false
+		return Dark, false
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(parts[len(parts)-1]))
 	if err != nil {
-		return themeDark, false
+		return Dark, false
 	}
 	switch {
 	case n >= 0 && n <= 6, n == 8:
-		return themeDark, true
+		return Dark, true
 	case n == 7, n >= 9 && n <= 15:
-		return themeLight, true
+		return Light, true
 	}
-	return themeDark, false
+	return Dark, false
 }
 
-// resolveTheme walks the order and stops at the first answer. It is pure: it
+// Resolve walks the order and stops at the first answer. It is pure: it
 // reads no environment and touches no tty. The probe is invoked only when
 // steps 1-3 gave no opinion, and only when it is non-nil; a nil probe means
 // "cannot ask" (headless, non-tty, TERM=dumb) and the walk continues to
@@ -632,36 +628,36 @@ func classifyColorFGBG(v string) (themeKind, bool) {
 //
 // The order IS the slice literal below, read top to bottom. There is no second
 // copy of it anywhere.
-func resolveTheme(in themeInputs, probe func() themeProbeResult) themeResolution {
-	var res themeResolution
+func Resolve(in Inputs, probe func() ProbeResult) Resolution {
+	var res Resolution
 	type themeStep struct {
-		source themeSource
-		answer func() (themeKind, bool)
+		source Source
+		answer func() (Kind, bool)
 	}
 	steps := []themeStep{
-		{themeSourceFlag, func() (themeKind, bool) { return themeWord(in.flag) }},
-		{themeSourceEnv, func() (themeKind, bool) { return themeWord(in.env) }},
-		{themeSourceTermTheme, func() (themeKind, bool) { return themeWord(in.termTheme) }},
-		{themeSourceProbe, func() (themeKind, bool) {
+		{SourceFlag, func() (Kind, bool) { return Word(in.Flag) }},
+		{SourceEnv, func() (Kind, bool) { return Word(in.Env) }},
+		{SourceTermTheme, func() (Kind, bool) { return Word(in.TermTheme) }},
+		{SourceProbe, func() (Kind, bool) {
 			if probe == nil {
-				return themeDark, false
+				return Dark, false
 			}
 			pr := probe()
-			res.probeRan = true
+			res.ProbeRan = true
 			// Kept even when the probe did not answer: these are keystrokes.
-			res.leftover = pr.leftover
-			if !pr.ok {
-				return themeDark, false
+			res.Leftover = pr.Leftover
+			if !pr.OK {
+				return Dark, false
 			}
-			res.probed, res.probedOK = pr.color, true
-			return pr.kind, true
+			res.Probed, res.ProbedOK = pr.Color, true
+			return pr.Kind, true
 		}},
-		{themeSourceColorFGBG, func() (themeKind, bool) { return classifyColorFGBG(in.colorFGBG) }},
-		{themeSourceDefault, func() (themeKind, bool) { return themeDark, true }},
+		{SourceColorFGBG, func() (Kind, bool) { return classifyColorFGBG(in.ColorFGBG) }},
+		{SourceDefault, func() (Kind, bool) { return Dark, true }},
 	}
 	for _, st := range steps {
 		if k, ok := st.answer(); ok {
-			res.kind, res.source = k, st.source
+			res.Kind, res.Source = k, st.source
 			return res
 		}
 	}

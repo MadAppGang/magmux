@@ -1,6 +1,6 @@
 //go:build darwin
 
-package mux
+package proc
 
 // Parent-process lookup, used by the MCP server's self-pane guard.
 //
@@ -16,10 +16,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// ppidOf returns the parent pid of pid. It returns an error when the process
+// PPIDOf returns the parent pid of pid. It returns an error when the process
 // does not exist or is not visible to us, which the caller treats as "the
 // chain ends here" rather than as a failure.
-func ppidOf(pid int) (int, error) {
+func PPIDOf(pid int) (int, error) {
 	if pid <= 0 {
 		return 0, fmt.Errorf("ppidOf: invalid pid %d", pid)
 	}

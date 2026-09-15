@@ -1,4 +1,4 @@
-package mux
+package mcp
 
 // The magmux socket client used by `magmux mcp`.
 //

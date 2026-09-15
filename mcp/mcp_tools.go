@@ -1,4 +1,4 @@
-package mux
+package mcp
 
 // The MCP tool surface: 3 session tools + 6 pane tools.
 //
@@ -27,6 +27,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/MadAppGang/magmux/sockdir"
 )
 
 // mcpTool is one tool: its schema, how long the server will let it run, and
@@ -396,10 +398,10 @@ func (s *mcpServer) attach(ctx context.Context, id, sock string, pid int) (*Sess
 		if id == "" {
 			return nil, fmt.Errorf("no id or socket given")
 		}
-		sock = fmt.Sprintf("%s/magmux-%s.sock", sockDir, id)
+		sock = fmt.Sprintf("%s/magmux-%s.sock", sockdir.Dir, id)
 	}
 	if id == "" {
-		id = strings.TrimSuffix(strings.TrimPrefix(sock, sockDir+"/magmux-"), ".sock")
+		id = strings.TrimSuffix(strings.TrimPrefix(sock, sockdir.Dir+"/magmux-"), ".sock")
 	}
 
 	s.sessMu.Lock()

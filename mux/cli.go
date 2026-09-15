@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/MadAppGang/magmux/buildinfo"
+	"github.com/MadAppGang/magmux/sockdir"
+	"github.com/MadAppGang/magmux/theme"
 )
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -26,15 +28,9 @@ func getUserShell() string {
 // command-line arguments without the program name and returns the exit
 // status. Most failure paths still call os.Exit themselves.
 func Main(args []string) int {
-	// The MCP server hook must be the FIRST statement here: it has to come
-	// before the --version/--help scan below (which walks every argument and
-	// would claim a --help meant for `magmux mcp`), and long before init()
-	// puts the tty in raw mode or anything writes to stdout — a single stray
-	// byte on stdout desynchronises a JSON-RPC client for the rest of the
-	// session.
-	if len(args) > 0 && args[0] == "mcp" {
-		os.Exit(runMCP(args[1:]))
-	}
+	// `magmux mcp` never reaches here: cmd/magmux dispatches it to package mcp
+	// as its first statement, before this --version/--help scan could claim a
+	// --help meant for `magmux mcp`.
 
 	// Handle --version / -v / --help / -h first pass
 	for _, arg := range args {
@@ -272,7 +268,7 @@ func Main(args []string) int {
 		case "--theme":
 			if i+1 < len(args) {
 				i++
-				if validThemeSetting(args[i]) {
+				if theme.ValidSetting(args[i]) {
 					themePref = args[i]
 				} else {
 					// Ignored rather than fatal, like --id: auto-detection
@@ -285,7 +281,7 @@ func Main(args []string) int {
 		case "--id":
 			if i+1 < len(args) {
 				i++
-				if validSocketID(args[i]) {
+				if sockdir.ValidSocketID(args[i]) {
 					sockID = args[i]
 				} else {
 					// Ignored rather than fatal: the pid socket still binds, so
@@ -321,7 +317,7 @@ func Main(args []string) int {
 		if id == "" {
 			id = strconv.Itoa(os.Getpid())
 		}
-		if dir, ok, why := validSockDir(sockDirArg, id); ok {
+		if dir, ok, why := sockdir.ValidDir(sockDirArg, id); ok {
 			// Three carriers, because there are three audiences. The package
 			// var reaches the four MCP call sites in this process that have no
 			// *Magmux to ask; the field is what this magmux binds; the env var
@@ -330,11 +326,11 @@ func Main(args []string) int {
 			// process tree — nothing magmux does at runtime can — which is why
 			// MAGMUX_SOCK_DIR exists as an env var at all and not as a
 			// flag-only feature.
-			sockDir = dir
+			sockdir.Dir = dir
 			muxSockDir = dir
 			os.Setenv("MAGMUX_SOCK_DIR", dir)
 		} else {
-			fmt.Fprintf(os.Stderr, "magmux: ignoring --sock-dir %q (%s); using %s\n", sockDirArg, why, sockDir)
+			fmt.Fprintf(os.Stderr, "magmux: ignoring --sock-dir %q (%s); using %s\n", sockDirArg, why, sockdir.Dir)
 		}
 	}
 

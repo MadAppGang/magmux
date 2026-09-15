@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/MadAppGang/magmux/pty"
 )
 
 // ── harness ─────────────────────────────────────────────────────────────────
@@ -36,14 +38,14 @@ func startRPCMagmux(t *testing.T, args ...string) *rpcMagmux {
 	}
 	bin := magmuxBinForTest(t)
 
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Fatalf("openPTY: %v", err)
+		t.Fatalf("pty.Open: %v", err)
 	}
 	// A freshly opened PTY reports 0x0, and magmux sizes its panes from the
 	// terminal — without this every pane's screen is zero rows and every screen
 	// assertion below passes vacuously.
-	setWinSize(master, 24, 100)
+	pty.SetWinSize(master, 24, 100)
 
 	cmd := exec.Command(bin, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave

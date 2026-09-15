@@ -1,5 +1,7 @@
 package mux
 
+import "github.com/MadAppGang/magmux/theme"
+
 // ── Cell & Attributes ─────────────────────────────────────────────────────────
 
 type Attr uint16
@@ -33,3 +35,7 @@ type Cell struct {
 	Wide bool // is this cell the left half of a wide char?
 	Cont bool // is this a continuation (right half) of a wide char?
 }
+
+// toColor converts a palette entry to the renderer's Color, so main.go's own
+// chrome can be driven from the same palette as the panel.
+func toColor(c theme.RGB) Color { return Color{R: c.R, G: c.G, B: c.B, True: true} }

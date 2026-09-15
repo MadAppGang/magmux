@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MadAppGang/magmux/sockdir"
 )
 
 // ── Unix Domain Socket IPC ──────────────────────────────────────────────────
@@ -60,39 +62,6 @@ type sockMsg struct {
 	TimeoutMs int             `json:"timeoutMs,omitempty"` // per-request budget, 0 = the verb's default
 }
 
-// validSocketID reports whether a --id NAME may be interpolated into the
-// socket path. Restricted to [A-Za-z0-9_-]+ so a name can carry no path
-// separator and no "..": the socket is created with this process's own
-// privileges, and `--id ../../home/me/.ssh/agent` must not be able to reach
-// out of /tmp and unlink something. The length cap keeps the result inside the
-// ~104-byte sun_path limit on darwin — sized against /tmp, which is why
-// --sock-dir re-checks the length against the real final path (validSockDir).
-//
-// A purely NUMERIC name is rejected, and that is a deliberate, documented
-// restriction on the flag's alphabet rather than an oversight. The startup
-// reaper (sockdir.go) identifies "ours to delete" BY the name being a pid, and
-// its only liveness oracle is treating that number as one. A live
-// `magmux --id 1234` would therefore be reapable by any other magmux the
-// moment pid 1234 is dead — almost always. Disambiguating instead by reading
-// the pid's argv needs /proc (absent on darwin) or sysctl, is racy, and buys
-// back an alphabet nothing in this repo uses.
-func validSocketID(s string) bool {
-	if s == "" || len(s) > 64 {
-		return false
-	}
-	allDigits := true
-	for _, r := range s {
-		switch {
-		case r >= '0' && r <= '9':
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_', r == '-':
-			allDigits = false
-		default:
-			return false
-		}
-	}
-	return !allDigits
-}
-
 // socketDir is where this magmux binds. The field wins over the package
 // default so a test can point one Magmux at a t.TempDir() without swapping a
 // package var out from under anything else.
@@ -100,7 +69,7 @@ func (m *Magmux) socketDir() string {
 	if m.sockDir != "" {
 		return m.sockDir
 	}
-	return sockDir
+	return sockdir.Dir
 }
 
 // socketPath is where the IPC socket is bound. The pid-based default is
@@ -143,12 +112,12 @@ func (m *Magmux) socketServer() {
 	// retry.
 	//
 	// Before rather than after net.Listen so the sweep cannot observe our own
-	// socket at all; that makes reapStaleSockets' path != self rule
+	// socket at all; that makes sockdir.ReapStale' path != self rule
 	// belt-and-braces rather than load-bearing, because a reaper whose safety
 	// depends on correctly recognising itself is one refactor away from
 	// deleting its own socket.
 	reapStart := time.Now()
-	if n := reapStaleSockets(filepath.Dir(sockPath), sockPath, reapDeadline); n > 0 && dbgFile != nil {
+	if n := sockdir.ReapStale(filepath.Dir(sockPath), sockPath, sockdir.ReapDeadline); n > 0 && dbgFile != nil {
 		// The elapsed time is worth logging: it is the only way to tell a sweep
 		// that finished from one the deadline cut short, and a short one leaves
 		// work for the next start.

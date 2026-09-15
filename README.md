@@ -514,7 +514,7 @@ columns is refused with `too_small` before anything is forked.
 `focus` flag is one-shot.
 
 Inbound messages (subscribers writing to magmux) also drive status-bar text,
-pane tints, and agent hook events; see `sockMsg` in `mux/main.go`. These are
+pane tints, and agent hook events; see `sockMsg` in `mux/socket.go`. These are
 optional and unrelated to the read-only subscribe flow above.
 
 `{"type":"tint","color":"green"}` colours the pane's **border** (green, red or

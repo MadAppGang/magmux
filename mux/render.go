@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/MadAppGang/magmux/theme"
 )
 
 // ── ANSI Renderer ─────────────────────────────────────────────────────────────
@@ -233,7 +235,7 @@ func (r *Renderer) renderScrollBadge(p *Pane, text string) {
 	r.moveTo(p.y, p.x+p.w-w)
 	// Ink on the warn colour: the badge sets both halves of its own contrast,
 	// like the overlay badge and unlike the tint wash that had to be removed.
-	r.setAttr(toColor(pal.ink), toColor(pal.warn), AttrBold)
+	r.setAttr(toColor(theme.Pal.Ink), toColor(theme.Pal.Warn), AttrBold)
 	r.buf.WriteString(text)
 	r.setAttr(defaultColor, defaultColor, 0)
 }
@@ -252,18 +254,18 @@ func borderColorForPane(p *Pane) Color {
 	// comment claimed: a green pane on the left hid a failure on the right.
 	switch worseTint(leafTint(p.child1), leafTint(p.child2)) {
 	case "red":
-		return toColor(pal.fail)
+		return toColor(theme.Pal.Fail)
 	case "yellow":
-		return toColor(pal.warn)
+		return toColor(theme.Pal.Warn)
 	case "green":
-		return toColor(pal.success)
+		return toColor(theme.Pal.Success)
 	default:
 		// The palette's rule colour, not ANSI 8. Index 8 is "bright black",
 		// which a light terminal renders as a pale grey — and renderBorder
 		// then draws it dim, on the terminal's own light background. The
-		// splits simply disappeared. pal.border is theme-picked and holds
+		// splits simply disappeared. theme.Pal.Border is theme-picked and holds
 		// 3:1 against its background by test.
-		return toColor(pal.border)
+		return toColor(theme.Pal.Border)
 	}
 }
 
@@ -338,16 +340,16 @@ func (r *Renderer) renderBorder(p *Pane) {
 // "info" is amber rather than blue: its only user is the permission overlay,
 // whose pane border is already tinted amber (borderColorForPane), and a box in
 // a different colour from the rule around it says two things at once.
-func overlayAccent(style string) rgb {
+func overlayAccent(style string) theme.RGB {
 	switch style {
 	case "success":
-		return pal.success
+		return theme.Pal.Success
 	case "error":
-		return pal.fail
+		return theme.Pal.Fail
 	case "info":
-		return pal.warn
+		return theme.Pal.Warn
 	default:
-		return pal.text
+		return theme.Pal.Text
 	}
 }
 
@@ -359,7 +361,7 @@ func overlayAccent(style string) rgb {
 // tidiness — it is the whole reason the overlay, and not a background wash, is
 // the completion marker: it sits on top of a child's output whose colours
 // magmux does not know, and a cell that sets only one half inherits the other
-// from whatever the child last left in force. So: the box interior is pal.bar,
+// from whatever the child last left in force. So: the box interior is theme.Pal.Bar,
 // the surface magmux already owns and paints the status bar with, and every
 // glyph on it is a palette foreground measured against it.
 //
@@ -410,17 +412,17 @@ func (r *Renderer) renderOverlay(p *Pane) {
 
 	// Style selection — the box surface is the palette's, the border and header
 	// carry the state.
-	bgCode := bg(pal.bar)
-	borderFg := fg(overlayAccent(p.overlayStyle))
-	bodyFg := fg(pal.text)
+	bgCode := theme.Bg(theme.Pal.Bar)
+	borderFg := theme.Fg(overlayAccent(p.overlayStyle))
+	bodyFg := theme.Fg(theme.Pal.Text)
 	reset := "\x1b[0m"
 
 	// Drop shadow: cells 1 row below and 1 col right of the box, filled with
-	// the palette's shadow. Foreground AND background, both pal.shadow: the
+	// the palette's shadow. Foreground AND background, both theme.Pal.Shadow: the
 	// cell paints a space, so making the two agree means it is a solid block
 	// whatever the terminal does with the glyph, and it can never inherit a
 	// foreground from the child underneath.
-	shadowCode := bg(pal.shadow) + fg(pal.shadow)
+	shadowCode := theme.Bg(theme.Pal.Shadow) + theme.Fg(theme.Pal.Shadow)
 	// Right-side shadow column (skip the very top row so it looks like light from top-left)
 	for row := 0; row < boxH; row++ {
 		ry := by + row + 1
@@ -545,12 +547,12 @@ func (r *Renderer) renderOverlayPill(p *Pane, text string) {
 	// size where legibility matters most.
 	fill := overlayAccent(p.overlayStyle)
 	if p.overlayStyle != "success" && p.overlayStyle != "error" && p.overlayStyle != "info" {
-		fill = pal.subtle // "text on text" is not a pill
+		fill = theme.Pal.Subtle // "text on text" is not a pill
 	}
 
 	r.moveTo(cy, cx)
-	r.buf.WriteString(bg(fill))
-	r.buf.WriteString(fg(pal.ink))
+	r.buf.WriteString(theme.Bg(fill))
+	r.buf.WriteString(theme.Fg(theme.Pal.Ink))
 	r.buf.WriteString("\x1b[1m")
 	r.buf.WriteString(text)
 	r.buf.WriteString("\x1b[0m")
@@ -629,7 +631,7 @@ func (r *Renderer) renderSelection(p *Pane) {
 // background as well as its colour, and "\x1b[39m" drops the foreground to the
 // terminal's default, which on the bar's own background is a colour nobody
 // chose. Every segment ends by returning here.
-func barBase() string { return sgrReset + bg(pal.bar) + fg(pal.text) }
+func barBase() string { return sgrReset + theme.Bg(theme.Pal.Bar) + theme.Fg(theme.Pal.Text) }
 
 // renderStatusBar paints the bottom status line: the bar's own background,
 // accent labels, coloured segments separated by thin vertical rules. Segments
@@ -638,15 +640,15 @@ func barBase() string { return sgrReset + bg(pal.bar) + fg(pal.text) }
 // This is the one full-width surface magmux fills with a colour of its own, and
 // it is the exception that proves FIX 1's rule: a status bar that separates
 // itself from the pane above is a convention worth keeping, but the background
-// has to belong to the active theme (pal.bar) and every foreground written on
+// has to belong to the active theme (theme.Pal.Bar) and every foreground written on
 // it is held to its contrast against THAT — see TestPaletteContrast. It used to
 // be hardcoded 256-colour (48;5;236 under 38;5;51 cyan, 220 yellow, …), which
 // stayed a dark slab with saturated text on a light terminal.
 func (r *Renderer) renderStatusBar(row, cols int, text string) {
 	var (
-		barBg   = bg(pal.bar)
+		barBg   = theme.Bg(theme.Pal.Bar)
 		reset   = barBase()
-		divider = fg(pal.border) + "│" + reset
+		divider = theme.Fg(theme.Pal.Border) + "│" + reset
 	)
 
 	r.moveTo(row, 0)
@@ -680,47 +682,47 @@ func (r *Renderer) renderStatusBar(row, cols int, text string) {
 		// pill is a saturated chip: palette ink on a state colour, both halves
 		// set, so it is legible whatever the terminal is — the same contract
 		// the panel's badge() has.
-		pill := func(c rgb) {
-			r.buf.WriteString(bg(c) + fg(pal.ink) + sgrBold + " " + txt + " " + reset)
+		pill := func(c theme.RGB) {
+			r.buf.WriteString(theme.Bg(c) + theme.Fg(theme.Pal.Ink) + sgrBold + " " + txt + " " + reset)
 			col += utf8.RuneCountInString(txt) + 2
 		}
 		// label writes a coloured run and returns to the bar's ground state.
-		label := func(c rgb, bold bool, s string) {
+		label := func(c theme.RGB, bold bool, s string) {
 			if bold {
 				r.buf.WriteString(sgrBold)
 			}
-			r.buf.WriteString(fg(c) + s + reset)
+			r.buf.WriteString(theme.Fg(c) + s + reset)
 			col += utf8.RuneCountInString(s)
 		}
 
 		switch code {
 		case "*": // Accent bold asterisk + label (used for "* Opus" style)
-			label(pal.accent, true, "* "+txt)
+			label(theme.Pal.Accent, true, "* "+txt)
 		case "C": // Accent bold label
-			label(pal.accent, true, txt)
+			label(theme.Pal.Accent, true, txt)
 		case "P": // Success pill
-			pill(pal.success)
+			pill(theme.Pal.Success)
 		case "Pr": // Failure pill
-			pill(pal.fail)
+			pill(theme.Pal.Fail)
 		case "Py": // Warning pill
-			pill(pal.warn)
+			pill(theme.Pal.Warn)
 		case "$", "Y": // Warning bold (money / running counts)
-			label(pal.warn, true, txt)
+			label(theme.Pal.Warn, true, txt)
 		case "M": // Secondary data (elapsed time)
-			label(pal.debug, true, txt)
+			label(theme.Pal.Debug, true, txt)
 		case "G": // Success bold
-			label(pal.success, true, txt)
+			label(theme.Pal.Success, true, txt)
 		case "R": // Failure bold
-			label(pal.fail, true, txt)
+			label(theme.Pal.Fail, true, txt)
 		case "W": // Body text, emphasised
-			label(pal.text, true, txt)
+			label(theme.Pal.Text, true, txt)
 		case "D": // Help text — recedes, but is not dimmed on top of that:
-			// pal.subtle is already picked to sit at the chrome bar against
-			// pal.bar, and SGR 2 on top of it puts it back under.
-			label(pal.subtle, false, txt)
+			// theme.Pal.Subtle is already picked to sit at the chrome bar against
+			// theme.Pal.Bar, and SGR 2 on top of it puts it back under.
+			label(theme.Pal.Subtle, false, txt)
 		default:
 			// Unknown code — render as plain text
-			label(pal.text, false, txt)
+			label(theme.Pal.Text, false, txt)
 		}
 	}
 

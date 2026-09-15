@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/MadAppGang/magmux/pty"
 )
 
 func TestSockDirFlagBindsElsewhere(t *testing.T) {
@@ -31,13 +33,13 @@ func TestSockDirFlagBindsElsewhere(t *testing.T) {
 	// check exists to report, and not the thing under test here.
 	dir := sockTestDir(t)
 
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Fatalf("openPTY: %v", err)
+		t.Fatalf("pty.Open: %v", err)
 	}
 	defer master.Close()
 	defer slave.Close()
-	setWinSize(master, 24, 100)
+	pty.SetWinSize(master, 24, 100)
 
 	// The pane writes both variables to a FILE rather than to its stdout. Its
 	// stdout is the PTY, where the text arrives interleaved with frames and
@@ -102,13 +104,13 @@ func TestSockDirFlagFallsBackLoudly(t *testing.T) {
 	}
 	binPath := magmuxBinForTest(t)
 
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Fatalf("openPTY: %v", err)
+		t.Fatalf("pty.Open: %v", err)
 	}
 	defer master.Close()
 	defer slave.Close()
-	setWinSize(master, 24, 100)
+	pty.SetWinSize(master, 24, 100)
 
 	missing := filepath.Join(sockTestDir(t), "definitely-not-here")
 

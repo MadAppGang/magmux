@@ -8,17 +8,23 @@ go build -o magmux ./cmd/magmux
 
 ## Architecture
 
-Layout: `cmd/magmux/main.go` is a thin shim, `os.Exit(mux.Main(os.Args[1:]))`.
-`buildinfo/` holds `Version` / `Commit`, which GoReleaser sets with
-`-X github.com/MadAppGang/magmux/buildinfo.Version=…`. Everything else is
-package `mux` in `mux/`, and `go test` runs each package with cwd = its own
-directory, so `TestMain` builds `../cmd/magmux`. There is no `internal`
-directory, so the compiler no longer stops a lower package importing `mux`:
+Layout: `cmd/magmux/main.go` is a thin shim. Its first statement dispatches
+`magmux mcp` to package `mcp` (`mcp.Run`); otherwise it is
+`os.Exit(mux.Main(os.Args[1:]))`. `buildinfo/` holds `Version` / `Commit`,
+which GoReleaser sets with `-X github.com/MadAppGang/magmux/buildinfo.Version=…`.
+The leaf packages `pty/`, `proc/`, `sockdir/` and `theme/` sit below `mux`,
+and the MCP server is package `mcp` in `mcp/`; each is an implementation detail
+of magmux with no API stability before v1. Everything else is package `mux` in
+`mux/`, and `go test` runs each package with cwd = its own directory, so
+`TestMain` builds `../cmd/magmux`. There is no `internal` directory, so the
+compiler no longer stops a lower package importing `mux`:
 `cmd/magmux/import_direction_test.go` (`TestImportDirection`) is that guard.
+`test/reorg/r3.sed` is the rename map for the identifiers that changed name
+when the leaves moved out.
 
 The terminal core (formerly `mux/main.go`, ~8,350 lines) is split by section
-into files in `mux/`; the tool-controller layer, the socket layer and the MCP
-layer live beside it. `test/reorg/r2-ranges.txt` maps every line of the old
+into files in `mux/`; the tool-controller layer and the socket layer live
+beside it. `test/reorg/r2-ranges.txt` maps every line of the old
 `mux/main.go` to the file it moved to.
 
 The core's sections, in the old file's order:
@@ -28,7 +34,7 @@ The core's sections, in the old file's order:
    `mux/scrollback.go` (the ring, and scroll mode)
 2. **VT Parser** — DEC ANSI state machine (port of vtparser.c), handles CSI/ESC/OSC/C0: `mux/vt.go`
 3. **Pane** — Binary tree layout node, owns PTY + Screen + VT parser: `mux/pane.go`
-4. **PTY helpers** — Raw /dev/ptmx + ioctls (no CGo); platform bits in `mux/pty_darwin.go` / `mux/pty_linux.go`; `setWinSize` is in `mux/pane.go`
+4. **PTY helpers** — Raw /dev/ptmx + ioctls (no CGo): package `pty`, platform bits in `pty/pty_darwin.go` / `pty/pty_linux.go`, `pty.SetWinSize` in `pty/pty.go`
 5. **Renderer** — ANSI escape code output with dirty-flag optimization: `mux/render.go`
    (also `renderLoop`, `render`, `writeTerm` and `renderLocked`)
 6. **Multiplexer** — Main event loop, input routing, mouse handling, SIGWINCH:
@@ -45,7 +51,7 @@ The core's sections, in the old file's order:
 
 Socket lifecycle:
 
-- `mux/sockdir.go` — where the socket is bound (`--sock-dir` / `MAGMUX_SOCK_DIR`)
+- `sockdir/sockdir.go` (package `sockdir`) — where the socket is bound (`--sock-dir` / `MAGMUX_SOCK_DIR`)
   and the startup sweep that removes pid-named sockets whose owner is provably
   dead. Free functions, no `*Magmux`, no locks.
 

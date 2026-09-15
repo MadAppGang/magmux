@@ -1,4 +1,4 @@
-package mux
+package mcp
 
 // `magmux mcp` — a Model Context Protocol server that lets an agent open,
 // drive, observe and close real interactive panes in a running magmux.
@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/MadAppGang/magmux/buildinfo"
+	"github.com/MadAppGang/magmux/proc"
 )
 
 // ── JSON-RPC 2.0 ────────────────────────────────────────────────────────────
@@ -151,9 +152,9 @@ func newMCPServer(out io.Writer, logw io.Writer) *mcpServer {
 	}
 }
 
-// runMCP is the `magmux mcp` entry point. It returns a process exit code and
+// Run is the `magmux mcp` entry point. It returns a process exit code and
 // must never write anything but protocol to stdout.
-func runMCP(args []string) int {
+func Run(args []string) int {
 	for _, a := range args {
 		switch a {
 		case "--help", "-h", "help":
@@ -416,9 +417,9 @@ func decodeArgs(raw json.RawMessage, dst any) error {
 	return nil
 }
 
-// ppidLookup is ppidOf, indirected so a test can stage the unreadable
+// ppidLookup is proc.PPIDOf, indirected so a test can stage the unreadable
 // /proc/<pid>/stat this guard has to survive. Never reassigned in production.
-var ppidLookup = ppidOf
+var ppidLookup = proc.PPIDOf
 
 // ancestorPIDs returns our own pid and every ancestor pid.
 //

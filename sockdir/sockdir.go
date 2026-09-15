@@ -1,4 +1,4 @@
-package mux
+package sockdir
 
 // Where magmux's IPC socket lives, and the rules for removing the ones a magmux
 // that died badly left behind.
@@ -7,12 +7,12 @@ package mux
 // of the name `magmux-<id>.sock` — and splitting them would leave that shape
 // stated twice:
 //
-//   - the DIRECTORY (`sockDir`, `--sock-dir` / `MAGMUX_SOCK_DIR`), which four
+//   - the DIRECTORY (`Dir`, `--sock-dir` / `MAGMUX_SOCK_DIR`), which four
 //     call sites in two other files read;
-//   - the REAPER (`reapStaleSockets`), whose entire safety argument rests on
+//   - the REAPER (`ReapStale`), whose entire safety argument rests on
 //     the id half of that name being a pid it can interrogate.
 //
-// Nothing here holds a lock, and `reapStaleSockets` deliberately has no
+// Nothing here holds a lock, and `ReapStale` deliberately has no
 // *Magmux receiver: it does `os.ReadDir`, `syscall.Kill` and `os.Remove`, all
 // blocking I/O, and CLAUDE.md's rule 1 ("never hold treeMu across blocking
 // I/O") has no exceptions. A free function taking two strings cannot break it.
@@ -37,7 +37,7 @@ import (
 // Overriding is opt-in for exactly that reason.
 const sockDirDefault = "/tmp"
 
-// sockDir is where magmux binds and where `magmux mcp` looks. It used to be a
+// Dir is where magmux binds and where `magmux mcp` looks. It used to be a
 // const in mcp_spawn.go; it is a var so an override reaches all four consumers
 // that do not have a *Magmux to ask — mcp_spawn.go's ReadDir and Join, and
 // mcp_tools.go's Sprintf and TrimPrefix.
@@ -45,7 +45,7 @@ const sockDirDefault = "/tmp"
 // Written once, in main(), before any goroutine exists — the same discipline as
 // Magmux.pendingInput. Never written by a test in production code paths; a test
 // that wants a different directory sets the Magmux.sockDir field instead.
-var sockDir = resolveSockDirEnv()
+var Dir = resolveSockDirEnv()
 
 // resolveSockDirEnv runs at package init, when the pid is known but --id is
 // NOT, so it does only the checks that do not depend on the final name. The
@@ -59,7 +59,7 @@ var sockDir = resolveSockDirEnv()
 // gets told.
 func resolveSockDirEnv() string {
 	if v := os.Getenv("MAGMUX_SOCK_DIR"); v != "" {
-		if dir, ok, _ := validSockDir(v, ""); ok {
+		if dir, ok, _ := ValidDir(v, ""); ok {
 			return dir
 		}
 	}
@@ -69,12 +69,12 @@ func resolveSockDirEnv() string {
 // sunPathMax bounds the socket path. The real limit is sizeof(sun_path) — 104
 // on darwin, 108 on linux — and net.Listen reports overrunning it as the
 // unhelpful "invalid argument". 100 keeps a margin under the smaller of the
-// two. validSocketID's 64-char cap was sized against /tmp
+// two. ValidSocketID's 64-char cap was sized against /tmp
 // (`/tmp/magmux-` + 64 + `.sock` = 81); a custom directory blows that without
 // this check, which is why the check is made against the REAL final path.
 const sunPathMax = 100
 
-// validSockDir returns the directory to use, whether the request was honoured,
+// ValidDir returns the directory to use, whether the request was honoured,
 // and why not. Never fatal: a bad --sock-dir costs the caller its chosen path
 // and nothing else, exactly as a bad --id does.
 //
@@ -85,7 +85,7 @@ const sunPathMax = 100
 // Writability is checked only NEGATIVELY, by mode: a directory nobody can write
 // is certainly wrong, but "the owner bit is set" says nothing about us. The
 // definitive answer is the bind, whose error now reaches stderr.
-func validSockDir(dir, id string) (string, bool, string) {
+func ValidDir(dir, id string) (string, bool, string) {
 	if dir == "" {
 		return sockDirDefault, false, "empty"
 	}
@@ -138,7 +138,7 @@ const (
 	// and sorted everything by the time the loop starts. The sorted order is
 	// worth keeping in a function that deletes files — it makes the sweep, and
 	// therefore its partial prefix, deterministic.
-	reapDeadline   = 50 * time.Millisecond
+	ReapDeadline   = 50 * time.Millisecond
 	reapMaxEntries = 8192
 )
 
@@ -172,7 +172,7 @@ func killErrMeansGone(err error) bool {
 	return errors.Is(err, syscall.ESRCH)
 }
 
-// reapStaleSockets removes magmux sockets in dir whose owning process is gone,
+// ReapStale removes magmux sockets in dir whose owning process is gone,
 // and returns how many it removed. self is this magmux's own socket path.
 //
 // THE ORACLE IS THE PID, NOT A DIAL. An earlier design unlinked on
@@ -229,9 +229,9 @@ func killErrMeansGone(err error) bool {
 //
 // The deadline is checked between entries and the function returns what it
 // managed. A partial sweep is correct: the next magmux finishes it.
-func reapStaleSockets(dir, self string, deadline time.Duration) int {
+func ReapStale(dir, self string, deadline time.Duration) int {
 	if deadline <= 0 {
-		deadline = reapDeadline
+		deadline = ReapDeadline
 	}
 	// The clock starts BEFORE os.ReadDir, so the deadline covers the read as
 	// well as the scan. It used to start after, which made the bound a claim
@@ -307,4 +307,37 @@ func reapStaleSockets(dir, self string, deadline time.Duration) int {
 		}
 	}
 	return removed
+}
+
+// ValidSocketID reports whether a --id NAME may be interpolated into the
+// socket path. Restricted to [A-Za-z0-9_-]+ so a name can carry no path
+// separator and no "..": the socket is created with this process's own
+// privileges, and `--id ../../home/me/.ssh/agent` must not be able to reach
+// out of /tmp and unlink something. The length cap keeps the result inside the
+// ~104-byte sun_path limit on darwin — sized against /tmp, which is why
+// --sock-dir re-checks the length against the real final path (ValidDir).
+//
+// A purely NUMERIC name is rejected, and that is a deliberate, documented
+// restriction on the flag's alphabet rather than an oversight. The startup
+// reaper (sockdir.go) identifies "ours to delete" BY the name being a pid, and
+// its only liveness oracle is treating that number as one. A live
+// `magmux --id 1234` would therefore be reapable by any other magmux the
+// moment pid 1234 is dead — almost always. Disambiguating instead by reading
+// the pid's argv needs /proc (absent on darwin) or sysctl, is racy, and buys
+// back an alphabet nothing in this repo uses.
+func ValidSocketID(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	allDigits := true
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_', r == '-':
+			allDigits = false
+		default:
+			return false
+		}
+	}
+	return !allDigits
 }

@@ -18,6 +18,9 @@ import (
 	"time"
 
 	"golang.org/x/term"
+
+	"github.com/MadAppGang/magmux/pty"
+	"github.com/MadAppGang/magmux/theme"
 )
 
 // testMagmuxBin is the path to a magmux binary built once for the whole test
@@ -165,9 +168,9 @@ func TestAutoExitNonTUIPane(t *testing.T) {
 
 	// Open a PTY pair so magmux gets a real controlling terminal (it requires
 	// raw mode and refuses to run otherwise).
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Fatalf("openPTY: %v", err)
+		t.Fatalf("pty.Open: %v", err)
 	}
 	defer master.Close()
 	defer slave.Close()
@@ -176,7 +179,7 @@ func TestAutoExitNonTUIPane(t *testing.T) {
 	// back empty, so nothing about the emulator was really being exercised.
 	// buildGrid now refuses a layout it cannot give a usable pane, which is what
 	// surfaced it — the same reason startRPCMagmux has always set a size.
-	setWinSize(master, 24, 100)
+	pty.SetWinSize(master, 24, 100)
 
 	// Spawn magmux with -e (single command) and -w (auto-exit on done).
 	// The shell pane echoes once and sleeps 1s — a classic non-TUI workload.
@@ -266,15 +269,15 @@ func TestSocketSubscriberContract(t *testing.T) {
 
 	binPath := magmuxBinForTest(t)
 
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Fatalf("openPTY: %v", err)
+		t.Fatalf("pty.Open: %v", err)
 	}
 	defer master.Close()
 	defer slave.Close()
 	// A freshly opened PTY reports 0x0; without this magmux runs with zero-sized
 	// panes. See TestAutoExitNonTUIPane.
-	setWinSize(master, 24, 100)
+	pty.SetWinSize(master, 24, 100)
 
 	// One pane that lives ~1.5s, then exits cleanly; -w auto-exits magmux after.
 	// The window is long enough to connect a subscriber and observe the full
@@ -401,15 +404,15 @@ func TestSocketResultsDeliveredAtAnyConnectTime(t *testing.T) {
 
 	for i, delay := range delays {
 		t.Run(fmt.Sprintf("connect_after_%s", delay), func(t *testing.T) {
-			master, slave, err := openPTY()
+			master, slave, err := pty.Open()
 			if err != nil {
-				t.Fatalf("openPTY: %v", err)
+				t.Fatalf("pty.Open: %v", err)
 			}
 			defer master.Close()
 			defer slave.Close()
 			// A freshly opened PTY reports 0x0; without this magmux runs with
 			// zero-sized panes. See TestAutoExitNonTUIPane.
-			setWinSize(master, 24, 100)
+			pty.SetWinSize(master, 24, 100)
 
 			cmd := exec.Command(binPath, "-e", `sh -c "echo hi; sleep 0.3"`, "-w")
 			cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
@@ -487,15 +490,15 @@ func TestSocketReaderAcceptsLargeLine(t *testing.T) {
 
 	binPath := magmuxBinForTest(t)
 
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Fatalf("openPTY: %v", err)
+		t.Fatalf("pty.Open: %v", err)
 	}
 	defer master.Close()
 	defer slave.Close()
 	// Without a window size every pane screen is zero rows and the exit
 	// event's lastLine is empty whatever the pane printed.
-	setWinSize(master, 24, 100)
+	pty.SetWinSize(master, 24, 100)
 
 	// Deliberately NOT -w, for the same reason TestSocketIDFlagBindsNamedSocket
 	// is not: `exit` is a live broadcast from waitForChild's own goroutine and,
@@ -642,13 +645,13 @@ func TestSocketIDFlagBindsNamedSocket(t *testing.T) {
 
 	binPath := magmuxBinForTest(t)
 
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Fatalf("openPTY: %v", err)
+		t.Fatalf("pty.Open: %v", err)
 	}
 	defer master.Close()
 	defer slave.Close()
-	setWinSize(master, 24, 100)
+	pty.SetWinSize(master, 24, 100)
 
 	name := fmt.Sprintf("test%d", time.Now().UnixNano())
 	sockPath := "/tmp/magmux-" + name + ".sock"
@@ -795,15 +798,15 @@ func TestControllerSnapshotReachesAwaitingInput(t *testing.T) {
 
 	binPath := magmuxBinForTest(t)
 
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Fatalf("openPTY: %v", err)
+		t.Fatalf("pty.Open: %v", err)
 	}
 	defer master.Close()
 	defer slave.Close()
 	// A freshly opened PTY reports 0x0; without this magmux runs with zero-sized
 	// panes. See TestAutoExitNonTUIPane.
-	setWinSize(master, 24, 100)
+	pty.SetWinSize(master, 24, 100)
 
 	// "claude " in the command attaches ClaudeCodeController; the printf emits
 	// the OSC 9 notification; the sleep keeps the pane alive long enough for
@@ -933,7 +936,7 @@ func readReplyWithin(t *testing.T, r *os.File, d time.Duration) string {
 // that asks what colour the terminal is gets an answer, terminated the way it
 // asked.
 func TestOSCBackgroundQueryIsAnswered(t *testing.T) {
-	defer useTheme(themeDark)()
+	defer useTheme(theme.Dark)()
 
 	cases := []struct{ name, query, want string }{
 		{"background, BEL", "\x1b]11;?\x07", "\x1b]11;rgb:1e1e/1e1e/2e2e\x07"},
@@ -964,7 +967,7 @@ func TestOSCBackgroundQueryIsAnswered(t *testing.T) {
 // own, because getting it wrong is silent: the application unblocks, and then
 // finds a stray BEL or a stray ESC \ in its input.
 func TestOSCColorReplyEchoesTheQueryTerminator(t *testing.T) {
-	defer useTheme(themeDark)()
+	defer useTheme(theme.Dark)()
 
 	for _, term := range []string{"\x07", "\x1b\\"} {
 		p, r := queryPane(t)
@@ -986,7 +989,7 @@ func TestOSCColorReplyEchoesTheQueryTerminator(t *testing.T) {
 // a child SETTING the background, and replying to it puts bytes into the input
 // of a program that is not reading any.
 func TestOSCColorSetIsNotAnswered(t *testing.T) {
-	defer useTheme(themeDark)()
+	defer useTheme(theme.Dark)()
 
 	for _, set := range []string{
 		"\x1b]11;rgb:1111/2222/3333\x07",
@@ -1011,7 +1014,7 @@ func TestOSCColorSetIsNotAnswered(t *testing.T) {
 // the parser in pieces, since a PTY read boundary falls anywhere: split across
 // writes, and preceded by a query that was never terminated.
 func TestOSCColorQuerySurvivesFragmentation(t *testing.T) {
-	defer useTheme(themeDark)()
+	defer useTheme(theme.Dark)()
 	const want = "\x1b]11;rgb:1e1e/1e1e/2e2e\x07"
 
 	t.Run("split across writes", func(t *testing.T) {
@@ -1040,7 +1043,7 @@ func TestOSCColorQuerySurvivesFragmentation(t *testing.T) {
 // background must be on the same side of the light/dark line as the palette
 // magmux paints its own chrome with.
 func TestOSCColorQueryTracksTheTheme(t *testing.T) {
-	for _, kind := range []themeKind{themeDark, themeLight} {
+	for _, kind := range []theme.Kind{theme.Dark, theme.Light} {
 		t.Run(kind.String(), func(t *testing.T) {
 			defer useTheme(kind)()
 
@@ -1048,15 +1051,15 @@ func TestOSCColorQueryTracksTheTheme(t *testing.T) {
 			p.vt.write([]byte("\x1b]11;?\x07"))
 			reply := readReply(t, r)
 			body := strings.TrimSuffix(strings.TrimPrefix(reply, "\x1b]11;"), "\x07")
-			c, ok := parseXColor(body)
+			c, ok := theme.ParseXColor(body)
 			if !ok {
 				t.Fatalf("reply %q is not a colour a terminal client could parse", reply)
 			}
 			// Round-trips: what we sent is exactly the palette's own background.
-			if c != pal.assumedBack {
-				t.Errorf("reported background %+v, want the active palette's %+v", c, pal.assumedBack)
+			if c != theme.Pal.AssumedBack {
+				t.Errorf("reported background %+v, want the active palette's %+v", c, theme.Pal.AssumedBack)
 			}
-			if got, _, _ := classifyOSC11(body); got != kind {
+			if got, _, _ := theme.ClassifyOSC11(body); got != kind {
 				t.Errorf("with --theme %s the reported background classifies as %s; a child "+
 					"would pick the opposite theme to the one magmux is drawing", kind, got)
 			}
@@ -1068,14 +1071,14 @@ func TestOSCColorQueryTracksTheTheme(t *testing.T) {
 // to read the real terminal's background, that is what children are told. The
 // palette's assumed background is the fallback, not the answer.
 func TestOSCColorQueryPrefersTheProbedBackground(t *testing.T) {
-	defer useTheme(themeDark)()
+	defer useTheme(theme.Dark)()
 
-	measured := rgb{0x2B, 0x30, 0x3B}
-	setDetectedBackground(measured)
+	measured := theme.RGB{R: 0x2B, G: 0x30, B: 0x3B}
+	theme.SetDetectedBackground(measured)
 
 	p, r := queryPane(t)
 	p.vt.write([]byte("\x1b]11;?\x07"))
-	want := "\x1b]11;" + xColorString(measured) + "\x07"
+	want := "\x1b]11;" + theme.XColorString(measured) + "\x07"
 	if got := readReply(t, r); got != want {
 		t.Fatalf("got %q, want %q — a measured background beats the palette's assumption", got, want)
 	}
@@ -1092,7 +1095,7 @@ func TestOSCColorQueryPrefersTheProbedBackground(t *testing.T) {
 // blocked: the blank-pane hang answerColorQuery exists to prevent, arriving by
 // a second route. DA and DSR are on the same path, and a TUI blocks on those too.
 func TestTerminalRepliesReachASettledPane(t *testing.T) {
-	defer useTheme(themeDark)()
+	defer useTheme(theme.Dark)()
 
 	for _, c := range []struct{ name, query, want string }{
 		{"OSC 11 background", "\x1b]11;?\x07", "\x1b]11;rgb:1e1e/1e1e/2e2e\x07"},
@@ -1128,7 +1131,7 @@ func TestTerminalRepliesReachASettledPane(t *testing.T) {
 // silently read as working again and lost its ✓ DONE chrome, for nothing more
 // than a background query it did not ask a human for.
 func TestTerminalReplyDoesNotClearCompletionState(t *testing.T) {
-	defer useTheme(themeDark)()
+	defer useTheme(theme.Dark)()
 
 	p, r := queryPane(t)
 	p.inputReady = true
@@ -1318,15 +1321,15 @@ func TestOSCBackgroundQueryAnsweredEndToEnd(t *testing.T) {
 		t.Fatalf("write probe script: %v", err)
 	}
 
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Fatalf("openPTY: %v", err)
+		t.Fatalf("pty.Open: %v", err)
 	}
 	defer master.Close()
 	defer slave.Close()
 	// Without a size the pane is 0 rows, nothing is ever rendered, and every
 	// assertion below passes vacuously.
-	setWinSize(master, 24, 100)
+	pty.SetWinSize(master, 24, 100)
 
 	// --theme dark fixes the expected answer: no probe of the outer terminal
 	// runs, so the palette's own background is what gets reported.
@@ -1554,14 +1557,14 @@ func TestClaudeCodeOpeningSequenceRendersEndToEnd(t *testing.T) {
 		t.Fatalf("write prologue script: %v", err)
 	}
 
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Fatalf("openPTY: %v", err)
+		t.Fatalf("pty.Open: %v", err)
 	}
 	defer master.Close()
 	defer slave.Close()
 	// Without a size the pane is 0 rows and every assertion below is vacuous.
-	setWinSize(master, 24, 100)
+	pty.SetWinSize(master, 24, 100)
 
 	sockID := fmt.Sprintf("decstbm-%d", os.Getpid())
 	sockPath := "/tmp/magmux-" + sockID + ".sock"
@@ -1660,9 +1663,9 @@ func TestClaudeCodeOpeningSequenceRendersEndToEnd(t *testing.T) {
 // query, and leave themeAskedAt zero so inputLoop never opens its
 // late-reply window.
 func TestTermThemeSkipsProbeOnATTY(t *testing.T) {
-	master, slave, err := openPTY()
+	master, slave, err := pty.Open()
 	if err != nil {
-		t.Skipf("openPTY: %v", err)
+		t.Skipf("pty.Open: %v", err)
 	}
 	defer master.Close()
 	defer slave.Close()
@@ -1671,7 +1674,7 @@ func TestTermThemeSkipsProbeOnATTY(t *testing.T) {
 	t.Setenv("MAGMUX_THEME", "")
 	t.Setenv("COLORFGBG", "")
 	t.Setenv("TERM", "xterm")
-	defer useTheme(currentTheme)()
+	defer useTheme(theme.Current)()
 
 	// A terminal that answers light the moment it is asked anything.
 	got := make(chan []byte, 1)
@@ -1687,8 +1690,8 @@ func TestTermThemeSkipsProbeOnATTY(t *testing.T) {
 	m := &Magmux{stdin: slave}
 	m.initTheme(int(slave.Fd()))
 
-	if currentTheme != themeDark {
-		t.Errorf("theme is %s, want dark from TERM_THEME", currentTheme)
+	if theme.Current != theme.Dark {
+		t.Errorf("theme is %s, want dark from TERM_THEME", theme.Current)
 	}
 	if !m.themeAskedAt.IsZero() {
 		t.Error("themeAskedAt is set: the probe wrote to the terminal despite TERM_THEME")
@@ -1710,37 +1713,37 @@ func TestTermThemeSkipsProbeOnATTY(t *testing.T) {
 // that classifies to the same theme — the measured colour when the probe
 // answered, the palette's assumedBack otherwise.
 func TestOSCColorQueryFollowsResolvedTheme(t *testing.T) {
-	probedDark := rgb{0x2B, 0x30, 0x3B}
-	latte := rgb{0xEF, 0xF1, 0xF5}
+	probedDark := theme.RGB{R: 0x2B, G: 0x30, B: 0x3B}
+	latte := theme.RGB{R: 0xEF, G: 0xF1, B: 0xF5}
 	cases := []struct {
 		name       string
-		in         themeInputs
-		probe      func() themeProbeResult
-		wantKind   themeKind
-		wantSource themeSource
+		in         theme.Inputs
+		probe      func() theme.ProbeResult
+		wantKind   theme.Kind
+		wantSource theme.Source
 	}{
-		{"TERM_THEME=light", themeInputs{termTheme: "light"}, nil, themeLight, themeSourceTermTheme},
+		{"TERM_THEME=light", theme.Inputs{TermTheme: "light"}, nil, theme.Light, theme.SourceTermTheme},
 		// A terminal that WOULD answer light: the probe must never be reached,
 		// and no stray measured colour may leak into the child's answer.
-		{"TERM_THEME=dark", themeInputs{termTheme: "dark"}, func() themeProbeResult {
-			return themeProbeResult{kind: themeLight, color: latte, ok: true}
-		}, themeDark, themeSourceTermTheme},
-		{"COLORFGBG=0;15", themeInputs{colorFGBG: "0;15"}, nil, themeLight, themeSourceColorFGBG},
-		{"probe answered dark", themeInputs{}, func() themeProbeResult {
-			return themeProbeResult{kind: themeDark, color: probedDark, ok: true}
-		}, themeDark, themeSourceProbe},
-		{"default", themeInputs{}, nil, themeDark, themeSourceDefault},
-		{"--theme light beats TERM_THEME=dark", themeInputs{flag: "light", termTheme: "dark"}, nil, themeLight, themeSourceFlag},
+		{"TERM_THEME=dark", theme.Inputs{TermTheme: "dark"}, func() theme.ProbeResult {
+			return theme.ProbeResult{Kind: theme.Light, Color: latte, OK: true}
+		}, theme.Dark, theme.SourceTermTheme},
+		{"COLORFGBG=0;15", theme.Inputs{ColorFGBG: "0;15"}, nil, theme.Light, theme.SourceColorFGBG},
+		{"probe answered dark", theme.Inputs{}, func() theme.ProbeResult {
+			return theme.ProbeResult{Kind: theme.Dark, Color: probedDark, OK: true}
+		}, theme.Dark, theme.SourceProbe},
+		{"default", theme.Inputs{}, nil, theme.Dark, theme.SourceDefault},
+		{"--theme light beats TERM_THEME=dark", theme.Inputs{Flag: "light", TermTheme: "dark"}, nil, theme.Light, theme.SourceFlag},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			defer useTheme(currentTheme)()
-			res := resolveTheme(c.in, c.probe)
-			if res.kind != c.wantKind || res.source != c.wantSource {
-				t.Fatalf("resolved %s via %s, want %s via %s", res.kind, res.source, c.wantKind, c.wantSource)
+			defer useTheme(theme.Current)()
+			res := theme.Resolve(c.in, c.probe)
+			if res.Kind != c.wantKind || res.Source != c.wantSource {
+				t.Fatalf("resolved %s via %s, want %s via %s", res.Kind, res.Source, c.wantKind, c.wantSource)
 			}
-			if res.source != themeSourceProbe && (res.probedOK || res.probeRan) {
-				t.Fatalf("%s answered, yet probeRan=%v probedOK=%v", res.source, res.probeRan, res.probedOK)
+			if res.Source != theme.SourceProbe && (res.ProbedOK || res.ProbeRan) {
+				t.Fatalf("%s answered, yet probeRan=%v probedOK=%v", res.Source, res.ProbeRan, res.ProbedOK)
 			}
 			m := &Magmux{}
 			m.applyTheme(res)
@@ -1752,28 +1755,28 @@ func TestOSCColorQueryFollowsResolvedTheme(t *testing.T) {
 			if body == reply {
 				t.Fatalf("child was answered %q, not an OSC 11 reply", reply)
 			}
-			kind, c11, ok := classifyOSC11(body)
+			kind, c11, ok := theme.ClassifyOSC11(body)
 			if !ok {
 				t.Fatalf("child was answered an unparseable background %q", body)
 			}
-			if kind != res.kind {
-				t.Errorf("child was told a %s background %q; magmux resolved %s via %s", kind, body, res.kind, res.source)
+			if kind != res.Kind {
+				t.Errorf("child was told a %s background %q; magmux resolved %s via %s", kind, body, res.Kind, res.Source)
 			}
-			want := pal.assumedBack
-			if res.probedOK {
-				want = res.probed
+			want := theme.Pal.AssumedBack
+			if res.ProbedOK {
+				want = res.Probed
 			}
 			if c11 != want {
-				t.Errorf("child was told %v, want %v (probedOK=%v)", c11, want, res.probedOK)
+				t.Errorf("child was told %v, want %v (probedOK=%v)", c11, want, res.ProbedOK)
 			}
 			// The light palette's assumedBack IS Latte, so "no stray measured
 			// colour" is only distinguishable when a probe stub stood ready to
 			// answer Latte and a word said dark.
-			if c.probe != nil && !res.probedOK && c11 == latte {
-				t.Errorf("child was told the Latte colour %v although the probe was not the source (%s)", c11, res.source)
+			if c.probe != nil && !res.ProbedOK && c11 == latte {
+				t.Errorf("child was told the Latte colour %v although the probe was not the source (%s)", c11, res.Source)
 			}
-			if c, ok := parseXColor(body); !ok || c != c11 {
-				t.Errorf("parseXColor(%q) = %v,%v; classifyOSC11 saw %v", body, c, ok, c11)
+			if c, ok := theme.ParseXColor(body); !ok || c != c11 {
+				t.Errorf("theme.ParseXColor(%q) = %v,%v; theme.ClassifyOSC11 saw %v", body, c, ok, c11)
 			}
 		})
 	}
@@ -1784,16 +1787,16 @@ func TestOSCColorQueryFollowsResolvedTheme(t *testing.T) {
 // does not know is no opinion, so on a real pty the probe runs exactly as if
 // the variable were unset, and a terminal that answers light gets light.
 // Without the feature — any non-empty TERM_THEME treated as an answer or as
-// dark — the terminal never sees "\x1b]11;?" and currentTheme is dark.
+// dark — the terminal never sees "\x1b]11;?" and theme.Current is dark.
 //
 // The no-warning half of FR2 is not asserted here: initTheme has no capturable
-// stderr, and resolveTheme is pure, so the rule holds by construction.
+// stderr, and theme.Resolve is pure, so the rule holds by construction.
 func TestTermThemeAutoStillProbesOnATTY(t *testing.T) {
 	for _, val := range []string{"auto", "solarized"} {
 		t.Run("TERM_THEME="+val, func(t *testing.T) {
-			master, slave, err := openPTY()
+			master, slave, err := pty.Open()
 			if err != nil {
-				t.Skipf("openPTY: %v", err)
+				t.Skipf("pty.Open: %v", err)
 			}
 			defer master.Close()
 			defer slave.Close()
@@ -1802,7 +1805,7 @@ func TestTermThemeAutoStillProbesOnATTY(t *testing.T) {
 			t.Setenv("MAGMUX_THEME", "")
 			t.Setenv("COLORFGBG", "15;0") // says dark: an answered probe must beat it
 			t.Setenv("TERM", "xterm")
-			defer useTheme(currentTheme)()
+			defer useTheme(theme.Current)()
 
 			// init() puts the terminal in raw mode before initTheme runs; a
 			// canonical-mode slave would hold the reply until a newline.
@@ -1845,8 +1848,8 @@ func TestTermThemeAutoStillProbesOnATTY(t *testing.T) {
 			if !bytes.Contains(got, []byte("\x1b]11;?")) {
 				t.Errorf("terminal received %q; TERM_THEME=%q is no opinion and the probe must run", got, val)
 			}
-			if currentTheme != themeLight {
-				t.Errorf("theme is %s, want light from the terminal's OSC 11 reply", currentTheme)
+			if theme.Current != theme.Light {
+				t.Errorf("theme is %s, want light from the terminal's OSC 11 reply", theme.Current)
 			}
 			if m.themeAskedAt.IsZero() {
 				t.Error("themeAskedAt is zero although the probe ran")
@@ -1862,17 +1865,17 @@ func TestTermThemeAutoStillProbesOnATTY(t *testing.T) {
 func TestColorFGBGHeadlessEndToEnd(t *testing.T) {
 	for _, c := range []struct {
 		colorFGBG string
-		want      themeKind
+		want      theme.Kind
 	}{
-		{"0;15", themeLight},
-		{"15;0", themeDark},
-		{"", themeDark},
+		{"0;15", theme.Light},
+		{"15;0", theme.Dark},
+		{"", theme.Dark},
 	} {
 		t.Run("COLORFGBG="+c.colorFGBG, func(t *testing.T) {
 			t.Setenv("MAGMUX_THEME", "")
 			t.Setenv("TERM_THEME", "")
 			t.Setenv("COLORFGBG", c.colorFGBG)
-			defer useTheme(currentTheme)()
+			defer useTheme(theme.Current)()
 
 			r, w, err := os.Pipe()
 			if err != nil {
@@ -1883,8 +1886,8 @@ func TestColorFGBGHeadlessEndToEnd(t *testing.T) {
 
 			m := &Magmux{stdin: r, headless: true}
 			m.initTheme(int(r.Fd()))
-			if currentTheme != c.want {
-				t.Errorf("theme is %s, want %s with COLORFGBG=%q headless", currentTheme, c.want, c.colorFGBG)
+			if theme.Current != c.want {
+				t.Errorf("theme is %s, want %s with COLORFGBG=%q headless", theme.Current, c.want, c.colorFGBG)
 			}
 			if !m.themeAskedAt.IsZero() {
 				t.Error("themeAskedAt is set: a headless magmux probed its stdin")
@@ -1897,43 +1900,43 @@ func TestColorFGBGHeadlessEndToEnd(t *testing.T) {
 }
 
 // TestApplyThemeResetsProbedBackground: applyTheme must be a reset as well as
-// a set. A probed light resolution leaves the measured colour in termBack; a
+// a set. A probed light resolution leaves the measured colour in theme.TermBack; a
 // later word-sourced dark resolution in the same process must answer children
 // with the dark palette's assumedBack, not the stale measurement. Without the
-// reset (applyTheme only calling setDetectedBackground when probedOK) the
+// reset (applyTheme only calling theme.SetDetectedBackground when probedOK) the
 // second query is answered with Latte.
 func TestApplyThemeResetsProbedBackground(t *testing.T) {
-	defer useTheme(currentTheme)()
-	latte := rgb{0xEF, 0xF1, 0xF5}
+	defer useTheme(theme.Current)()
+	latte := theme.RGB{R: 0xEF, G: 0xF1, B: 0xF5}
 
 	m := &Magmux{}
-	m.applyTheme(themeResolution{kind: themeLight, source: themeSourceProbe, probed: latte, probedOK: true, probeRan: true})
+	m.applyTheme(theme.Resolution{Kind: theme.Light, Source: theme.SourceProbe, Probed: latte, ProbedOK: true, ProbeRan: true})
 	if got := queryBackground(t); got != latte {
 		t.Fatalf("after a probed light resolution the child is told %v, want the measured %v", got, latte)
 	}
 
-	m.applyTheme(themeResolution{kind: themeDark, source: themeSourceTermTheme})
+	m.applyTheme(theme.Resolution{Kind: theme.Dark, Source: theme.SourceTermTheme})
 	got := queryBackground(t)
 	if got == latte {
 		t.Fatalf("after TERM_THEME=dark the child is still told the probed Latte colour %v", got)
 	}
-	if got != pal.assumedBack {
-		t.Errorf("child is told %v, want the dark palette's assumedBack %v", got, pal.assumedBack)
+	if got != theme.Pal.AssumedBack {
+		t.Errorf("child is told %v, want the dark palette's assumedBack %v", got, theme.Pal.AssumedBack)
 	}
-	if k, _, ok := classifyOSC11(xColorString(got)); !ok || k != themeDark {
+	if k, _, ok := theme.ClassifyOSC11(theme.XColorString(got)); !ok || k != theme.Dark {
 		t.Errorf("child's background %v classifies as %s, want dark", got, k)
 	}
 }
 
 // queryBackground asks a fresh pane OSC 11 and returns the colour magmux
 // answered with.
-func queryBackground(t *testing.T) rgb {
+func queryBackground(t *testing.T) theme.RGB {
 	t.Helper()
 	p, r := queryPane(t)
 	p.vt.write([]byte("\x1b]11;?\x07"))
 	reply := readReply(t, r)
 	body := strings.TrimSuffix(strings.TrimPrefix(reply, "\x1b]11;"), "\x07")
-	c, ok := parseXColor(body)
+	c, ok := theme.ParseXColor(body)
 	if !ok {
 		t.Fatalf("child was answered %q, not an OSC 11 colour", reply)
 	}
