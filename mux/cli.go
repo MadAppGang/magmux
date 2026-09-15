@@ -13,6 +13,7 @@ import (
 	"github.com/MadAppGang/magmux/buildinfo"
 	"github.com/MadAppGang/magmux/sockdir"
 	"github.com/MadAppGang/magmux/theme"
+	"github.com/MadAppGang/magmux/transport/firebase"
 )
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -109,6 +110,14 @@ func Main(args []string) int {
 			fmt.Println("            every transport. Its stdout and stderr go to")
 			fmt.Println("            {sock-dir}/magmux-{id}.plugin-{name}.log, never to the terminal.")
 			fmt.Println("            A plugin that fails to start is reported and skipped, not fatal.")
+			fmt.Println("  --firebase FILE  Mirror the session into a Firebase Realtime Database")
+			fmt.Println("            described by FILE (JSON). Pane meta, controller state, a frame")
+			fmt.Println("            at 2 fps and a ring of events are written from one flusher every")
+			fmt.Println("            500ms, under a byte budget that sheds frames first. It is a")
+			fmt.Println("            mirror, not a remote terminal — use --listen for that.")
+			fmt.Println("            Inbound commands are OFF unless the file turns them on, and")
+			fmt.Println("            then every one needs an owner uid AND an HMAC signature.")
+			fmt.Println("            See examples/firebase/ for the config, the rules and a vector.")
 			fmt.Println("  --allow-origin ORIGIN  Allow a browser origin (exact scheme://host[:port]).")
 			fmt.Println("            Repeatable. Only these origins get CORS headers; a request from")
 			fmt.Println("            any other origin is refused 403, and an absent Origin is allowed.")
@@ -219,6 +228,9 @@ func Main(args []string) int {
 			fmt.Println("                  what a plugin you start YOURSELF registers with, with or")
 			fmt.Println("                  without --listen; plugins magmux starts get their own.")
 			fmt.Println("  MAGMUX_VIEW_TOKEN  The read-only token, same order and same rule.")
+			fmt.Println("  MAGMUX_FIREBASE The --firebase config path, for when a flag cannot be")
+			fmt.Println("                  passed. The flag wins. Like the tokens, it is dropped from")
+			fmt.Println("                  every pane's environment: it names a service-account key.")
 			fmt.Println("  MAGMUX_DEBUG    Enable debug logging to /tmp/magmux-debug.log")
 			os.Exit(0)
 		}
@@ -240,8 +252,17 @@ func Main(args []string) int {
 	var themePref string
 	var remoteOpts remoteOptions
 	var pluginCmds []string
+	var firebaseArg string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--firebase":
+			if i+1 < len(args) {
+				i++
+				// Recorded only. It is LOADED below, with the rest of the
+				// pre-init() validation, so a bad config is one message in one
+				// place beside the token and TLS failures.
+				firebaseArg = args[i]
+			}
 		case "--listen":
 			if i+1 < len(args) {
 				i++
@@ -545,6 +566,26 @@ func Main(args []string) int {
 		defer rem.cleanup()
 	}
 
+	// The Firebase mirror, also BEFORE init(), and for the same reasons: the
+	// config is parsed, databaseURL is put through the host predicate, the
+	// service-account key is parsed and the HMAC key is read off disk, and every
+	// one of those failures has to be a plain line on a normal terminal.
+	//
+	// Nothing here touches the network. The adapter's Start runs after the
+	// layout exists, beside markLayoutReady.
+	var fb *firebase.Adapter
+	if path := firebaseConfigPath(firebaseArg); path != "" {
+		a, err := mux.prepareFirebase(path)
+		if err != nil {
+			rem.cleanup()
+			fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
+			os.Exit(1)
+		}
+		fb = a
+		firebaseNote(fb)
+		defer mux.cleanupFirebase()
+	}
+
 	if err := mux.init(); err != nil {
 		// Explicit, because os.Exit runs no defer: the generated token names a
 		// credential for a port nothing will ever serve, and it must not
@@ -652,6 +693,11 @@ func Main(args []string) int {
 	// change state, not a layout still being wired up.
 	mux.markLayoutReady()
 
+	// The mirror subscribes HERE, on the same reasoning and one line later: its
+	// first write is the connect-time aggregate, and a mirror seeded from a
+	// half-built layout would show panes with no state until something moved.
+	mux.startFirebase(fb)
+
 	// Start a waiter for every child, grid mode or not: waitForChild is the
 	// only caller of cmd.Wait, so gating it on grid mode left the default
 	// three-shell layout leaking a zombie per exited shell. The grid-only part
@@ -706,6 +752,10 @@ func Main(args []string) int {
 	// what is left here is a listener to drop and a credential to stop
 	// existing.
 	rem.cleanup()
+
+	// The mirror had its final flush inside shutdownSocket, beside the finals
+	// every other subscriber got. What is left is to stop its goroutines.
+	mux.cleanupFirebase()
 
 	// Cleanup socket (normally already removed by the teardown above)
 	if mux.sockPath != "" {

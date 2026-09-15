@@ -1,0 +1,41 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "$root": {
+      "hosts": {
+        "$host": {
+          "owners": {
+            ".read": "auth !== null && root.child($root + '/hosts/' + $host + '/owners/' + auth.uid).val() === true",
+            ".write": false
+          },
+
+          "sessions": {
+            ".read": "auth !== null && root.child($root + '/hosts/' + $host + '/owners/' + auth.uid).val() === true",
+            ".write": false,
+
+            "$sid": {
+              "commands": {
+                "$pushId": {
+                  ".write": "auth !== null && !data.exists() && newData.exists() && root.child($root + '/hosts/' + $host + '/owners/' + auth.uid).val() === true",
+
+                  ".validate": "newData.hasChildren(['uid', 'ts', 'nonce', 'op', 'args', 'sig'])",
+
+                  "uid": { ".validate": "newData.isString() && newData.val() === auth.uid" },
+                  "ts": { ".validate": "newData.isNumber()" },
+                  "nonce": { ".validate": "newData.isString() && newData.val().length >= 16 && newData.val().length <= 64" },
+                  "op": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 64" },
+                  "args": { ".validate": "newData.isString() && newData.val().length <= 65536" },
+                  "sig": { ".validate": "newData.isString() && newData.val().length === 64" },
+
+                  "$other": { ".validate": false }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

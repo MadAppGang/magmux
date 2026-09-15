@@ -211,6 +211,9 @@ const (
 // 2.5 s + ε, against waitSocketShutdown's 3 s, which leaves half a second of
 // margin. It replaces closeSockClients(2s), which bounded only the close.
 func (m *Magmux) shutdownSocket() {
+	// T0 for the whole teardown. Everything bounded below is bounded against
+	// THIS instant, so the budgets add up to one number instead of three.
+	t0 := time.Now()
 	h := m.bus()
 
 	// 0. Stop the framers. A frame is a picture of a session that is still
@@ -245,7 +248,31 @@ func (m *Magmux) shutdownSocket() {
 		}
 	}
 	h.Finalize(finals...)
+
+	// 4. The Firebase mirror's own final flush, under the SAME absolute
+	//    deadline D the finals were written against.
+	//
+	//    After Finalize and not beside it: Finalize is what hands the mirror
+	//    `results` through the ordinary Write path, so this is the flush that
+	//    carries the authoritative end state of every pane, and `alive:false`
+	//    with it.
+	//
+	//    D is ABSOLUTE and shared, not a second two-second budget stacked on
+	//    the first. Finalize almost always returns in milliseconds, so the
+	//    mirror inherits nearly all of D; a Finalize that spent the whole of it
+	//    leaves the floor below, which is enough for one small PATCH and is
+	//    better than a session that never records that it ended cleanly.
+	m.finalizeFirebase(max(time.Until(t0.Add(finalizeDeadline)), finalizeFloor))
 }
+
+const (
+	// finalizeDeadline is D, measured from the start of shutdownSocket. It is
+	// the hub's own bound, stated here so the mirror's last write is measured
+	// against the same instant rather than a number that could drift from it.
+	finalizeDeadline = 2 * time.Second
+	// finalizeFloor is what the mirror gets when Finalize used all of D.
+	finalizeFloor = 250 * time.Millisecond
+)
 
 // eventLine marshals one event exactly as the bus carries it: the whole
 // message, newline included, because the framing belongs to the transport and

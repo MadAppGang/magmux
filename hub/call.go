@@ -69,6 +69,16 @@ func (h *Hub) SetLaneKey(f LaneKeyFunc) {
 	h.mu.Unlock()
 }
 
+// LaneKey resolves an op's delivery lane, exactly as Sub.Call does internally.
+//
+// It is exported for the one adapter that cannot go through Sub.Call: the
+// Firebase command executor writes a durable claim as the FIRST STEP INSIDE the
+// lane item, so it has to build the item itself. Every other transport should
+// use Sub.Call, which does this and the concurrency bound together.
+func (h *Hub) LaneKey(op string, args json.RawMessage) (pane int, ok bool, err error) {
+	return h.laneKeyFor(op, args)
+}
+
 // laneKeyFor resolves an op's lane with no lock held across the call.
 func (h *Hub) laneKeyFor(op string, args json.RawMessage) (int, bool, error) {
 	h.mu.RLock()

@@ -21,6 +21,7 @@ import (
 	"github.com/MadAppGang/magmux/hub"
 	"github.com/MadAppGang/magmux/plugin"
 	"github.com/MadAppGang/magmux/theme"
+	"github.com/MadAppGang/magmux/transport/firebase"
 )
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -223,6 +224,14 @@ type Magmux struct {
 	// registers it with the hub.
 	stream     *Streamer
 	streamOnce sync.Once
+	// firebase is the RTDB mirror (--firebase), or nil. It is ONE more
+	// subscriber on the bus and knows nothing about magmux's internals; the
+	// pointer is kept only so teardown can give it its final flush.
+	//
+	// fbMu guards it and is a LEAF: it is taken alone, never while holding
+	// treeMu or p.mu, and never across a call into the adapter.
+	firebase *firebase.Adapter
+	fbMu     sync.Mutex
 	// autoCloseAfter is how long to wait after a pilot declares the run over
 	// before quitting (-x). Zero means wait for an explicit keypress, which
 	// is the default: a finished run that vanishes before it is read is

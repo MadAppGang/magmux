@@ -1,0 +1,14 @@
+{
+  "databaseURL": "https://magmux-demo-default-rtdb.firebaseio.com",
+  "root": "magmux",
+  "host": "jacks-mac",
+  "credentials": "~/.config/magmux/sa.json",
+  "frameFps": 2,
+  "byteBudgetPerSec": 262144,
+  "commands": {
+    "enabled": false,
+    "owners": ["REPLACE-WITH-A-FIREBASE-UID"],
+    "keyFile": "~/.config/magmux/cmd.key",
+    "allowOps": ["list", "capture", "send", "ticket.run_ticket", "ticket.status"]
+  }
+}
