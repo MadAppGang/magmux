@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -208,6 +209,50 @@ func newPaneFor(y, x, h, w int, cfg PaneConfig) (*Pane, error) {
 	return newPane(y, x, h, w, cfg)
 }
 
+// paneSecrets is what a child must not inherit. It is stated as a DENYLIST
+// rather than an allowlist because a pane is a login shell and its environment
+// is the user's: filtering to a known set would break everything from ssh-agent
+// to a language version manager.
+//
+// Every entry is a credential or a credential's location:
+//
+//   - MAGMUX_TOKEN / MAGMUX_VIEW_TOKEN are the remote-control tokens, and the
+//     token is remote code execution on every pane in this session. A child
+//     that can read it can drive its own siblings.
+//   - MAGMUX_PLUGIN_TOKEN / MAGMUX_PLUGIN_ID identify a plugin to magmux; a
+//     pane holding them could register as one and claim panes.
+//   - MAGMUX_FIREBASE names a config file holding a service-account credential.
+//
+// MAGMUX_SOCK is deliberately NOT here. The socket is the documented way a
+// child talks back to magmux — an agent hook, `magmux mcp`, the pilot — and its
+// access control is the filesystem's.
+var paneSecrets = []string{
+	"MAGMUX_TOKEN",
+	"MAGMUX_VIEW_TOKEN",
+	"MAGMUX_PLUGIN_TOKEN",
+	"MAGMUX_PLUGIN_ID",
+	"MAGMUX_FIREBASE",
+}
+
+// paneEnviron is os.Environ() minus the secrets above.
+//
+// It runs BEFORE the existing appends, so cfg.Env can still set any of them
+// explicitly — a pane deliberately pointed at another magmux's token is a
+// legitimate thing for a caller to ask for, and it is the caller asking rather
+// than an inheritance nobody decided on.
+func paneEnviron() []string {
+	src := os.Environ()
+	out := make([]string, 0, len(src))
+	for _, kv := range src {
+		name, _, ok := strings.Cut(kv, "=")
+		if ok && slices.Contains(paneSecrets, name) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 func (p *Pane) spawnPTY(cfg PaneConfig) error {
 	ptmx, pts, err := pty.Open()
 	if err != nil {
@@ -226,7 +271,7 @@ func (p *Pane) spawnPTY(cfg PaneConfig) error {
 		Setsid:  true,
 		Setctty: true,
 	}
-	env := append(os.Environ(),
+	env := append(paneEnviron(),
 		"TERM=screen-256color",
 		fmt.Sprintf("COLUMNS=%d", p.w),
 		fmt.Sprintf("LINES=%d", p.h),

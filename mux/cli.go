@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/MadAppGang/magmux/auth"
 	"github.com/MadAppGang/magmux/buildinfo"
 	"github.com/MadAppGang/magmux/sockdir"
 	"github.com/MadAppGang/magmux/theme"
@@ -82,6 +83,28 @@ func Main(args []string) int {
 			fmt.Println("  --sock-dir DIR  Bind the IPC socket in DIR instead of /tmp. Ignored with")
 			fmt.Println("            a message if DIR is missing, is not a directory, or would make")
 			fmt.Println("            the socket path too long for the OS.")
+			fmt.Println("  --listen ADDR  Also serve HTTP, WebSocket and server-sent events on ADDR")
+			fmt.Println("            (e.g. 127.0.0.1:7777 or :7777). A pane is a shell, so this is")
+			fmt.Println("            remote code execution: it is always protected by a bearer token,")
+			fmt.Println("            and binding anything but loopback without --tls-cert prints a")
+			fmt.Println("            warning. Endpoints: /v1/capabilities /v1/ops /v1/panes")
+			fmt.Println("            /v1/ops/{name} /v1/panes/{n}/screen /v1/tickets /v1/events /v1/ws")
+			fmt.Println("  --token-file PATH  Read the token from PATH instead of generating one.")
+			fmt.Println("            It must be a regular file, owned by you, mode 0600. magmux never")
+			fmt.Println("            creates or deletes it. With neither this nor MAGMUX_TOKEN, magmux")
+			fmt.Println("            generates a token into {sock-dir}/magmux-{id}.token (0600) before")
+			fmt.Println("            the port accepts, and removes it at exit.")
+			fmt.Println("  --view-token-file PATH  A second, READ-ONLY token. It may call read-class")
+			fmt.Println("            built-in ops and watch panes, and nothing else — no send, no")
+			fmt.Println("            input, no open_pane. Never generated: with no view token, viewers")
+			fmt.Println("            are simply disabled.")
+			fmt.Println("  --view-op plugin.op  Also let the view token call one plugin op. Repeatable.")
+			fmt.Println("            The name must be fully qualified; anything else is ignored with a")
+			fmt.Println("            message, because ignoring a grant can only ever narrow access.")
+			fmt.Println("  --tls-cert FILE / --tls-key FILE  Serve https/wss. Both or neither.")
+			fmt.Println("  --allow-origin ORIGIN  Allow a browser origin (exact scheme://host[:port]).")
+			fmt.Println("            Repeatable. Only these origins get CORS headers; a request from")
+			fmt.Println("            any other origin is refused 403, and an absent Origin is allowed.")
 			fmt.Println("  --theme MODE  light | dark | auto (default: auto). Resolution order:")
 			fmt.Println("            --theme, MAGMUX_THEME, TERM_THEME, OSC 11 probe (interactive")
 			fmt.Println("            tty only), COLORFGBG, then dark. auto means \"no opinion here\":")
@@ -183,6 +206,10 @@ func Main(args []string) int {
 			fmt.Println("                  client started in its own process tree.")
 			fmt.Println("  MAGMUX_SEL_FG   Selection foreground (256-color index, default: 0)")
 			fmt.Println("  MAGMUX_SEL_BG   Selection background (256-color index, default: 220)")
+			fmt.Println("  MAGMUX_TOKEN    The --listen bearer token. Wins over --token-file and is")
+			fmt.Println("                  NEVER written to disk. There is no --token flag on purpose:")
+			fmt.Println("                  a value on a command line is in every ps listing.")
+			fmt.Println("  MAGMUX_VIEW_TOKEN  The read-only token, same order and same rule.")
 			fmt.Println("  MAGMUX_DEBUG    Enable debug logging to /tmp/magmux-debug.log")
 			os.Exit(0)
 		}
@@ -202,8 +229,57 @@ func Main(args []string) int {
 	var sockID string
 	var sockDirArg string
 	var themePref string
+	var remoteOpts remoteOptions
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--listen":
+			if i+1 < len(args) {
+				i++
+				remoteOpts.listen = args[i]
+			}
+		case "--token-file":
+			if i+1 < len(args) {
+				i++
+				remoteOpts.tokenFile = args[i]
+			}
+		case "--view-token-file":
+			if i+1 < len(args) {
+				i++
+				remoteOpts.viewTokenFile = args[i]
+			}
+		case "--view-op":
+			if i+1 < len(args) {
+				i++
+				// Ignored with a message rather than fatal, and that direction
+				// is chosen deliberately: this flag GRANTS, so ignoring it can
+				// only ever narrow what a viewer may do. A malformed value that
+				// exited 1 would be the safer-looking choice and the more
+				// dangerous one, because it invites a typo to be "fixed" by
+				// broadening the value. A name with no dot cannot be a plugin
+				// op, and no built-in has one, so the dot is the whole guard
+				// against this flag handing a viewer a shell.
+				if auth.ValidViewOp(args[i]) {
+					remoteOpts.viewOps = append(remoteOpts.viewOps, args[i])
+				} else {
+					fmt.Fprintf(os.Stderr,
+						"magmux: ignoring --view-op %q (want a fully qualified plugin.op)\n", args[i])
+				}
+			}
+		case "--tls-cert":
+			if i+1 < len(args) {
+				i++
+				remoteOpts.tlsCert = args[i]
+			}
+		case "--tls-key":
+			if i+1 < len(args) {
+				i++
+				remoteOpts.tlsKey = args[i]
+			}
+		case "--allow-origin":
+			if i+1 < len(args) {
+				i++
+				remoteOpts.allowOrigins = append(remoteOpts.allowOrigins, args[i])
+			}
 		case "-g":
 			if i+1 < len(args) {
 				i++
@@ -411,7 +487,35 @@ func Main(args []string) int {
 		},
 	}
 
+	// Remote control, BEFORE init(), and every part of it: the tokens are
+	// resolved and a generated one is written to its final name, the TLS pair
+	// is loaded, the insecure-bind warning is printed, and the listener binds.
+	//
+	// Before init() because all four failures have to be a plain line on stderr
+	// and an exit 1 while magmux still owns a normal terminal — after init()
+	// there is an alternate screen in the way and raw mode on top of it, and a
+	// message printed there is either invisible or corrupts the frame. And
+	// because the token file is renamed into place before the port accepts, an
+	// accepting port implies a readable token: that is the readiness signal.
+	var rem *remote
+	if remoteOpts.enabled() {
+		r, err := mux.prepareRemote(remoteOpts)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
+			os.Exit(1)
+		}
+		rem = r
+		// stderr, never stdout: --headless writes zero bytes to stdout and that
+		// rule has no exceptions. The token itself is never printed.
+		rem.note(os.Stderr)
+		defer rem.cleanup()
+	}
+
 	if err := mux.init(); err != nil {
+		// Explicit, because os.Exit runs no defer: the generated token names a
+		// credential for a port nothing will ever serve, and it must not
+		// outlive the attempt.
+		rem.cleanup()
 		fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
 		os.Exit(1)
 	}
@@ -428,6 +532,11 @@ func Main(args []string) int {
 
 	// Start socket server before spawning children (so MAGMUX_SOCK is set)
 	go mux.socketServer()
+	// The HTTP surface comes up with it. Its listener is already bound, so a
+	// client connecting now is ACCEPTED and answered rather than refused at the
+	// TCP level; until markLayoutReady it gets 503 not_ready on the streaming
+	// endpoints, which is the same answer the socket gives in the same window.
+	rem.serve()
 	// A connection is accepted from this moment on, but the layout does not
 	// exist yet, so nothing is served until markLayoutReady below. The defer is
 	// the safety net: an early os.Exit takes the waiters with the process, but
@@ -440,12 +549,16 @@ func Main(args []string) int {
 	if useGrid {
 		if err := mux.buildGrid(commands); err != nil {
 			mux.restore()
+			// os.Exit runs no defer, so the listener and the generated token go
+			// here by hand, exactly as they do on the init() path.
+			rem.cleanup()
 			fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
 			os.Exit(1)
 		}
 	} else {
 		if err := mux.buildLayout(commands); err != nil {
 			mux.restore()
+			rem.cleanup()
 			fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
 			os.Exit(1)
 		}
@@ -538,6 +651,12 @@ func Main(args []string) int {
 	// in a goroutine woken by m.quit, so we must let it finish — exiting here
 	// races it and drops results entirely.
 	mux.waitSocketShutdown(3 * time.Second)
+
+	// The HTTP subscribers were finalized by the same Hub.Finalize the socket's
+	// were — results, shutdown, EOF, on whatever transport each was on — so
+	// what is left here is a listener to drop and a credential to stop
+	// existing.
+	rem.cleanup()
 
 	// Cleanup socket (normally already removed by the teardown above)
 	if mux.sockPath != "" {

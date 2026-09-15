@@ -28,7 +28,12 @@ import (
 
 // opSource is the Source stamped on every built-in spec. A plugin registers
 // under its own name, so `ops` always says who owns what.
-const opSource = "magmux"
+//
+// It is an alias of protocol.SourceBuiltin, not a second copy of the string:
+// the transport layer decides whether the view token may reach an op by asking
+// whether its source is magmux's, and it cannot import this package to find
+// out.
+const opSource = protocol.SourceBuiltin
 
 // bus returns this magmux's hub, building it and registering the built-in ops
 // on first use.

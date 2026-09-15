@@ -136,11 +136,32 @@ func newSub(h *Hub, c Caller, sink Sink, pluginOf func() string) *Sub {
 // plugin after its Sub already exists — and it is resolved with no hub lock
 // held, so the plugin host's own lock stays above hub.mu in the order.
 func (s *Sub) Caller() Caller {
+	s.mu.Lock()
 	c := s.caller
+	s.mu.Unlock()
 	if s.pluginOf != nil {
+		// Resolved with no sub lock held: pluginOf reaches into the plugin
+		// host's own lock, and plugMu -> hub.mu -> sub.mu is the one direction
+		// in the graph.
 		c.Plugin = s.pluginOf()
 	}
 	return c
+}
+
+// SetClient records the name this connection gave itself.
+//
+// It exists because one transport cannot name itself when its Sub is created:
+// a WebSocket client sends `hello` as its first message, which is necessarily
+// after the handshake, the Session and the aggregate. HTTP has the
+// X-Magmux-Client header and the socket has the `client` field, both of which
+// arrive with the request; a browser has neither.
+//
+// Client is SELF-DECLARED and is a panel label only. Nothing may be authorised
+// on it, which is why it is safe for a peer to set it at any time.
+func (s *Sub) SetClient(name string) {
+	s.mu.Lock()
+	s.caller.Client = name
+	s.mu.Unlock()
 }
 
 // Start is step 3 of the subscribe cut: it installs the connect-time aggregate

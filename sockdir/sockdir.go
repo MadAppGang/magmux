@@ -116,6 +116,27 @@ func ValidDir(dir, id string) (string, bool, string) {
 // oracle: if it is not a pid, there is nothing to ask.
 var pidSockPattern = regexp.MustCompile(`^magmux-([0-9]+)\.sock$`)
 
+// pidTokenPattern and pidTokenTmpPattern gate deletion of the REMOTE-CONTROL
+// token file, under exactly the same rule and for exactly the same reason.
+//
+// A magmux that listens on --listen with no token source generates one and
+// writes it to `magmux-<pid>.token`, beside the socket and under the same id.
+// The normal exit removes it; a SIGKILL, a crash or a power loss does not, and
+// nothing else in the system ever will. A stale token file is not merely
+// litter: it is a live credential for a port that may later be taken by
+// something else, so leaving it is worse than leaving a stale socket.
+//
+// The tmp pattern catches the other half: WriteFile creates
+// `magmux-<id>.token.<pid>.tmp` and renames it, so a process killed between
+// those two steps leaves a file whose OWN pid suffix is the liveness oracle.
+// Note which pid each pattern interrogates — the socket's and the token's is
+// the owning magmux, the tmp file's is the writer, and for a generated token
+// they are the same process anyway.
+var (
+	pidTokenPattern    = regexp.MustCompile(`^magmux-([0-9]+)\.token$`)
+	pidTokenTmpPattern = regexp.MustCompile(`^magmux-[A-Za-z0-9_-]+\.token\.([0-9]+)\.tmp$`)
+)
+
 const (
 	// The sweep runs on the way to the bind, so it has to be bounded. Measured
 	// against this machine's real /tmp (1394 entries, 729 magmux sockets, 712
@@ -172,8 +193,12 @@ func killErrMeansGone(err error) bool {
 	return errors.Is(err, syscall.ESRCH)
 }
 
-// ReapStale removes magmux sockets in dir whose owning process is gone,
-// and returns how many it removed. self is this magmux's own socket path.
+// ReapStale removes the files in dir that a dead magmux left behind — its
+// socket, and the remote-control token it generated — and returns how many it
+// removed. self is this magmux's own socket path.
+//
+// Both kinds are swept in ONE pass over one directory listing (see reapToken),
+// because the listing is the expensive half and the removals are not.
 //
 // THE ORACLE IS THE PID, NOT A DIAL. An earlier design unlinked on
 // ECONNREFUSED; that is measurably wrong on darwin, twice over:
@@ -268,6 +293,15 @@ func ReapStale(dir, self string, deadline time.Duration) int {
 		// off every entry that is not already a candidate.
 		m := pidSockPattern.FindStringSubmatch(name)
 		if m == nil {
+			// Not a socket of ours. It may still be a token file of ours, which
+			// is swept under the same five rules with fs.ModeSocket replaced by
+			// "a regular file". It shares this loop rather than getting its own
+			// pass because os.ReadDir dominates the cost (4.4ms against 78µs per
+			// removal) and a second listing would double the expensive half to
+			// halve the cheap one.
+			if reapToken(dir, name, e) {
+				removed++
+			}
 			continue // rule 1
 		}
 		pid, err := strconv.Atoi(m[1])
@@ -307,6 +341,48 @@ func ReapStale(dir, self string, deadline time.Duration) int {
 		}
 	}
 	return removed
+}
+
+// reapToken removes one stale remote-control token file and reports whether it
+// did.
+//
+// The rules mirror ReapStale's exactly, with one substitution: rule 4 asks for
+// a REGULAR file rather than a socket, because that is what a token is. A
+// directory or a symlink named `magmux-1234.token` is not ours and is left
+// alone — os.Remove on a symlink would unlink the link, but a name magmux never
+// mints is a name magmux does not delete.
+//
+// A --id token file (`magmux-web.token`) is deliberately unreachable here, for
+// the reason ValidSocketID's comment gives: a non-numeric id has no liveness
+// oracle. It does not accumulate either, because one --id rebinds one fixed
+// path that the next start replaces.
+func reapToken(dir, name string, e fs.DirEntry) bool {
+	m := pidTokenPattern.FindStringSubmatch(name)
+	if m == nil {
+		m = pidTokenTmpPattern.FindStringSubmatch(name)
+	}
+	if m == nil {
+		return false // rule 1
+	}
+	pid, err := strconv.Atoi(m[1])
+	if err != nil || pid <= 0 || strconv.Itoa(pid) != m[1] {
+		// Rule 2, the round-trip: `magmux-0001234.token` is not a name magmux
+		// ever writes, so it is not ours to remove.
+		return false
+	}
+	if pid == os.Getpid() {
+		// Rule 3. The sweep runs before this process writes its own token, so
+		// this cannot fire today; it exists so a future caller that sweeps later
+		// cannot delete the file it is about to serve.
+		return false
+	}
+	if !e.Type().IsRegular() {
+		return false // rule 4
+	}
+	if !pidIsGone(pid) {
+		return false // rule 5, last before the removal
+	}
+	return os.Remove(filepath.Join(dir, name)) == nil
 }
 
 // ValidSocketID reports whether a --id NAME may be interpolated into the

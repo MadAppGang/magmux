@@ -28,6 +28,13 @@ const (
 	ClassInput OpClass = "input"
 )
 
+// SourceBuiltin is the Source the registry stamps on magmux's own ops. It is
+// in protocol rather than in mux because it is a wire value a client branches
+// on: "is this op magmux's, or did a plugin add it" decides whether the view
+// token may reach it, and that rule is enforced in the transport layer, which
+// must not import mux.
+const SourceBuiltin = "magmux"
+
 // ValidClass reports whether c is one of the four classes above.
 func ValidClass(c OpClass) bool {
 	switch c {

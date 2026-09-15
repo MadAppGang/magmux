@@ -31,6 +31,23 @@ const (
 	// unauthorized, which is about identity, and from unsupported, which is
 	// about magmux not having the feature at all.
 	CodeForbidden = "forbidden"
+	// CodeUnauthorized means the caller presented no credential or a wrong
+	// one. It is about IDENTITY, where forbidden is about permission: the
+	// remedy for one is a different token and for the other a different
+	// request, so a caller that could not tell them apart would retry the wrong
+	// thing. It can only arise on a transport that has credentials at all —
+	// the unix socket's credential is the filesystem.
+	CodeUnauthorized = "unauthorized"
+	// CodeTooLarge means the request or message exceeded a hard size bound: an
+	// HTTP body, a WebSocket message, a plugin event. Distinct from
+	// bad_request because the payload may be perfectly well formed, and the
+	// caller's remedy is to send less rather than to send it differently.
+	CodeTooLarge = "too_large"
+	// CodePluginGone means the op existed and its plugin did not answer: the
+	// process died, or its connection dropped, with the call in flight. magmux
+	// is the gateway here and the plugin is the upstream, which is why it is
+	// its own code rather than internal — nothing in magmux failed.
+	CodePluginGone = "plugin_gone"
 	// CodeNotReady means the socket is up but the layout is not: magmux
 	// binds before the first child forks and can therefore be reached before
 	// buildGrid has run. Distinct from no_such_pane on purpose — "pane 0 does
