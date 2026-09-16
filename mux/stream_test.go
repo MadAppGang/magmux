@@ -431,6 +431,70 @@ func TestNotifyModeSendsNewsNotScreens(t *testing.T) {
 	t.Fatalf("no `changed` after 3s: %v", sink.snapshot())
 }
 
+// TestNotifyModeDoesNotDropTheChangeItRateLimited is the regression that
+// test/rc/case4-mcp.ts found.
+//
+// Notify mode sends at most one `changed` a second. The first change after a
+// watch is delivered at once, which STARTS that second — so a change arriving
+// inside it is declined. tick had already advanced fr.lastGen past the screen
+// it read, so the next wake returned early, and if the pane then fell silent
+// there was no further generation to bring the work back. The notification was
+// gone for good and the client sat on a screen it believed was current: a
+// silent stale read, which is the one failure a notification channel exists to
+// prevent.
+//
+// The shape here is exactly the failing one: change, take the first `changed`,
+// change again WELL INSIDE the second, and then go quiet. It must still arrive.
+// Reverting either half of the fix (framer.deferred, or offerChanged's bool)
+// hangs this test on the second wait.
+func TestNotifyModeDoesNotDropTheChangeItRateLimited(t *testing.T) {
+	m := newTestMux(t, ctrlPanes(1)...)
+	sub, sink := watcherOn(t, m)
+	p := m.allPanes[0]
+	if _, err := sub.Watch(p.id, protocol.WatchNotify, protocol.FPSMax); err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+
+	changes := func() int {
+		n := 0
+		for _, line := range sink.snapshot() {
+			var ev map[string]any
+			if json.Unmarshal([]byte(line), &ev) != nil {
+				continue
+			}
+			if ev["type"] == protocol.EventChanged {
+				n++
+			}
+		}
+		return n
+	}
+	awaitChanges := func(want int, what string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if changes() >= want {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("only %d `changed` events after 5s, want %d — %s\n%v", changes(), want, what, sink.snapshot())
+	}
+
+	feedWatched(p, "first change")
+	awaitChanges(1, "the first change is never rate-limited")
+
+	// Inside the one-second budget the first `changed` opened, and then silence:
+	// nothing after this point produces another generation for the framer.
+	time.Sleep(50 * time.Millisecond)
+	feedWatched(p, "second change, inside the rate-limit window")
+	awaitChanges(2, "a rate-limited `changed` must be delivered when its budget expires, not dropped")
+
+	// And it really is news, not a screen: notify mode never pays for rows.
+	if fr := sink.frames(p.id); len(fr) != 0 {
+		t.Errorf("a notify watcher was sent %d frames as well", len(fr))
+	}
+}
+
 // TestNoFrameAfterPaneClosed is a race closed by state, and the reason
 // ClosePane stops the framer BEFORE it publishes.
 //

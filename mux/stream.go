@@ -315,13 +315,38 @@ func (st *Streamer) framerCount() int {
 // watcher, which rows it still owes. Rows are encoded from the shadow when they
 // are actually offered, so what a slow watcher receives is the row as it is NOW,
 // not as it was when it changed.
+// pending is the same idea for the OTHER mode. A notify watcher has no rows, so
+// "this one still owes a message" cannot be read off dirty; and the thing it
+// owes outlives the tick that discovered it, because the pane may fall silent
+// before its rate limit expires. See framer.deferred.
 type paneWatcher struct {
-	sub    *hub.Sub
-	mode   protocol.WatchMode
-	fps    int
-	key    bool
-	dirty  map[int]bool
-	lastAt time.Time
+	sub     *hub.Sub
+	mode    protocol.WatchMode
+	fps     int
+	key     bool
+	pending bool
+	dirty   map[int]bool
+	lastAt  time.Time
+}
+
+// notifyMinInterval is how often a notify-mode watcher may be told its pane
+// moved. A `changed` costs the client a whole read of the pane, so 30 of them a
+// second is not a notification — it is a poll with extra steps.
+const notifyMinInterval = time.Second
+
+// tooSoon is one watcher's rate limit, and the ONE place the two modes' limits
+// are written down. They used to be stated in two places — the fps check in the
+// tick loop and a second, longer check inside offerChanged — and the second one
+// silently swallowed work the first had already let through.
+func (w *paneWatcher) tooSoon(now time.Time) bool {
+	if w.lastAt.IsZero() {
+		return false
+	}
+	limit := time.Second / time.Duration(w.fps)
+	if w.mode == protocol.WatchNotify {
+		limit = notifyMinInterval
+	}
+	return now.Sub(w.lastAt) < limit
 }
 
 // framer is one pane's frame producer: one goroutine, one shadow copy of the
@@ -343,6 +368,25 @@ type framer struct {
 	// needed a delta, and one shared full frame is cheaper than maintaining two
 	// encodings of the same screen.
 	pendingKey bool
+	// deferred is set when a tick found work for some watcher and could not hand
+	// it over yet, because that watcher's own rate limit had not expired.
+	//
+	// It exists because NOTHING ELSE REMEMBERS. tick advances lastGen as soon as
+	// it reads the screen and folds the change into the shared shadow, so the
+	// next wake finds `gen == lastGen` and, even past that, a diff with no rows
+	// in it — and if the pane has fallen silent there will never be another
+	// generation to bring the work back. The `skipped` wake at the end of tick
+	// was already there for exactly this case and could not work on its own,
+	// because both of tick's early returns stood in front of it.
+	//
+	// The symptom was worst in NOTIFY mode, whose limit is a whole second: a
+	// client subscribed to a pane, the pane changed once a few hundred
+	// milliseconds later and then went quiet, and the `changed` was dropped for
+	// good. The client sat on a screen it believed was current with no way to
+	// discover otherwise — a silent stale read, which is the one failure a
+	// notification channel exists to prevent. test/rc/case4-mcp.ts caught it and
+	// TestNotifyModeDoesNotDropTheChangeItRateLimited pins it.
+	deferred bool
 
 	// Below here is the run goroutine's alone.
 	shadow         [][]Cell
@@ -476,8 +520,9 @@ func (fr *framer) tick() {
 	fr.mu.Lock()
 	n := len(fr.watchers)
 	key := fr.pendingKey
+	deferred := fr.deferred
 	fr.mu.Unlock()
-	if n == 0 || (gen == fr.lastGen && !geom && !key) {
+	if n == 0 || (gen == fr.lastGen && !geom && !key && !deferred) {
 		return
 	}
 	fr.lastGen = gen
@@ -524,6 +569,14 @@ func (fr *framer) tick() {
 	// comparison is against the whole header, which is why it is one struct.
 	headChanged := head != fr.lastHead
 	if len(fr.changed) == 0 && !full && !headChanged {
+		// Nothing new on the screen. That is the steady state — but it is also
+		// where a tick lands when the only outstanding work is something an
+		// EARLIER tick had to put off, because that tick already folded the
+		// change into the shared shadow. This is the one thing that ever comes
+		// back for it.
+		if deferred {
+			fr.retryDeferred(rows)
+		}
 		return
 	}
 	fr.lastHead = head
@@ -535,10 +588,8 @@ func (fr *framer) tick() {
 	}
 	clear(fr.lines)
 
-	now := time.Now()
 	fr.mu.Lock()
 	fr.pendingKey = false
-	skipped := false
 	for _, w := range fr.watchers {
 		if full {
 			w.key = true
@@ -546,11 +597,80 @@ func (fr *framer) tick() {
 		for _, y := range fr.changed {
 			w.dirty[y] = true
 		}
-		if !w.lastAt.IsZero() && now.Sub(w.lastAt) < time.Second/time.Duration(w.fps) {
+		// Every watcher now owes its client something about THIS screen. Whether
+		// it gets it in this tick or a later one is deliver's business.
+		w.pending = true
+	}
+	fr.mu.Unlock()
+
+	if fr.deliver(hdr, rows, time.Now()) {
+		// Nothing else will wake this framer if the pane has gone quiet, and a
+		// watcher with pending work and no wake would simply never see it.
+		fr.stream.wake()
+	}
+}
+
+// retryDeferred re-offers work an earlier tick could not hand over, on a screen
+// that has not changed since.
+//
+// It reads no screen and invents no content: the rows come from each watcher's
+// own dirty set, and the header is the last frame's with a fresh seq, because to
+// whoever receives it this IS a new message. fr.lines still holds that screen's
+// encodings and is deliberately NOT cleared — the shadow it was built from is
+// the shadow being sent.
+//
+// The sequence number is only spent once somebody is actually ready for it.
+// Without that guard a notify watcher waiting out its second would burn one per
+// wake and leave a gap in every other watcher's stream.
+func (fr *framer) retryDeferred(rows int) {
+	now := time.Now()
+	if !fr.anyReady(now) {
+		fr.stream.wake()
+		return
+	}
+	head := fr.lastHead
+	fr.seq++
+	head.Seq = fr.seq
+	hdr, err := frameHeader(head)
+	if err != nil {
+		return
+	}
+	if fr.deliver(hdr, rows, now) {
+		fr.stream.wake()
+	}
+}
+
+// anyReady reports whether any watcher with pending work has come out of its own
+// rate limit.
+func (fr *framer) anyReady(now time.Time) bool {
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	for _, w := range fr.watchers {
+		if w.pending && !w.tooSoon(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// deliver hands every watcher with pending work whatever it is owed, and reports
+// whether any had to be put off again.
+//
+// It is the ONE offering path: the tick that discovered a change and the retry
+// that comes back for a deferred one go through it, so a watcher cannot be
+// served by two rules that disagree. Caller must NOT hold fr.mu.
+func (fr *framer) deliver(hdr []byte, rows int, now time.Time) (deferred bool) {
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	for _, w := range fr.watchers {
+		if !w.pending {
+			continue
+		}
+		if w.tooSoon(now) {
 			// Too soon for this one. Its rows stay dirty and are encoded from
 			// the shadow when its turn comes, so what it eventually receives is
 			// the current row rather than a stale one.
-			skipped = true
+			deferred = true
 			continue
 		}
 		if w.mode == protocol.WatchNotify {
@@ -559,13 +679,9 @@ func (fr *framer) tick() {
 		}
 		fr.offerFrame(w, hdr, rows, now)
 	}
-	fr.mu.Unlock()
-
-	if skipped {
-		// Nothing else will wake this framer if the pane has gone quiet, and a
-		// watcher with dirty rows and no wake would simply never see them.
-		fr.stream.wake()
-	}
+	// Remembered ACROSS ticks, not just to the end of this one.
+	fr.deferred = deferred
+	return deferred
 }
 
 // offerFrame hands one watcher its pending rows. Caller holds fr.mu.
@@ -590,17 +706,17 @@ func (fr *framer) offerFrame(w *paneWatcher, hdr []byte, rows int, now time.Time
 	w.sub.Offer(fr.pane, w.key, out, hdr)
 	clear(w.dirty)
 	w.key = false
+	w.pending = false
 	w.lastAt = now
 }
 
-// offerChanged is notify mode: the news that the pane moved, at most once a
-// second, with no screen attached.
+// offerChanged is notify mode: the news that the pane moved, with no screen
+// attached. Caller holds fr.mu and has already cleared the rate limit through
+// tooSoon.
 func (fr *framer) offerChanged(w *paneWatcher, now time.Time) {
-	if !w.lastAt.IsZero() && now.Sub(w.lastAt) < time.Second {
-		return
-	}
 	clear(w.dirty)
 	w.key = false
+	w.pending = false
 	w.lastAt = now
 	if line := changedLine(fr.pane); line != nil {
 		w.sub.Offer(fr.pane, false, nil, line)
