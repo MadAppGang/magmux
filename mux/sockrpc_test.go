@@ -94,21 +94,36 @@ type rpcConn struct {
 	sc *bufio.Scanner
 }
 
+// dialWait is how long dial() waits for a freshly started magmux to bind its
+// socket. It is a CAP on a poll, not a sleep: the loop below returns the
+// instant the socket answers, so the only thing a generous cap costs is the
+// failure message on a magmux that never started.
+//
+// Generous because the thing being waited for is a process start, and a process
+// start is the most load-sensitive event in this suite — fork, exec, the
+// startup sweep, a PTY, a login shell, and a race detector on all of it. The
+// old bound was a fixed 60 x 50ms, which is three seconds measured on an idle
+// laptop; beside the rest of the suite under -race it is the reason a test that
+// asserts nothing about timing fails with "could not connect".
+const dialWait = 30 * time.Second
+
 func (r *rpcMagmux) dial() *rpcConn {
 	r.t.Helper()
 	var (
 		conn net.Conn
 		err  error
 	)
-	for i := 0; i < 60; i++ {
+	deadline := time.Now().Add(dialWait)
+	for time.Now().Before(deadline) {
 		conn, err = net.Dial("unix", r.sock)
 		if err == nil {
 			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		conn = nil
+		time.Sleep(20 * time.Millisecond)
 	}
 	if conn == nil {
-		r.t.Fatalf("could not connect to magmux socket %s: %v", r.sock, err)
+		r.t.Fatalf("could not connect to magmux socket %s within %v: %v", r.sock, dialWait, err)
 	}
 	r.t.Cleanup(func() { conn.Close() })
 	_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))

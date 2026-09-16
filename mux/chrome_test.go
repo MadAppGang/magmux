@@ -153,27 +153,47 @@ func paneName(p *Pane) string {
 // End-to-end rather than in-process because the flag parsing that decides this
 // lives in main(), and a unit test would be asserting against a hand-built
 // struct instead of against the flag.
+//
+// The session pane runs `cat`, which blocks on its own PTY until magmux tears
+// it down, so this test contains NO CLOCK. It used to run `sh -c "sleep 6"`,
+// which gave the whole thing a six-second budget measured on an idle laptop:
+// fork, exec, the startup sweep, a login shell and a -race binary all have to
+// land inside it, and beside the rest of the suite under load they do not. A
+// test whose only claim is about a flag must not be able to fail because a
+// process started slowly.
 func TestPanelVisibilityAtStartup(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		args       []string
 		wantHidden bool
 	}{
-		{"bare", []string{"-e", `sh -c "sleep 6"`}, true},
-		{"with -c", []string{"-c", "-e", `sh -c "sleep 6"`}, false},
+		{"bare", []string{"-e", "cat"}, true},
+		{"with -c", []string{"-c", "-e", "cat"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mux := startRPCMagmux(t, tc.args...)
 			c := mux.dial()
-			c.send(map[string]any{"type": "list", "id": "l"})
-			res := replyOK(t, mustReply(t, c, "l"))
-			panes, _ := res["panes"].([]any)
 
+			// Poll rather than judging the first answer. The socket is served
+			// once the layout exists, so a `list` can legitimately arrive while
+			// the panel is being spliced in, and an aggregate without it is a
+			// snapshot of a moment rather than a verdict on the flag.
 			var panel map[string]any
-			for _, v := range panes {
-				e, _ := v.(map[string]any)
-				if e != nil && e["state"] == "panel" {
-					panel = e
+			var panes []any
+			deadline := time.Now().Add(20 * time.Second)
+			for attempt := 0; panel == nil && time.Now().Before(deadline); attempt++ {
+				id := fmt.Sprintf("l%d", attempt)
+				c.send(map[string]any{"type": "list", "id": id})
+				res := replyOK(t, mustReply(t, c, id))
+				panes, _ = res["panes"].([]any)
+				for _, v := range panes {
+					e, _ := v.(map[string]any)
+					if e != nil && e["state"] == "panel" {
+						panel = e
+					}
+				}
+				if panel == nil {
+					time.Sleep(50 * time.Millisecond)
 				}
 			}
 			if panel == nil {

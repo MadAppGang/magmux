@@ -809,10 +809,24 @@ func TestControllerSnapshotReachesAwaitingInput(t *testing.T) {
 	pty.SetWinSize(master, 24, 100)
 
 	// "claude " in the command attaches ClaudeCodeController; the printf emits
-	// the OSC 9 notification; the sleep keeps the pane alive long enough for
-	// the ~4Hz controller poll to observe and broadcast the transition.
+	// the OSC 9 notification; the trailing sleep keeps the pane alive long
+	// enough for the ~4Hz controller poll to observe and broadcast the
+	// transition.
+	//
+	// The child WAITS FOR A GATE FILE before it emits the OSC 9, and the test
+	// creates that file only once it is subscribed. Without it the test is a
+	// race against magmux's whole lifetime: the child used to `sleep 1` and then
+	// go idle, `-w` would end the run, and a subscriber that had not managed to
+	// connect inside two seconds — fork, exec, a -race binary and a login shell,
+	// on a machine running the rest of this suite — read an empty stream and
+	// failed with "the repro did not set up". The gate makes the ordering a
+	// fact instead of a hope: the thing being observed cannot happen before
+	// there is an observer.
+	gate := filepath.Join(t.TempDir(), "go")
 	cmd := exec.Command(binPath, "-e",
-		`sh -c "printf 'starting claude now\n'; sleep 1; printf '\033]9;done\007'; sleep 1"`, "-w")
+		fmt.Sprintf(`sh -c "printf 'starting claude now\n'; `+
+			`while [ ! -f %s ]; do sleep 0.05; done; `+
+			`printf '\033]9;done\007'; sleep 1"`, gate), "-w")
 	cmd.Stdin = slave
 	cmd.Stdout = slave
 	cmd.Stderr = slave
@@ -834,19 +848,30 @@ func TestControllerSnapshotReachesAwaitingInput(t *testing.T) {
 
 	sockPath := fmt.Sprintf("/tmp/magmux-%d.sock", cmd.Process.Pid)
 	var conn net.Conn
-	for i := 0; i < 40; i++ {
+	// dialWait, not a fixed count: this waits on a PROCESS START, which is the
+	// most load-sensitive event in this suite. The loop returns the instant the
+	// socket answers, so the only thing a generous cap costs is the failure
+	// message on a magmux that never started.
+	deadline := time.Now().Add(dialWait)
+	for time.Now().Before(deadline) {
 		conn, err = net.Dial("unix", sockPath)
 		if err == nil {
 			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		conn = nil
+		time.Sleep(20 * time.Millisecond)
 	}
 	if conn == nil {
-		t.Fatalf("could not connect to magmux socket %s: %v", sockPath, err)
+		t.Fatalf("could not connect to magmux socket %s within %v: %v", sockPath, dialWait, err)
 	}
 	defer conn.Close()
 
-	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+
+	// Subscribed. Now — and only now — let the child go idle.
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatalf("opening the gate: %v", err)
+	}
 
 	var states []string
 	var sawAwaitingInput, sawController bool

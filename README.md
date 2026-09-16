@@ -10,7 +10,8 @@ A port of [MTM](https://github.com/deadpixi/mtm) (Rob King) from C to Go, design
 # Homebrew (macOS/Linux)
 brew tap MadAppGang/tap && brew install magmux
 
-# Go install
+# Go install — note the /cmd/magmux suffix, which is new: the repo root is
+# no longer a main package. `@latest` without it will not build.
 go install github.com/MadAppGang/magmux/cmd/magmux@latest
 
 # From source
@@ -61,6 +62,19 @@ the same for the status bar.
 | `-x SECS` | close SECS after a driver finishes (default: wait for a keypress) |
 | `--id NAME` | bind `magmux-NAME.sock` instead of the pid socket (not all digits) |
 | `--sock-dir DIR` | bind the IPC socket in DIR instead of `/tmp` |
+
+[Remote control](#remote-control) — off unless you ask for it:
+
+| Flag | |
+|---|---|
+| `--listen ADDR` | serve HTTP, WebSocket and SSE on ADDR (`127.0.0.1:7777`, `:7777`) |
+| `--token-file PATH` | read the bearer token from PATH instead of generating one |
+| `--view-token-file PATH` | a second, READ-ONLY token from PATH |
+| `--view-op NAME` | let the view token call this plugin op too (repeatable, `plugin.op`) |
+| `--tls-cert FILE` / `--tls-key FILE` | serve HTTPS/WSS; both or neither |
+| `--allow-origin ORIGIN` | allow a browser Origin (repeatable) |
+| `--firebase FILE` | [mirror the session](#firebase) into a Firebase Realtime Database |
+| `--plugin CMD` | run CMD as a [plugin](#plugins) (repeatable) |
 
 Subcommands: [`magmux mcp`](#magmux-mcp) runs magmux as an MCP server.
 
@@ -181,6 +195,11 @@ EOF for every subscriber).
 - **Controlled sessions** — drive a pane from the IPC socket, with a built-in
   [control panel](#the-control-panel) (`-c`) showing what was asked and what
   came back
+- **[Remote control](#remote-control)** — `--listen` serves the same ops over
+  HTTP, and a WebSocket carries live pane frames, so a browser can watch and
+  type without a terminal emulator
+- **[Plugins](#plugins)** — a separate process adds ops that every transport can
+  call, and can own a pane and report its state
 - **Zero dependencies** — only `golang.org/x/sys` and `golang.org/x/term`
 
 ## Scrollback
@@ -225,6 +244,23 @@ Host Terminal
 Each pane runs a goroutine reading from its PTY, parsing VT escape sequences into a cell grid. The render loop checks dirty flags and only redraws when content changes.
 
 Key design: child processes see `TERM=screen-256color`, which limits escape sequences to what the multiplexer supports — the same approach tmux and MTM use.
+
+Everything that can drive the session goes through one place:
+
+```
+  unix socket ─┐                      ┌─ ops (built-in + plugin)
+  HTTP / WS ───┤                      │
+  SSE ─────────┼──▶  hub  ──▶ mux ────┼─ panes, screens, the layout
+  magmux mcp ──┤   (registry,         │
+  Firebase ────┘     bus, lanes)      └─ events, live frames
+```
+
+The hub is the application port: it knows an op's name, its schema and who may
+call it, and it knows how to turn one event into bytes on every subscriber's
+connection. It has never heard of a pane. Each transport is an adapter that
+hands it a caller and a connection — which is why the socket, a browser and an
+agent are told the same things in the same words, and why adding a transport
+adds no cases anywhere else.
 
 ## Configuration
 
@@ -733,6 +769,245 @@ task test:pilot          # full e2e, asserts the artifact on disk
 Code pane it drives uses its own auth. pi reads provider keys from the
 environment it is started in; how they get there is up to you.
 `task pilot:check` reports what it found.
+
+## Remote Control
+
+Everything a program on the same machine can do over the [unix
+socket](#ipc-socket-protocol), a program somewhere else can do over HTTP — the
+same ops, the same events, the same words. Plus one thing the socket does not
+have: a live view of a pane's screen, as JSON frames, over a WebSocket.
+
+```bash
+magmux --listen 127.0.0.1:7777 -e zsh
+# magmux: listening on http://127.0.0.1:7777
+# magmux: token in /tmp/magmux-48213.token (mode 0600, removed at exit)
+```
+
+It is **off unless you ask for it**. Without `--listen` no token is generated,
+no file is written and no port is opened.
+
+### The token
+
+A pane is a shell, so the token is remote code execution, and magmux treats it
+that way:
+
+- **There is always one.** It comes from `MAGMUX_TOKEN`, from `--token-file`, or
+  magmux generates one and writes it to `{sock-dir}/magmux-{id}.token` at mode
+  0600, removed at exit. There is no unauthenticated mode.
+- **There is no `--token` flag,** deliberately: a value on a command line is in
+  every `ps` listing on the machine.
+- **A token file must be a regular file you own with no group or other
+  permission bits.** A symlink is somebody else's file; a group-readable token
+  is not a secret. magmux refuses both rather than shrugging.
+- **The port implies the file.** The token is resolved and written *before* the
+  listener binds, so the moment the port accepts, the token file is there with
+  its final contents. Poll the port, then read the file — there is no window.
+
+```bash
+TOKEN=$(cat /tmp/magmux-48213.token)
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7777/v1/panes
+```
+
+Without the token every endpoint is `401`. There is no "read-only if you have no
+credential" mode.
+
+### Endpoints
+
+| | |
+|---|---|
+| `GET /v1/capabilities` | version, geometry, and what this magmux is listening on |
+| `GET /v1/ops` | every op, with its JSON Schema — including ops a plugin added |
+| `GET /v1/panes` | the pane list; the same object `list` returns on the socket |
+| `GET /v1/panes/{n}/screen` | a pane as text (`?lines=`, `?offset=` for scrollback) |
+| `POST /v1/ops/{name}` | call any op; the body is its args |
+| `POST /v1/tickets` | mint a single-use 30-second credential (see below) |
+| `GET /v1/events` | the event stream, as server-sent events |
+| `GET /v1/ws` | a WebSocket: ops, replies, events and live frames |
+
+```bash
+# open a pane, type into it, read it back, close it
+curl -sH "Authorization: Bearer $TOKEN" -d '{"cmd":"bun test --watch"}' \
+     http://127.0.0.1:7777/v1/ops/open_pane
+curl -sH "Authorization: Bearer $TOKEN" -d '{"pane":2,"text":"a\r"}' \
+     http://127.0.0.1:7777/v1/ops/input
+curl -sH "Authorization: Bearer $TOKEN" \
+     'http://127.0.0.1:7777/v1/panes/2/screen?lines=20'
+curl -sH "Authorization: Bearer $TOKEN" -d '{"pane":2}' \
+     http://127.0.0.1:7777/v1/ops/close_pane
+```
+
+Failures carry both an HTTP status and magmux's own code, because the status is
+a coarse class several codes share: `{"ok":false,"code":"pane_dead","error":"…"}`
+with a 409. Branch on `code`.
+
+### A viewer that cannot type
+
+`--view-token-file` is a second token that may READ and nothing else:
+`capabilities`, `list`, `ops`, `capture`, `transcript`, and `watch` / `unwatch`
+/ `resync` so it can follow a pane live. `input`, `send`, `open_pane`,
+`close_pane`, `status`, `tint`, `overlay` and every plugin op are `403`. It is
+for a dashboard on a wall, a
+screen-share, a status page — anywhere you want the session visible without
+handing over the keyboard.
+
+It is never generated. Write one yourself:
+
+```bash
+head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n' > /tmp/view.token
+chmod 600 /tmp/view.token
+magmux --listen 127.0.0.1:7777 --view-token-file /tmp/view.token -e zsh
+```
+
+`--view-op plugin.op` opens one exception at a time, for a plugin op you have
+decided a viewer may call (`--view-op ticket.status`). It only accepts a
+qualified plugin name, so it can never widen a built-in.
+
+### Drive magmux from a browser or an agent
+
+A browser cannot set an `Authorization` header on an `EventSource` or a
+`WebSocket`, so magmux gives it two ways in that keep the raw token out of
+URLs and proxy logs:
+
+```js
+// 1. a WebSocket: the token rides as a second subprotocol
+const ws = new WebSocket("ws://127.0.0.1:7777/v1/ws",
+                         ["magmux.v1", `magmux.auth.${token}`]);
+
+ws.onmessage = (e) => {
+  const msg = JSON.parse(e.data);
+  if (msg.type === "snapshot") drawPaneList(msg);   // the first message, always
+  if (msg.type === "frame")    paint(msg);          // key: full screen, else a diff
+};
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({ id: 1, op: "hello", args: { client: "my-dashboard" } }));
+  ws.send(JSON.stringify({ id: 2, op: "watch", args: { pane: 0, fps: 15 } }));
+  ws.send(JSON.stringify({ id: 3, op: "input", args: { pane: 0, text: "ls\r" } }));
+};
+```
+
+```js
+// 2. an EventSource: mint a ticket first, spend it in the URL
+const { ticket } = await (await fetch("/v1/tickets", {
+  method: "POST", headers: { Authorization: `Bearer ${token}` },
+})).json();
+const es = new EventSource(`/v1/events?ticket=${ticket}&watch=0,2&fps=10`);
+```
+
+A ticket is single-use, lives 30 seconds, and inherits the kind of the token
+that minted it — a viewer's ticket is still a viewer. It is accepted on exactly
+two endpoints, `/v1/events` and `/v1/ws`, because those are the two that cannot
+carry a header.
+
+A **frame** is a row-level diff: `lines` carries only the rows that changed,
+each with its text and a list of `[col, len, fg, bg, attr]` style runs, plus a
+header with the cursor, the geometry and whether the pane is on its alternate
+screen. `key: true` means "clear and redraw, this is every row". Ask for
+`mode: "notify"` instead and you get a bare `{"type":"changed","pane":n}` — for
+a client that would rather fetch the screen itself than be sent one.
+
+An **agent** reaches the same surface through [`magmux mcp`](#magmux-mcp),
+which turns every pane into a readable, subscribable resource and every plugin
+op into a tool. Nothing about the session is different; it is the same hub seen
+from another window.
+
+### Over a network
+
+`--listen 127.0.0.1:7777` and an ssh tunnel is the safe default and needs
+nothing else. If you bind somewhere reachable, use TLS:
+
+```bash
+magmux --listen 0.0.0.0:7777 --tls-cert cert.pem --tls-key key.pem \
+       --allow-origin https://dash.example.com -e zsh
+```
+
+magmux prints a loud warning for a non-loopback bind without `--tls-cert`,
+because the token and every keystroke would cross the network in clear text. It
+is a warning and not a refusal: a Tailscale or WireGuard interface is a
+perfectly good place to bind, and magmux cannot tell one from a café LAN.
+
+For browsers, `--allow-origin` is the CORS allow-list; without it only
+same-origin requests pass. On a loopback bind magmux also checks the `Host`
+header, which is what stops a page on the internet driving your laptop's magmux
+through DNS rebinding.
+
+## Plugins
+
+A plugin is a separate process that connects to magmux's socket like any other
+client and then registers a name and some ops. From that moment its ops are in
+magmux's op table as `<plugin>.<op>` and **every** transport can call them —
+`call` on the socket, `POST /v1/ops/ticket.run_ticket`, a WebSocket message, an
+MCP tool (`ticket__run_ticket`), a signed Firebase command. There is no code in
+magmux that knows what your plugin does.
+
+```bash
+magmux --listen 127.0.0.1:7777 -e zsh \
+       --plugin 'bun examples/plugins/ticket-runner/main.ts'
+```
+
+```bash
+curl -sH "Authorization: Bearer $TOKEN" \
+     -d '{"title":"run the migration"}' \
+     http://127.0.0.1:7777/v1/ops/ticket.run_ticket
+```
+
+[`examples/plugins/ticket-runner`](examples/plugins/ticket-runner) is the whole
+thing in ~300 lines of TypeScript, with no model, no network and no API key: it
+opens a pane with `controller:"self"`, waits for its agent's prompt, sends the
+ticket, emits `progress` events as it goes, and finally reports the pane as
+`awaiting_input` carrying the agent's answer. `sdk.ts` beside it is the client
+library; `client/pluginsdk.go` is the Go equivalent.
+
+That last step is the point. `awaiting_input` is what a driver waits for, and a
+plugin saying it is a claim about a session magmux is not itself following —
+magmux reconciles it with what the terminal actually saw, and the control panel
+attributes the pane to the plugin that claimed it, so "who said this session was
+done" stays answerable.
+
+A plugin magmux spawned authenticates with a one-time token magmux puts in its
+environment; one you started yourself uses the session token. Its ops vanish the
+moment it exits, calls in flight become `plugin_gone`, and one that hangs is
+cancelled and reported as `timeout`.
+
+## Firebase
+
+`--firebase config.json` mirrors the session into a Firebase Realtime Database:
+pane state, the op catalogue, an event ring and — at 2 fps, shed first when the
+byte budget is tight — the screens. It exists so a phone on a train can watch a
+build finish. It is not a remote terminal; for that, watch over a WebSocket.
+
+```json
+{
+  "databaseURL": "https://your-project-default-rtdb.firebaseio.com",
+  "root": "magmux",
+  "host": "laptop",
+  "credentials": "~/.config/magmux/sa.json",
+  "commands": {
+    "enabled": true,
+    "owners": ["YOUR-FIREBASE-UID"],
+    "keyFile": "~/.config/magmux/cmd.key",
+    "allowOps": ["list", "capture", "send"]
+  }
+}
+```
+
+With `commands.enabled` a client can write a command back and magmux will run
+it. That direction is defended twice, and either layer alone would fail open:
+
+1. The **security rules** in [`examples/firebase/database.rules.json`](examples/firebase)
+   refuse a write from a uid that is not an owner, and pin `uid` to the
+   authenticated user. A forged command never lands.
+2. **magmux** verifies an HMAC over the command with a key that is never in the
+   database, plus a timestamp window, a nonce and the `allowOps` list. That is
+   the layer that survives a stolen session or a mis-set rule.
+
+A command runs **at most once**: magmux writes a durable claim and waits for the
+database to acknowledge it before any side effect, so a crash leaves "outcome
+unknown" rather than a command that runs twice.
+
+[`examples/firebase/`](examples/firebase) has the rules, a config template, an
+emulator setup and `hmac-vector.json` — the committed test vector any client
+that signs commands must reproduce exactly.
 
 ## Subcommands
 

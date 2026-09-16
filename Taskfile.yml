@@ -366,6 +366,68 @@ tasks:
     cmds:
       - bun test/ui/case3.ts
 
+  # ── Remote control: the six validation criteria ───────────────────────────
+  #
+  # Unlike the `test:ui` cases, these cost NOTHING and need no credentials:
+  # there is no model anywhere in them. They start a real magmux with a real
+  # listener and drive it over HTTP, WebSocket, server-sent events, the unix
+  # socket, `magmux mcp` on stdio and a Firebase emulator, and every one of them
+  # prints the numbers it measured rather than a bare pass.
+  #
+  # Criterion 3 and the Firebase quarter of criterion 5 are gated on
+  # MAGMUX_FIREBASE_EMULATOR=1: they need firebase-tools and a JDK 21+
+  # (firebase-tools 15.19.1 refuses anything older and exits before it binds the
+  # port), and they download an emulator jar on first run. Without the variable
+  # they skip and say so.
+
+  test:rc:
+    desc: "Remote control — all six validation criteria against a real binary"
+    deps: [build]
+    cmds:
+      - bun test/rc/run-all.ts
+
+  test:rc:full:
+    desc: "test:rc including the Firebase emulator (needs firebase-tools + JDK 21+)"
+    deps: [build]
+    cmds:
+      - MAGMUX_FIREBASE_EMULATOR=1 bun test/rc/run-all.ts
+
+  test:rc:http:
+    desc: "RC criterion 1 — HTTP: the token, the 401, the view token's 403"
+    deps: [build]
+    cmds:
+      - bun test/rc/case1-http.ts
+
+  test:rc:ws:
+    desc: "RC criterion 2 — WebSocket: watch a pane, type, measure the frame latency"
+    deps: [build]
+    cmds:
+      - bun test/rc/case2-ws.ts
+
+  test:rc:firebase:
+    desc: "RC criterion 3 — Firebase: the mirror, a signed command, an unsigned one"
+    deps: [build]
+    cmds:
+      - MAGMUX_FIREBASE_EMULATOR=1 bun test/rc/case3-firebase.ts
+
+  test:rc:mcp:
+    desc: "RC criterion 4 — MCP: pane resources, and subscribe → resources/updated"
+    deps: [build]
+    cmds:
+      - bun test/rc/case4-mcp.ts
+
+  test:rc:plugin:
+    desc: "RC criterion 5 — the demo plugin over HTTP, WebSocket, MCP and Firebase"
+    deps: [build]
+    cmds:
+      - bun test/rc/case5-plugin.ts
+
+  test:rc:slow:
+    desc: "RC criterion 6 — a stalled WebSocket client beside a live one"
+    deps: [build]
+    cmds:
+      - bun test/rc/case6-slow-client.ts
+
   test:mcp:
     desc: "UI case 4 — full e2e: a Claude Code agent drives a live session over `magmux mcp`"
     # No pilot:deps — case 4 uses no pi.dev SDK. Both agents are Claude Code and

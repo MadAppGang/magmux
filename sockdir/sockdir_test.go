@@ -2,6 +2,7 @@ package sockdir
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -333,43 +334,57 @@ func TestReapStaleSocketsAtScale(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mkSocket(t, filepath.Join(dir, fmt.Sprintf("magmux-%d.sock", dead)))
-
-	start := time.Now()
-	n := ReapStale(dir, "", ReapDeadline)
-	elapsed := time.Since(start)
-
-	// The functional assertion, and the one that is deterministic: at 1501
-	// entries the sweep still REACHES a real socket and removes it. A backlog
-	// that grew past the deadline must still shrink on every start, which is
-	// the contract the reaper is designed around.
-	if n != 1 {
-		t.Errorf("reaped %d, want 1 (only one entry is a real socket)", n)
+	// The measurement is the BEST of several identical sweeps, not one sample.
+	//
+	// One sample measures the machine as much as the code. On one box,
+	// unloaded, this sweep took 15ms; the same sweep, on the same box, beside
+	// the rest of the suite under -race, took 255ms and failed a bound set from
+	// the unloaded figure. Repeated runs of identical work spanned 34-241ms —
+	// and all of that spread is scheduler preemption, because the work is
+	// byte-identical every time. The minimum is the run that happened to get a
+	// core to itself, so it is the closest this test can get to the cost of the
+	// CODE; a per-entry cost model that has genuinely got worse moves the
+	// minimum too, because it is work that has to be done on every run.
+	//
+	// Each iteration re-creates the socket, because the previous sweep removed
+	// it, and each asserts the functional claim — that is the deterministic
+	// half, and the one that matters: at 1501 entries the sweep still REACHES a
+	// real socket and removes it. A backlog that grew past the deadline must
+	// still shrink on every start, which is the contract the reaper is designed
+	// around.
+	const sweeps = 5
+	best := time.Duration(math.MaxInt64)
+	var samples []time.Duration
+	for i := 0; i < sweeps; i++ {
+		mkSocket(t, filepath.Join(dir, fmt.Sprintf("magmux-%d.sock", dead)))
+		start := time.Now()
+		n := ReapStale(dir, "", ReapDeadline)
+		elapsed := time.Since(start)
+		samples = append(samples, elapsed)
+		if n != 1 {
+			t.Errorf("sweep %d reaped %d, want 1 (only one entry is a real socket)", i+1, n)
+		}
+		best = min(best, elapsed)
 	}
 
-	// The timing bound is deliberately an order of magnitude above the deadline
-	// rather than equal to it, and that is a correction to what this test used
-	// to assert.
-	//
-	// `elapsed <= ReapDeadline` reads like a tight cost claim and is in fact a
-	// measurement of the machine: on one box, unloaded, this sweep took 15ms;
-	// the same sweep, on the same box, beside the rest of the suite under -race,
-	// took 255ms and failed. Repeated runs of identical work spanned 34-241ms.
-	// Nor can a tight bound detect what it would need to: reintroducing
-	// DirEntry.Info() (an lstat per entry, the regression e.Type() exists to
-	// avoid) costs ~12ms at this size — well inside that noise.
-	//
-	// So the bound is set where it is still meaningful: a sweep that has become
-	// quadratic, or that has started blocking on I/O per entry, blows past a
-	// second and nothing else does. The deadline itself is enforced IN the code
-	// and pinned by TestReapStaleSocketsRespectsDeadline; that is where "the
-	// sweep is bounded" is actually proven, and it needs no wall clock at all.
+	// The bound is deliberately an order of magnitude above the deadline rather
+	// than equal to it. A tight bound cannot detect what it would need to:
+	// reintroducing DirEntry.Info() (an lstat per entry, the regression
+	// e.Type() exists to avoid) costs ~12ms at this size, well inside the
+	// noise. So the bound is set where it is still meaningful: a sweep that has
+	// become quadratic, or that has started blocking on I/O per entry, blows
+	// past a second and nothing else does. The deadline itself is enforced IN
+	// the code and pinned by TestReapStaleSocketsRespectsDeadline; that is
+	// where "the sweep is bounded" is actually proven, and it needs no wall
+	// clock at all.
 	const ceiling = 20 * ReapDeadline
-	if elapsed > ceiling {
-		t.Errorf("sweep of 1501 entries took %v, over the %v ceiling — this is not load, "+
-			"it is a change in the per-entry cost model", elapsed, ceiling)
+	if best > ceiling {
+		t.Errorf("the fastest of %d sweeps of 1501 entries took %v, over the %v ceiling — "+
+			"every sweep was slow, so this is not load, it is a change in the per-entry "+
+			"cost model (samples: %v)", sweeps, best, ceiling, samples)
 	}
-	t.Logf("swept 1501 entries in %v (deadline %v, failure ceiling %v)", elapsed, ReapDeadline, ceiling)
+	t.Logf("swept 1501 entries; best %v of %v (deadline %v, failure ceiling %v)",
+		best, samples, ReapDeadline, ceiling)
 }
 
 // TestReapStaleSocketsRespectsDeadline pins that the deadline actually stops the

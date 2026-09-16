@@ -3,8 +3,26 @@
 ## Build
 
 ```bash
-go build -o magmux ./cmd/magmux
+go build -o magmux ./cmd/magmux          # the binary
+go test -race -count=1 ./...             # the suite; run it ALONE
+task test:rc                             # the six remote-control criteria, bun
+task test:rc:full                        # …including the Firebase emulator
 ```
+
+`./cmd/magmux`, not `.`: the repo root is not a main package. The installable
+path changed with it — `go install github.com/MadAppGang/magmux/cmd/magmux@latest`.
+
+`test/rc/*.ts` is the end-to-end validation suite: bun cases that start a real
+binary with a real listener and drive it over HTTP, WebSocket, server-sent
+events, the unix socket, `magmux mcp` on stdio and a Firebase emulator. Unlike
+`test/ui/*` they cost nothing and need no credentials — there is no model
+anywhere in them — so they are safe to run on any change. Criterion 3 and the
+Firebase quarter of criterion 5 are gated on `MAGMUX_FIREBASE_EMULATOR=1`: they
+need firebase-tools and a **JDK 21+** (firebase-tools 15.19.1 refuses anything
+older and exits BEFORE it binds the port, so an older JDK looks like an emulator
+that never came up), and they download an emulator jar on first run. Without the
+variable they skip and say so. The same gate guards
+`transport/firebase`'s `TestEmulatorEndToEnd`.
 
 ## Architecture
 
@@ -78,6 +96,47 @@ Controlled sessions (an external AI agent steering a pane):
   toolbox replaced by `send_to_session` + `finish`.
 - `pilot/magmux.ts` — its socket bridge.
 - `test/ui/case3.ts` — the visual end-to-end case for the whole loop.
+
+Remote control (a browser, an agent or a phone driving a session from off the
+machine). The shape is hexagonal and the direction is strictly one way: `mux`
+registers itself INTO the hub and the adapters, and nothing below `mux` has ever
+heard of a `Pane`, a `Screen` or a `treeMu`. That is what
+`cmd/magmux/import_direction_test.go` enforces, and it is why every one of these
+packages can be tested against a bare hub with no terminal at all.
+
+- `hub/` — the application port. `hub.go` is the op REGISTRY (name → spec + func,
+  per source), `call.go` the call path and the watch verbs, `sub.go` one
+  subscriber (bounded FIFO, one writer goroutine, the teardown cut), `lane.go`
+  per-(Sub, pane) ordered delivery, `watch.go` the `Watcher` interface `mux`'s
+  streamer implements.
+- `mux/stream.go`, `mux/frame.go`, `mux/input.go` — the live screen: the
+  readLoop hook, one framer goroutine per WATCHED pane, the row/run encoding,
+  and the `input` op.
+- `mux/ops_builtin.go`, `mux/sockrc.go`, `mux/sockconn.go` — the built-in ops as
+  hub ops, the `ops`/`call`/`watch` verbs, and the socket connection as a Sub.
+- `mux/remote.go` — the ONLY place `mux` and the transport packages meet:
+  `--listen` becomes a token, a TLS pair and a bound listener, in that order.
+- `auth/` — tokens (generate, load, constant-time check), the view token, the
+  single-use tickets that keep a raw token out of a URL.
+- `transport/ws/`, `transport/sse/` — the RFC 6455 codec and handshake, and the
+  SSE reader/writer. Both pure and fuzzable.
+- `transport/httpapi/` — the server: REST, `/v1/events` (SSE), `/v1/ws`, the
+  auth/Origin/Host/CORS middleware, and the protocol-code → HTTP-status map.
+- `transport/firebase/` — the Realtime Database mirror and the verified inbound
+  commands.
+- `plugin/` — the plugin host: spawn, registration over the ordinary socket,
+  invoke routing, limits, death. `mux/controller_plugin.go` is the pane-side
+  half, where a plugin becomes a pane's controller.
+- `mcp/rc.go` — panes and plugin event rings as MCP resources, and plugin ops as
+  dynamic MCP tools.
+- `protocol/` — the PUBLIC wire types shared by all of them: errors and codes,
+  event names, `OpSpec`, `Frame`/`Line`/`Run`, the `plugin.op` ↔ `plugin__op`
+  name grammar.
+- `client/` — the PUBLIC Go socket client, plus the plugin SDK.
+- `examples/plugins/ticket-runner/` — the demo plugin (TypeScript, bun) and its
+  SDK. `examples/firebase/` — the emulator config, the shipped security rules
+  and the committed HMAC vector.
+- `test/rc/*.ts` — the six end-to-end validation cases.
 
 ## Key Design Decisions
 
@@ -659,6 +718,379 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   with the Ctrl-G `q` chord once the event has landed
   (`TestSocketIDFlagBindsNamedSocket` and `TestSocketReaderAcceptsLargeLine` do
   the latter). This has now been diagnosed twice; it should not be a third time.
+
+### Hub invariants (`hub/`: the registry, the bus, the lanes, the teardown)
+
+- **`hub` must never import `mux`, and that is the whole architecture in one
+  sentence.** The hub is the application port: it knows an op name, a spec and a
+  func, and it knows how to turn bytes into somebody's connection. It does not
+  know what a pane IS. `mux` registers its built-ins INTO it
+  (`mux/ops_builtin.go`) and installs its streamer as the `Watcher`; the socket,
+  HTTP, WebSocket, SSE and Firebase are driving adapters that hand it a `Caller`
+  and a `Sink`. Break the direction and every one of those packages becomes
+  untestable without a terminal, which is exactly what they were split out to
+  avoid. `cmd/magmux/import_direction_test.go` is the guard, and it has a
+  negative control: adding a deliberate `mux` import to `hub` must fail it.
+
+- **`hub.mu` is a LEAF, and the only order inside the package is
+  `hub.mu -> sub.mu`.** It is never held across an `OpFunc`, a `Sink` call, or
+  anything else that can block, and no lock of `mux`'s is ever taken while it is
+  held. A registry lock held across a plugin's op — which is a round trip to
+  another process — would stop every other transport for the duration.
+
+- **Registration and unregistration are per SOURCE, never per op.**
+  `Register(source, ops…)` / `UnregisterSource(source)` with `"magmux"` for the
+  built-ins and the plugin's name otherwise. A plugin that dies takes exactly
+  its own ops with it, and `Rev` changes so a client can tell that the op list
+  it cached is stale — which is what `ops_changed` carries and what makes MCP's
+  `notifications/tools/list_changed` possible at all.
+
+- **`Publish` never blocks, and that is the bus's entire contract.** It takes
+  already-marshalled bytes and hands the SAME slice to every live `Sub`. Each
+  `Sub` owns a bounded FIFO (`fifoMaxMsgs` 1024, `fifoMaxBytes` 8 MiB) and one
+  writer goroutine, so a subscriber that stops reading fills its own queue and
+  is closed with `slow_consumer` — alone. If publishing could block, one laptop
+  lid would stop magmux for everybody, and the symptom would be no error
+  anywhere. `TestPublishNeverBlocksOnAStalledSink` and
+  `TestOverflowClosesOnlyThatSubscriber` drive the FIFO directly — filling a
+  kernel socket buffer on loopback can take megabytes, so that is where the
+  shedding rule is actually proven — and `test/rc/case6-slow-client.ts` stages
+  the same failure on a real stack, where what it can show is that the stall was
+  CONTAINED.
+
+- **The connect-time aggregate is the `head`, and it is NOT in the FIFO.** Every
+  subscriber's first message is the aggregate, on every transport, and it cannot
+  be discarded — a `Finalize` landing between registering a `Sub` and starting
+  it must still let it through first (`TestFinalizeReplayOrder`,
+  `TestSSEDeliversTheAggregateFirst`). The property it buys is that there is no
+  window in which an event is published, missed by the aggregate and missed by
+  the stream: `handleSocketConn` used to build the aggregate BEFORE it
+  registered, and anything published in between was simply lost.
+
+- **A lane OUTLIVES its connection.** A `send` is not one write — it is text,
+  then a key every 20 ms, then a pause, then Enter — so a one-shot client
+  (README's `nc -U`) reaches EOF while its second instruction is still queued
+  behind the first one's pacing. On close a lane accepts nothing new and DRAINS
+  what it holds. Dropping the queue instead loses an instruction silently, on
+  exactly the client shape most likely to hit it (`TestOneShotSendSurvivesClose`).
+
+- **`Quiesce` is the only thing that discards a queued item unrun, and it says
+  so.** It calls `Discard` rather than dropping the item, because the panel has
+  already shown that request as an OUT row and a request that vanishes between
+  the panel and the pane is the one thing the panel exists to make impossible.
+  The item's `ctx` is cancelled by `Quiesce` and by nothing else: a caller's own
+  timeout ends that CALLER'S WAIT and never reorders or truncates a lane.
+
+- **The torn-write rule is why `Sink.Write` returns an `n` at all.** `n > 0`
+  means bytes may have left the process, so the stream is mid-line and NOTHING
+  may follow it — the subscriber gets EOF without its finals, because splicing
+  `results` into a half-written line is worse than not sending it. `n == 0`
+  leaves the stream line-aligned and the finals can still be written. Only a
+  sink over a plain `net.Conn` can honestly report `n == 0`; a TLS or buffered
+  sink (`wsSink` under TLS, `sseSink` always) must report every failure as torn,
+  because after a `tls.Conn` write times out the TLS state is corrupt and a
+  `ResponseWriter.Write` counts bytes buffered rather than bytes sent.
+  `TestFinalizeTornWriteRealSocket` and `TestFinalizeTornWriteSSE` pin both
+  halves.
+
+- **`Finalize` bounds the whole teardown with ONE absolute deadline.** The
+  message already in flight gets `finalCut` (500 ms); everything after it — the
+  pending aggregate, then `results`, then `shutdown` — shares `finalDeadline`
+  (2 s) measured from the moment `Finalize` started, so the worst case is ~2.5 s
+  from `m.quit` whatever the backlog was. Backlogs are DISCARDED and the finals
+  jump the queue: a subscriber 1,024 events behind does not need those events,
+  it needs the answer. A `Session` opened after `Finalize` gets its aggregate and
+  the finals on its own `lateDeadline` clock, because the teardown it missed is
+  already over.
+
+### Streaming invariants (`mux/stream.go`, `mux/frame.go`)
+
+- **Until something watches a pane, streaming costs nothing measurable.** The
+  hook in `readLoop` is one atomic increment and one atomic nil load
+  (`Pane.noteOutputLocked`), under the `p.mu` the read loop already holds — no
+  allocation, no second lock, no branch that touches the screen.
+  `TestReadLoopHookIsAllocationFree` pins it at zero. A pane with no watcher has
+  NO framer goroutine at all (property N2, `framerCount()`); the first watcher
+  starts one and the last to leave stops it.
+
+- **The framer is WAKE-DRIVEN, not polled, and the tick's early return must stay
+  allocation-free.** A wake is a non-blocking send into a cap-1 channel, so a
+  thousand writes between two frames coalesce into one. `TestIdleWatchedPaneCostsNothing`
+  pins a watched-but-idle tick at zero allocations and zero frames. A 15 fps
+  poll over eight watched panes would diff 120 screens a second forever.
+
+- **A DEFERRED offer must be remembered, because nothing else remembers it.**
+  `tick` advances `fr.lastGen` as soon as it reads the screen and folds the
+  change into the SHARED shadow, so the next wake finds an unchanged generation
+  and, past that, a diff with no rows in it. If the pane then goes quiet there
+  is no further generation to bring the work back. `framer.deferred` plus
+  `paneWatcher.pending` is what survives that, and `retryDeferred` is the only
+  thing that ever comes back for it. The symptom was worst in NOTIFY mode, whose
+  limit is a whole second: a client subscribed, the pane changed a few hundred
+  milliseconds later and then fell silent, and the `changed` was dropped for
+  good — a client sitting on a screen it believed was current, which is the one
+  failure a notification channel exists to prevent. Found by
+  `test/rc/case4-mcp.ts`, pinned by
+  `TestNotifyModeDoesNotDropTheChangeItRateLimited`.
+
+- **`paneWatcher.tooSoon` is the ONE place the two modes' rate limits are
+  written down.** Frames mode is bounded by its own fps; notify mode by
+  `notifyMinInterval` (one second), because a `changed` costs the client a whole
+  read of the pane and thirty of them a second is not a notification, it is a
+  poll with extra steps. They used to be stated twice — an fps check in the tick
+  loop and a second, longer check inside `offerChanged` — and the second one
+  silently swallowed work the first had already let through.
+
+- **`w.dirty` is per watcher and the shadow is shared.** A row is diffed once,
+  by whichever tick saw it, and copied into the shadow; a watcher whose frame
+  rate made it skip that tick would lose the row forever if the framer did not
+  remember, PER WATCHER, which rows it still owes. Rows are encoded from the
+  shadow when they are actually offered, so a slow watcher receives the row as
+  it is NOW rather than as it was when it changed.
+
+- **A keyframe is every row; a delta replaces whole rows.** `key: true` means
+  the client clears first and then has a complete screen with no memory of what
+  came before, which is why a second watcher joining, a resize, an alt-screen
+  switch and an explicit `resync` all force one — a client cannot apply row
+  deltas across a geometry change. `pendingKey` forces it for EVERYONE watching
+  the pane: a keyframe is a correct frame for a watcher that only needed a
+  delta, and one shared full frame is cheaper than maintaining two encodings of
+  one screen.
+
+- **A frame is not only its rows.** Moving the cursor, hiding it (DECTCEM),
+  scrolling back locally and filling the history ring all change what a client
+  draws without changing a cell, so the comparison is against the WHOLE
+  `FrameHeader` and a header-only frame is a legitimate frame. Second-guessing
+  that in `offerFrame` is what made the cursor invisible to every viewer.
+
+- **The stream shows the LIVE screen whatever the local human scrolled to.**
+  `viewRow(0, …)`, always; `scrolled` in the header is how a client learns the
+  person at the keyboard is looking at something else. Two viewers must not
+  fight over one viewport.
+
+- **The watch reply and the first frame are ordered by a SLOT, not by luck.** A
+  `watch` creates an INACTIVE slot; `replyAndActivate` queues the reply and
+  activates the slot in one `sub.mu` acquisition. So no frame can precede the
+  reply that created it, on any transport — a client sizes itself from the reply
+  and clears for the keyframe, and a frame arriving first would be applied to a
+  screen of unknown dimensions. `pane_closed` clears the slots and refuses a
+  concurrent `Offer`, which is why a picture of a pane can never arrive after
+  the news that it is gone.
+
+- **Everything the framer reads from the pane it reads under `p.mu` and nothing
+  else — never `treeMu`.** It diffs against its shadow, copies the differing
+  rows, and releases the lock; the JSON encoding happens afterwards, unlocked,
+  from the shadow. A 24-row encode sitting between the read loop and its next
+  byte is a stalled child. Lock order: `streamMu -> fr.mu -> sub.mu`, and
+  nothing here takes `treeMu` while holding any of them.
+
+### Transport invariants (`transport/`, `auth/`)
+
+- **A token ALWAYS exists once magmux listens.** It comes from `MAGMUX_TOKEN`,
+  from `--token-file`, or it is generated and written to
+  `{sockdir}/magmux-{id}.token` at 0600. There is no "no token" mode, and there
+  is deliberately no `--token` flag: a value on a command line is in every `ps`
+  listing on the machine. A pane is a shell, so this is remote code execution
+  and there is no such thing as an unauthenticated convenience mode.
+
+- **The ORDER in `mux/remote.go` is a security order.** Tokens resolved and the
+  generated one written; the TLS pair loaded; the insecure-bind warning printed;
+  and only THEN the listener binds. So an accepting port implies a final token
+  file at its final name with its final contents — which is the readiness signal
+  every harness uses (`test/rc/harness.ts` reads the token off disk, exactly as
+  an operator does). Every failure before the bind takes the generated token file
+  with it: a file naming a credential for a port nothing is listening on is
+  litter that looks like a secret.
+
+- **Comparison is over SHA-256 digests with `subtle.ConstantTimeCompare`, and
+  BOTH candidates are compared before either result is read.** Otherwise the
+  time, or the branch, says which of the two tokens was closer.
+
+- **A token file is refused unless it is a regular file, owned by this euid,
+  with no group or other bit set.** A token another user can read is not a
+  secret, and a symlink is somebody else's file. The same rule covers Firebase's
+  `commands.keyFile`, which gets the credential treatment and not the config
+  treatment.
+
+- **The view token is never generated.** A read-only capability that appears by
+  itself is a capability nobody is tracking. It must also differ from the
+  session token: a read-only credential that is also the full one grants nothing
+  and hides that it does not, so magmux refuses to start.
+
+- **Every refusal is an HTTP STATUS, decided BEFORE any upgrade.** No WebSocket
+  close code ever carries an auth failure — a browser cannot read one reliably,
+  and a client that has to upgrade in order to learn it was unauthorised has
+  already been given a connection. Same for `/v1/events`: once the 200 is out
+  there is no way left to say no, so every check happens above it.
+
+- **The raw token never appears in a URL.** EventSource and a browser WebSocket
+  cannot set a header, so they present a single-use 30-second TICKET minted by
+  an authenticated `POST /v1/tickets`. `ticketAllowed` is an allow-list of
+  exactly those two endpoints, not a flag, because a ticket travels where it
+  gets logged. A ticket inherits its minter's kind, so it is never a way up; a
+  spent, expired and never-existed ticket are one answer, so the set is not
+  enumerable. The WebSocket's other channel is the subprotocol
+  `magmux.auth.<token>`, and magmux echoes `magmux.v1` and NEVER the auth entry
+  — echoing it would put the token in a response header and therefore in every
+  proxy log on the way back.
+
+- **Origin is checked against `--allow-origin` or the request's own host, and
+  Host is checked on a loopback bind.** That second one is what stops a page on
+  the internet driving a magmux on a developer's laptop through DNS rebinding.
+  Neither is authentication; both are there because the browser will happily
+  attach a credential the user did not mean to spend.
+
+- **`--listen` on a non-loopback address without TLS prints a loud, unconditional
+  warning and keeps going.** A Tailscale or WireGuard interface is a legitimate
+  place to bind and magmux cannot tell one from a coffee-shop LAN. It is a
+  warning rather than a refusal for that reason, and it says the true thing: the
+  token and every keystroke cross the network in clear text, and a pane is a
+  shell.
+
+- **`StatusFor` is the ONE protocol-code → HTTP-status map.** The hub speaks
+  magmux's vocabulary and has no opinion about HTTP; the socket has no statuses
+  at all. A second mapping in a second adapter means the same failure answered
+  409 on one transport and 400 on another. The body always carries BOTH the code
+  and the message, because 409 covers five codes and a client branching on the
+  status alone could not tell "the pane is dead" from "the pane is the control
+  panel".
+
+- **`http.Server.ErrorLog` must never reach stderr.** A TLS handshake against a
+  plain port, or a client that wrote garbage, becomes a log line — and magmux may
+  be holding a raw-mode terminal with an alternate screen on it, where a stray
+  line corrupts the frame with no way to repaint it. `debugWriter` resolves
+  `dbgFile` at WRITE time, because the `http.Server` is built before `init()`
+  opens it and a logger bound at construction would be bound to nil forever.
+
+- **Pane env drops every secret.** `MAGMUX_TOKEN`, `MAGMUX_VIEW_TOKEN`,
+  `MAGMUX_PLUGIN_TOKEN`, `MAGMUX_PLUGIN_ID` and `MAGMUX_FIREBASE` are removed
+  from `os.Environ()` before the appends, so a shell in a pane cannot read the
+  credential that would let it drive every other pane. `cfg.Env` can still set
+  them explicitly, which is how a plugin's own child gets its token.
+  `TestPaneEnvCarriesNoSecrets` sits beside `TestChildIsToldTheResolvedTheme`.
+
+### Plugin invariants (`plugin/`, `mux/controller_plugin.go`)
+
+- **A plugin is a separate process on the ORDINARY socket that does one extra
+  thing: it registers.** From that moment its ops are in the op table as
+  `<plugin>.<op>` and every transport can call them — `call`,
+  `POST /v1/ops/{name}`, a WebSocket message, an MCP dynamic tool
+  (`<plugin>__<op>`) or a signed Firebase command — with no code in magmux that
+  knows what the plugin does. Adding a per-transport case for plugin ops would
+  be four places to forget one.
+
+- **Nothing in `plugin/` imports the multiplexer.** A pane, a screen, a
+  controller and the layout lock are all behind two callbacks
+  (`Config.Snapshot`, `Config.OnExit`), which is what lets the whole host be
+  tested against a bare hub with no terminal — and what makes the
+  import-direction guard mean something.
+
+- **Registration is AUTHENTICATED; everything else a plugin claims is CHECKED.**
+  A plugin magmux spawned proves itself with the one-time token magmux put in
+  its environment; one an operator ran by hand proves itself with the session's
+  token. After that, the pane it reports on and the events it emits are checked
+  against what it registered, because the socket's only access control is the
+  filesystem and anything with a file descriptor can send these bytes. A
+  snapshot for a pane the plugin does not own is `forbidden`
+  (`TestPluginSelfOpenPaneNeedsRegistration`).
+
+- **`controller:"self"` is resolved from the REGISTRATION, never from the
+  message.** A plugin claims a pane by BEING one: `open_pane` with
+  `controller:"self"` means "the plugin on THIS connection", so there is no
+  string a client could send to claim somebody else's pane. The claim happens at
+  OPEN, atomically with the pane existing, which is why there is no window in
+  which a pane is live and unowned.
+
+- **A plugin's death is announced in the order a client can act on.** `ops` are
+  unregistered first, then `ops_changed`, then `plugin_exited` — so a client
+  that reacts to the exit by re-fetching `ops` cannot see the dead plugin's ops
+  again. Calls in flight become `plugin_gone` (HTTP 502: magmux is the gateway
+  and the plugin is the upstream), a plugin that hangs is cancelled and reported
+  as `timeout`, and no plugin process is left orphaned.
+
+- **A plugin-observed pane weakens "a pilot cannot fabricate completion", and
+  the panel says so.** The plugin is the observer for panes it claimed, and its
+  `awaiting_input` is a claim about a session magmux is not itself following —
+  reconciled with the terminal's own idle signals by the same
+  `applyTerminalIdle` every controller goes through. The panel labels such a
+  pane with the plugin that owns it (`controller: "plugin:<name>"`), because
+  "who said this session was done" must stay answerable.
+
+### Firebase invariants (`transport/firebase/`)
+
+- **A mirror is not a terminal.** Frames are last in the priority order, 2 fps
+  by default, and the FIRST thing cut when the byte budget runs out; state and
+  meta are shed only after them. Its peer is a DATABASE — no connection to
+  close, no back-pressure to feel, no reader to block — so every bound a socket
+  gets for free is built by hand here: a 500 ms flush tick, a token-bucket byte
+  budget, that priority order, and a heartbeat that lets a reader tell a live
+  session from a killed one. Anyone who needs the real screen watches over
+  WebSocket.
+
+- **The host predicate comes BEFORE the credential.** A service-account token is
+  admin on the whole database, so it must never be presented to a host that only
+  LOOKS like Firebase. `IsDatabaseURL` is an exact-label match (`evil.com`,
+  `x.firebaseio.com.evil.com`, a userinfo section, plain `http`, a non-443 port
+  are all refused) run before any authenticated I/O, and the SAME predicate
+  guards the `Authorization` header across a redirect — Go strips it on a
+  cross-host 307, and re-adding it unconditionally would hand the token to
+  whoever answered.
+
+- **The command defence is TWO layers, and either one alone fails open.**
+  (1) The shipped RULES (`examples/firebase/database.rules.json`) refuse a write
+  from a uid that is not in the mirrored owner list, and pin `uid === auth.uid`,
+  so a forged command never lands and magmux never sees it — that is the layer
+  that survives magmux being wrong. (2) MAGMUX refuses a bad HMAC from a real
+  owner, plus the timestamp skew, the nonce, the op allowlist and the rest of
+  (a)-(f) — that is the layer that survives the DATABASE being wrong: a stolen
+  session, a mis-set rule, a compromised console. `test/rc/case3-firebase.ts`
+  proves both on the real rules engine, and asserts that nothing from the
+  refused command reached a PTY.
+
+- **The owner list is mirrored ABOVE the session, not inside it.** The rules have
+  to resolve an owner before they know which session a write is for, and a
+  session-scoped owner list would let a forged session define its own owners.
+
+- **A command runs AT MOST once.** Before any op that is not class read, magmux
+  writes a durable `claimed` result and WAITS for RTDB to acknowledge it. A
+  crash after the claim leaves a record that reads "outcome unknown, and it will
+  never run again", which is the honest answer; a crash before it leaves a
+  command that was never claimed and never ran. Across a restart nothing replays
+  at all, because `sid` carries the process start time and the new session
+  listens on a different path. `TestCommandClaimPrecedesSideEffect` is the
+  ordering; the claim-then-run rule is why the side effect can never be the
+  thing that happens twice.
+
+- **The canonical string has `args` LAST, and `args` is signed as the RAW JSON
+  STRING on the wire.** `args` is the only field whose content is
+  attacker-chosen and unbounded, so a newline inside it cannot shift a later
+  field into a different position. Signing a re-encoding of the parsed value
+  would mean signing one spelling and verifying another. `sigPrefix`
+  (`magmux.cmd.v1`) versions the whole meaning, because a key is a long-lived
+  secret and the canonical string is the only thing that gives it meaning.
+  `examples/firebase/hmac-vector.json` is the committed vector, and any client
+  that signs must reproduce it — `test/rc/emulator.ts` checks itself against it
+  before it signs anything, precisely so a harness bug cannot look like a magmux
+  bug.
+
+- **RTDB KEYS CANNOT CONTAIN `.` `$` `#` `[` `]` `/`, so every free-form payload
+  is stored as a JSON STRING.** An op's schema can hold `$ref`, a plugin's event
+  data is whatever the plugin says, and an op's result is whatever the op
+  returns; all three travel as strings, so no plugin can make the mirror
+  unwritable by naming a key with a dollar in it. An op NAME becomes a key
+  through `opKey`, which reuses MCP's `<plugin>__<op>` spelling rather than
+  inventing a second mapping. Row keys are `r0..rN` and event keys are
+  `e000000000042`, never arrays: RTDB turns a contiguous integer-keyed object
+  into a JSON array on read, which silently changes a client's parse the moment
+  a row goes missing.
+
+- **The emulator case is gated and is never weakened to make it run.**
+  `MAGMUX_FIREBASE_EMULATOR=1`, firebase-tools and a JDK 21+. It is the only
+  place three assumptions are TESTED rather than asserted: that
+  `Authorization: Bearer owner` really is the emulator's admin bypass (undocumented;
+  the source is firebase-tools 15.19.1, `lib/emulator/hubExport.js:152-157`),
+  that the shipped rules really do refuse a non-owner on the real rules engine,
+  and that a `$ref` schema really does mirror.
 
 ## Dependencies
 

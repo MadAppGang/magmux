@@ -159,6 +159,18 @@ func waitUntil(t *testing.T, within time.Duration, what string, cond func() bool
 //
 // It is README's four-line block with the named-key send written as a second
 // text, so both deliveries are observable on the PTY.
+//
+// Every wait here is a POLL with a generous cap, never a sleep sized to this
+// machine. Two deliveries cost 2*pilotSendDelay of deliberate pacing, so the
+// PTY budget is stated as a multiple of that constant: if the pacing is ever
+// changed the budget follows it, and on a box running the rest of the suite
+// under -race the multiple is what absorbs the scheduling delay. The panel
+// assertions poll for the same reason — the OUT rows and the finish are
+// recorded on the connection's READER while the deliveries run on the pane's
+// lane, so the PTY reaching "second\r" orders the lane and says nothing about
+// where the reader got to. Sampling the panel once at that instant is a race
+// that reports a dropped line for a line that simply had not been recorded
+// yet.
 func TestOneShotSendSurvivesClose(t *testing.T) {
 	m, child, dial := sockMux(t)
 	conn := dial()
@@ -171,29 +183,39 @@ func TestOneShotSendSurvivesClose(t *testing.T) {
 	// The client hangs up at once, exactly as a piped script does.
 	conn.Close()
 
-	got := childSaw(t, child, "second\r", 5*time.Second)
+	// 40x the pacing the two deliveries actually cost. The assertion below is
+	// unchanged and just as strict: the PTY must hold both instructions, in
+	// order, each with its own CR and nothing else.
+	got := childSaw(t, child, "second\r", 40*pilotSendDelay)
 	if got != "first\rsecond\r" {
 		t.Fatalf("the PTY saw %q, want both instructions in submission order, each with its own \\r", got)
 	}
 
-	// Both OUT rows were written on the reader, before the finish — that is
+	// Both OUT rows are written on the reader, before the finish — that is
 	// what "the request as it arrived" means, and it is what makes the panel
 	// show a send the session never got round to.
-	var order []string
-	for _, sig := range panelSignals(m.control) {
-		if sig.dir == "out" {
-			order = append(order, sig.text)
+	outRows := func() []string {
+		var order []string
+		for _, sig := range panelSignals(m.control) {
+			if sig.dir == "out" {
+				order = append(order, sig.text)
+			}
 		}
+		return order
 	}
-	if len(order) != 2 || order[0] != "first" || order[1] != "second" {
+	waitUntil(t, 10*time.Second,
+		"both sends on the panel as OUT rows (a send was dropped rather than queued)", func() bool {
+			return len(outRows()) >= 2
+		})
+	if order := outRows(); len(order) != 2 || order[0] != "first" || order[1] != "second" {
 		t.Errorf("panel OUT rows = %q, want both sends in order", order)
 	}
-	m.control.mu.Lock()
-	finished := m.control.finished
-	m.control.mu.Unlock()
-	if !finished {
-		t.Error("the panel never saw the pilot's finish; the reader dropped a line after the sends")
-	}
+	waitUntil(t, 10*time.Second,
+		"the panel to see the pilot's finish (the reader dropped a line after the sends)", func() bool {
+			m.control.mu.Lock()
+			defer m.control.mu.Unlock()
+			return m.control.finished
+		})
 }
 
 // TestDirectSendIsLaneOrdered: two instructions to one pane from one connection
