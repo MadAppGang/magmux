@@ -9,7 +9,7 @@ Releases before v0.11.0 predate this file; their notes were generated from
 commit subjects and remain on the
 [GitHub releases page](https://github.com/MadAppGang/magmux/releases).
 
-## [Unreleased]
+## [0.13.0] - 2026-09-17
 
 ### Added
 
@@ -81,6 +81,17 @@ commit subjects and remain on the
   rather than a bare pass. `task test:rc`, or `task test:rc:full` to include the
   emulator (needs firebase-tools and a JDK 21+; also gated on
   `MAGMUX_FIREBASE_EMULATOR=1`).
+- **A demo you drive: `task demo:rc`.** One command starts a session with a
+  listener and attaches two independent clients to it — a terminal mirror and a
+  browser page — decoding the same frames with the same code, so "one hub,
+  several front ends" is something you can falsify by typing. Inside tmux it is
+  a guest: it splits the pane you ran it in, magmux above and a driver below,
+  and teardown removes only the panes it made. The driver is a small TUI with
+  thirteen actions, each a real request that prints magmux's own response; two
+  of them exist to be refused, because a `403` off the wire is the only honest
+  way to show that the mirrors hold a credential that cannot type. It ships its
+  own 89-check suite (`task demo:rc:test`) and costs nothing to run — no model,
+  no credentials, no network.
 
 ### Changed
 
@@ -118,6 +129,7 @@ commit subjects and remain on the
   remembers a deferred offer and comes back for it. Found by the new
   `test/rc/case4-mcp.ts`, which types into a pane over HTTP and waits for the
   notification over MCP.
+
 ## [0.12.0] - 2026-09-15
 
 ### Changed
