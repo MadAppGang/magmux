@@ -31,3 +31,7 @@ ai-docs/sessions/
 # Added by claudeup
 # A managed rule says this path should stay out of git.
 .claude/models.json
+
+# The rc demo driver, if `go build` is run inside its module directory.
+# The demo and the Taskfile both build it into .task-grids/ instead.
+/demo/rc/driver/driver

@@ -289,6 +289,108 @@ tasks:
     cmds:
       - THEME=dark demo/showcase.sh
 
+  # ── Remote control (one magmux, two read-only clients) ────────────────────
+  # Unlike the showcase above, NOTHING here is staged. One real magmux with a
+  # real HTTP/WebSocket listener, and two independent clients — a terminal one
+  # and a browser one — watching the same pane through the same hub, over the
+  # same public API, decoding with the same TypeScript. Type into the top pane
+  # and both follow; that is how a viewer falsifies the claim.
+  #
+  # Both clients hold the READ-ONLY view token, so neither can type back: a
+  # page left open in a browser must not be a way into a shell, and `input` is
+  # refused 403 for either of them. `demo/rc/selftest.ts` asserts that rather
+  # than trusting it.
+  #
+  # demo.sh is the sole entry point AND the sole owner of teardown. WHICH TMUX
+  # it uses is measured, not configured — `$TMUX` set means you are already in
+  # one, and the demo then behaves as a GUEST in it:
+  #
+  #   inside tmux   it splits the pane you typed in, puts magmux above — with
+  #                 every row the 14-row driver does not need, so on a 50-row
+  #                 window that is 35 — and runs the driver right here. `q` or Ctrl-C ends it
+  #                 and gives the pane back. It NEVER kills your window, your
+  #                 session or your server, and detaching does not end it.
+  #   outside tmux  a private server and its own session, attached at the end —
+  #                 and there **Ctrl-B d detaches, which ENDS THE DEMO**, since
+  #                 the launcher owns the teardown.
+  #
+  # `RC_DEMO_TMUX=own|adopt` forces either. `RC_DEMO_MIRROR=1` ADDS a terminal
+  # mirror pane, at the cost of about half of magmux's rows — it is off by
+  # default because the browser tab is already a second client, painting the
+  # same frames through the same decoder at a size a room can read.
+  # `RC_DEMO_GEOM=120x36` is the escape hatch for a terminal too small to split
+  # usefully: magmux then runs headless at that size with no pane of its own,
+  # and there is nothing to type into by hand. `demo:rc:stop` is the escape
+  # hatch for the one case the trap cannot cover, a launcher killed hard.
+
+  demo:rc:
+    desc: "Remote control — one magmux at full size, a browser mirroring it, and a menu that drives both"
+    deps: [build]
+    # NOT `silent`, and no wrapper: demo.sh must inherit this terminal's stdin,
+    # because inside tmux the driver menu runs in THIS pane as the launcher's
+    # own foreground process.
+    cmds:
+      - demo/rc/demo.sh
+
+  demo:rc:stop:
+    desc: "Stop a demo:rc whose launcher is gone (idempotent, safe when nothing is up)"
+    # It reads $STATE/tmux.state to learn which mode the launcher used, and in
+    # adopt mode kills ONLY the panes that run recorded — proven by pane id and
+    # by the pane option demo.sh stamped on them — never the window, the session
+    # or the server.
+    # No `deps: [build]` would be defensible — it kills things and builds
+    # nothing — but the dep is there so `stop` works on a fresh clone without a
+    # confusing detour through a missing binary.
+    deps: [build]
+    cmds:
+      - demo/rc/stop.sh
+
+  demo:rc:drive:
+    desc: "Drive an already-running demo:rc from a second terminal (the TUI, on its own)"
+    # NO `deps: [build]`: the demo it drives is already running against a magmux
+    # that was built when it started, and rebuilding underneath it would replace
+    # the file while a process holds it open for nothing. It is an HTTP client,
+    # and everything it needs is the URL and the session token the running demo
+    # left in $STATE.
+    #
+    # It IS built, though — it is a Bubble Tea TUI in `demo/rc/driver/`, a Go
+    # module of its own so that magmux's root module keeps its zero third-party
+    # dependencies. `go build` rather than `go run` on purpose: Go's build cache
+    # makes an unchanged rebuild a couple of hundred milliseconds, so this can
+    # never ship a stale driver and never pays for a full compile.
+    #
+    # The same actions the bottom pane of `task demo:rc` is already showing. Two
+    # drivers against one magmux is legitimate and mildly interesting: both hold
+    # the session token, and whichever one types is the one the mirrors follow.
+    cmds:
+      # Built from the repository root so the driver's own cwd is the root, which
+      # is where it looks for `.task-grids/<id>` when no --state is given.
+      - mkdir -p .task-grids
+      - (cd demo/rc/driver && go build -o ../../../.task-grids/rc-driver .)
+      - ./.task-grids/rc-driver
+
+  demo:rc:test:
+    desc: "REGRESSION CHECK for demo:rc (not the demo — `task demo:rc` is the demo)"
+    deps: [build]
+    # NOT in test/rc/ and NOT part of `task test:rc`: that suite is the six
+    # remote-control validation criteria and run-all.ts parses `__RC__ <n>` out
+    # of them, so a seventh entry would change what it claims to be. This is the
+    # demo's own regression net — the demo is a SECOND implementation of the
+    # frame protocol, and a decoder that is subtly wrong about a colour does not
+    # fail, it draws a slightly wrong picture nobody notices.
+    #
+    # It is a CHECK LIST and it is deliberately not a demonstration: it prints
+    # pass lines and exits. `task demo:rc` is the thing to run to SEE the
+    # feature, and its driver menu is the thing to press keys in.
+    # It pins RC_DEMO_TMUX per check rather than inheriting: check 9 is the
+    # private-server shape and check 10 is the adopt shape, and this repository
+    # is usually worked on from inside tmux, where an unpinned check 9 would
+    # measure the wrong one. Checks 11-13 pin the GEOMETRY too — they are the
+    # height budget, the refusal below it, and the guard that stops a magmux
+    # which died after binding being reported as a missing token file.
+    cmds:
+      - bun demo/rc/selftest.ts
+
   # ── MCP self-hosting demo (a session splits its own multiplexer) ──────────
   # The flagship flow, and the reason `magmux mcp` exists. One Claude Code
   # session starts in a one-pane window; it reaches magmux through the MCP
