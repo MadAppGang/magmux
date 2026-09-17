@@ -1215,7 +1215,7 @@ func TestControlPanelDump(t *testing.T) {
 // into on an ordinary terminal — rather than the exact number, so a future
 // column can be spent without rewriting the test, but not silently.
 func TestRouteRowKeepsItsTail(t *testing.T) {
-	defer useTheme(currentTheme)()
+	defer useTheme(theme.Current)()
 	r := ctrlRoute{
 		pane: 0, title: "reviewer", state: "awaiting_permission",
 		sent: 4, observed: 4, tool: "Bash", durs: []float64{1, 2, 3, 4},
