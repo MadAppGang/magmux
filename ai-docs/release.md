@@ -76,8 +76,13 @@ Two things about the cask that will otherwise be rediscovered:
   The permanent fix is signing and notarising in CI, which needs a paid Apple
   Developer account.
 - Casks have no `test` stanza, so `brew test magmux` is gone. Nothing checks the
-  published binary from Homebrew's side; the pipeline's own download-and-run
-  smoke test is the remaining check.
+  published binary from Homebrew's side, **and nothing checks it from ours**:
+  `release.yml` extracts the changelog section and runs GoReleaser, and that is
+  the whole job. No published artifact is downloaded or executed anywhere in the
+  pipeline, so a binary that cannot start would ship with every check green.
+  Three files claimed a "download-and-run smoke test" until v0.13.0; none
+  existed. Closing that gap — one job that installs the published artifact and
+  runs `magmux --version` — is the highest-value change to this pipeline.
 
 ## Verification
 

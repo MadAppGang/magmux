@@ -1156,8 +1156,12 @@ Two consequences worth knowing before touching this again:
   better half of that trade.
 - **Casks have no `test` stanza, so `brew test magmux` is gone.** The formula
   ran `magmux --version` and its test was itself the subject of a fixed bug.
-  Nothing now checks the published binary from Homebrew's side; the release
-  pipeline's own download-and-run smoke test is the remaining check.
+  Nothing now checks the published binary from Homebrew's side — **and nothing
+  checks it from ours.** `.github/workflows/release.yml` extracts the changelog
+  section and runs GoReleaser; no published artifact is ever downloaded or
+  executed. A binary that cannot start would ship with every check green. This
+  said the opposite until v0.13.0, when a release review read the workflow and
+  found the smoke test it named had never existed.
 
 ## VT Parser Coverage
 
