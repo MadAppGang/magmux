@@ -1657,11 +1657,27 @@ func routeRow(r ctrlRoute, focused, inner int) string {
 		c, glyph = theme.Pal.Subtle, "·"
 	}
 
-	titleW, badgeW := 9, 11
-	label := stateBadge(r.state)
-	if !wide {
-		titleW, badgeW = 7, 4
-		label = stateBadgeShort(r.state)
+	// THREE bands, not two, and the middle one exists because of what the chip
+	// costs. badge() adds its own one-space margins, so moving the state from
+	// coloured text to a chip widened the head by 2 columns — and padBetween
+	// drops the ENTIRE right-hand group the moment the gap closes, rather than
+	// trimming it. Measured: the duration, sparkline and tool only appeared
+	// from inner 61 upward, so a 15-column band sat showing a long PERMISSION
+	// label in acres of padding and no data at all.
+	//
+	// That is the wrong thing to spend the width on. A verbose label is a
+	// nicety; the tail is the row's only moving information. So the middle band
+	// keeps the tail and takes the SHORT label, which frees the 7 columns that
+	// buys it. The long label returns as soon as both fit.
+	//
+	// The thresholds are stated as what they buy, not as bare numbers: `wide`
+	// still gates the tail at 46, and `verbose` gates the long label at 61 —
+	// the width the measurement showed the full row needs.
+	titleW, badgeW := 7, 4
+	label := stateBadgeShort(r.state)
+	if verbose := inner >= 61; verbose {
+		titleW, badgeW = 9, 11
+		label = stateBadge(r.state)
 	}
 	if r.closed() {
 		label = "GONE"
@@ -1675,8 +1691,10 @@ func routeRow(r ctrlRoute, focused, inner int) string {
 	// Padded BEFORE badging so every chip is the same width and the columns
 	// after it stay aligned; badge() adds its own one-space margins, so the
 	// chip is badgeW+2 wide. Narrow mode drops the glyph to pay for them.
+	// The glyph is the first thing to go: it duplicates what the chip's colour
+	// already says, so it is the cheapest two columns in the row.
 	mark := paint(c, glyph+" ")
-	if !wide {
+	if inner < 61 {
 		mark = ""
 	}
 	head := routeTag(r.pane, focused) + " " +
