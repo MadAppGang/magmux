@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "The committed HMAC test vector. Both magmux's Go test and any client that",
+    "signs a command must reproduce `sig` exactly from these fields.",
+    "",
+    "The canonical string is the eight fields below joined with \\n, in this",
+    "order, with `args` LAST: it is the only field whose content is",
+    "attacker-chosen and unbounded, so a newline inside it cannot shift a later",
+    "field into a different position. `args` is signed as the RAW JSON STRING",
+    "that is stored in the database, not as a re-encoding of the parsed value —",
+    "two spellings of the same object have two different signatures, and the",
+    "one that counts is the one on the wire.",
+    "",
+    "sig = lowercase hex of HMAC-SHA256(key, canonical)."
+  ],
+  "prefix": "magmux.cmd.v1",
+  "key": "magmux-test-key-do-not-use-in-production",
+  "host": "test-host",
+  "sid": "magmux-1780000000",
+  "uid": "owner-uid-1",
+  "ts": 1780000000000,
+  "nonce": "abcdefghijklmnop0123",
+  "op": "list",
+  "args": "{\"all\":true}",
+  "canonical": "magmux.cmd.v1\ntest-host\nmagmux-1780000000\nowner-uid-1\n1780000000000\nabcdefghijklmnop0123\nlist\n{\"all\":true}",
+  "sig": "5382e43e3c8ec1a223def7fb6cc9fc5c54ce06b5920b9d0e5e3c493cb28e3bde"
+}

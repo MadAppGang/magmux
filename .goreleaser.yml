@@ -8,7 +8,7 @@ before:
 
 builds:
   - id: magmux
-    main: .
+    main: ./cmd/magmux
     binary: magmux
     env:
       - CGO_ENABLED=0
@@ -19,7 +19,7 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X main.Version={{.Version}} -X main.Commit={{.ShortCommit}}
+      - -s -w -X github.com/MadAppGang/magmux/buildinfo.Version={{.Version}} -X github.com/MadAppGang/magmux/buildinfo.Commit={{.ShortCommit}}
 
 archives:
   - id: magmux
@@ -55,8 +55,11 @@ changelog:
 # One capability is lost and is not replaceable: casks have no `test` stanza,
 # so `brew test magmux` no longer runs `magmux --version`. The formula's test
 # was itself the subject of a fixed bug, so it is worth saying plainly that
-# nothing now checks the published binary from Homebrew's side. The release
-# pipeline's own smoke test is the remaining check.
+# nothing now checks the published binary from Homebrew's side — and nothing
+# checks it from ours either: `.github/workflows/release.yml` extracts the
+# changelog section and runs GoReleaser, and that is all. No published artifact
+# is downloaded or executed by anything, so a binary that cannot start would
+# reach users with every check green.
 homebrew_casks:
   - name: magmux
     binaries:

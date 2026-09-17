@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>magmux — remote control</title>
+    <!--
+      The page shell and nothing else. Everything that decides what is drawn is
+      in /app.js, which serve.ts builds from web/app.ts — and that file imports
+      ../client.ts and ../frame.ts, the SAME two files the terminal client
+      imports. The two surfaces cannot drift in their reading of the wire,
+      because there is only one reading of it.
+
+      There is no token in this file, in any URL and in any fragment. The page
+      fetches its config from an unguessable same-origin path and presents the
+      view token it finds there in the WebSocket subprotocol, which is the
+      browser's only credential channel that does not end up in a proxy log.
+
+      THE TERMINAL IS THE PAGE. The font size is computed from the pane's own
+      column count and the room this layout leaves, so 80 columns FILL the
+      width instead of sitting in a box in the corner of a 2560px window. That
+      computation is a RESIZE concern and lives in app.ts's fit(); nothing here
+      measures per frame.
+    -->
+    <style>
+      /* Dark by default — a terminal mirror on a white page is a lamp. The
+         light variant is the same handful of variables with different values,
+         so honouring prefers-color-scheme costs one media query. */
+      :root {
+        color-scheme: dark;
+        --bg: #0d0f15;
+        --panel: #161a23;
+        --panel-2: #1c212d;
+        --edge: #2a3140;
+        --fg: #d6dae4;
+        --grey: #8891a6;
+        --green: #3fb950;
+        --amber: #d29922;
+        --red: #f85149;
+        --cyan: #56c2d6;
+        --term-bg: #06070b;
+        --term-fg: #d6dae4;
+        --term-edge: #2c3444;
+        --shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+        /* Written by app.ts's fit(). The whole cell grid is derived from it and
+           from nothing else, so one number moves the entire screen. */
+        --fs: 14px;
+        --lh: 1.25;
+        --mono: "SFMono-Regular", "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          color-scheme: light;
+          --bg: #eef0f4;
+          --panel: #ffffff;
+          --panel-2: #f4f6fa;
+          --edge: #d3d8e2;
+          --fg: #1b1f2a;
+          --grey: #5c6575;
+          --green: #1a7f37;
+          --amber: #9a6700;
+          --red: #cf222e;
+          --cyan: #1b7c8c;
+          /* The screen itself stays dark in both schemes: it is a picture of a
+             terminal, and repainting a shell's own colours onto white would
+             misreport the very thing this page exists to mirror. --term-fg goes
+             with it and is NOT --fg: a cell with the default colour must stay
+             legible on the screen's own background, and flipping one without
+             the other paints dark text on a dark screen — which is exactly what
+             the light-mode screenshot caught. */
+          --term-bg: #06070b;
+          --term-fg: #d6dae4;
+          --term-edge: #39414f;
+          --shadow: 0 18px 50px rgba(20, 26, 40, 0.18);
+        }
+      }
+
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        font-size: 13px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      /* ── the status bar ──────────────────────────────────────────────────
+         It stays at the top of the layout because it is the only thing on this
+         page that can tell a viewer the picture below it is no longer live. */
+      #status {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 16px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--edge);
+        white-space: nowrap;
+        overflow: hidden;
+      }
+      #brand { font-weight: 700; letter-spacing: 0.02em; }
+      #brand span { color: var(--grey); font-weight: 400; }
+      #dot { font-size: 15px; line-height: 1; }
+      #state { font-weight: 600; letter-spacing: 0.02em; }
+      #detail { color: var(--grey); overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+      #reason { color: var(--red); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+      #status.live #dot, #status.live #state { color: var(--green); }
+      #status.stale #dot, #status.stale #state { color: var(--amber); }
+      #status.connecting #dot, #status.connecting #state { color: var(--grey); }
+      #status.dead #dot, #status.dead #state,
+      #status.ended #dot, #status.ended #state { color: var(--red); }
+
+      .ctl {
+        padding: 4px 9px;
+        font: inherit;
+        font-size: 12px;
+        color: var(--fg);
+        background: var(--panel-2);
+        border: 1px solid var(--edge);
+        border-radius: 5px;
+        cursor: pointer;
+      }
+      .ctl:hover:not([disabled]) { border-color: var(--cyan); }
+      .ctl[disabled] { opacity: 0.45; cursor: default; }
+
+      /* The pane picker. Retargeting is this page's OWN act — `unwatch` then
+         `watch` on its own connection — because a watch is per-subscriber
+         state and nothing may reach into another client's stream. */
+      #panes { margin-left: auto; }
+      #reconnect { visibility: hidden; }
+      #reconnect.show { visibility: visible; }
+      /* The full-width toggle, and `f` does the same thing. It is a CONTROL and
+         a KEY because the two audiences differ: somebody presenting wants the
+         key, somebody who has never seen the page needs to be able to see that
+         the option exists. */
+      #full { font-variant-numeric: tabular-nums; }
+      #full[aria-pressed="true"] { border-color: var(--cyan); color: var(--cyan); }
+
+      /* FULL WIDTH: the terminal gets the page. The driver panel and the
+         footer go; the STATUS BAR STAYS, always — it is the only thing that can
+         tell a viewer this picture is no longer live, and a full-screen mirror
+         with nothing to say that is the still-picture failure this demo is
+         built to make impossible. fit() then re-measures the stage it actually
+         got, which is the whole width. */
+      body.full #driver, body.full #note { display: none; }
+
+      /* ── the body: the terminal, and the driver beside it ─────────────── */
+      #main { flex: 1; display: flex; min-height: 0; min-width: 0; }
+      #stage {
+        flex: 1;
+        min-width: 0;
+        min-height: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 18px;
+      }
+
+      /* The terminal frame: a title strip and three lamps. A mirror of a
+         terminal that reads as a <div> invites the question of whether it is a
+         picture or a widget, and it is a picture. */
+      #term {
+        display: flex;
+        flex-direction: column;
+        background: var(--term-bg);
+        border: 1px solid var(--term-edge);
+        border-radius: 9px;
+        box-shadow: var(--shadow);
+        overflow: hidden;
+        max-width: 100%;
+        max-height: 100%;
+      }
+      #termbar {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 7px 11px;
+        background: linear-gradient(var(--panel-2), var(--panel));
+        border-bottom: 1px solid var(--term-edge);
+        font-size: 11px;
+        color: var(--grey);
+      }
+      .lamp { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+      #termtitle { margin-left: 6px; font-variant-numeric: tabular-nums; }
+
+      /* The one place a screen may scroll. A pane WIDER than the smallest
+         readable font can fit — 200 columns in a phone-width window — has to go
+         somewhere, and scrolling it is the only answer that does not lie:
+         shrinking below the floor is unreadable, and clipping silently would
+         make the mirror disagree with the pane while looking fine. The termbar
+         says so when it happens. */
+      #screenwrap { overflow: auto; max-width: 100%; max-height: 100%; }
+
+      /* The screen. A row is a block of spans; a cell is one character of a
+         monospace font, which is why pixel arithmetic from ONE measured cell
+         places the cursor. Nothing here is a terminal emulator: every span
+         arrives already decoded, with its colours and attributes resolved. */
+      #screen {
+        position: relative;
+        font-family: var(--mono);
+        font-size: var(--fs);
+        line-height: var(--lh);
+        color: var(--term-fg);
+        padding: 8px 10px;
+        white-space: pre;
+        overflow: hidden;
+        transition: opacity 120ms ease, filter 120ms ease;
+      }
+      /* A stale or dead picture must never pass for a live one. */
+      #screen.stale { opacity: 0.66; }
+      #screen.dead { opacity: 0.38; filter: grayscale(0.85); }
+      .row { height: calc(var(--fs) * var(--lh)); }
+
+      /* The cursor is a real cell, drawn where the frame header says it is.
+         DECTCEM hiding it is decoded too — it is then NOT drawn, and the status
+         bar says `cursor hidden`, so an absent caret can never be read as a
+         broken mirror. */
+      .cur {
+        position: absolute;
+        background: var(--term-fg);
+        opacity: 0.8;
+        pointer-events: none;
+        display: none;
+        animation: blink 1.06s steps(1) infinite;
+      }
+      @keyframes blink { 0%, 55% { opacity: 0.8; } 56%, 100% { opacity: 0.22; } }
+      #measure {
+        position: absolute;
+        visibility: hidden;
+        white-space: pre;
+        top: 0;
+        left: 0;
+      }
+
+      /* ── the driver panel ─────────────────────────────────────────────── */
+      #driver {
+        flex: none;
+        width: 390px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        background: var(--panel);
+        border-left: 1px solid var(--edge);
+      }
+      /* RC_DEMO_WEB_DRIVER=0: no endpoint, and therefore no panel. */
+      #driver.off { display: none; }
+      #driverhead { flex: none; padding: 11px 14px; border-bottom: 1px solid var(--edge); }
+      #driverhead p { margin: 6px 0 0; color: var(--grey); font-size: 11.5px; line-height: 1.45; }
+      /* The actions take the room the log does not: a panel that showed three
+         buttons and a mostly empty transcript would bury the items this demo is
+         about. The log keeps a fixed share so the newest exchange is always on
+         screen without the buttons scrolling away. */
+      #actions { flex: 1 1 auto; padding: 10px 12px; overflow-y: auto; min-height: 0; }
+      .group { margin: 9px 0 4px; font-size: 10.5px; letter-spacing: 0.09em; color: var(--grey); text-transform: uppercase; }
+      .group:first-child { margin-top: 0; }
+      .act {
+        display: block;
+        width: 100%;
+        text-align: left;
+        margin: 3px 0;
+        padding: 6px 9px;
+        font: inherit;
+        font-size: 12px;
+        color: var(--fg);
+        background: var(--panel-2);
+        border: 1px solid var(--edge);
+        border-radius: 5px;
+        cursor: pointer;
+        line-height: 1.35;
+      }
+      .act:hover:not([disabled]) { border-color: var(--cyan); }
+      .act[disabled] { opacity: 0.5; cursor: progress; }
+      .act .k { display: inline-block; min-width: 2.3em; color: var(--grey); font-family: var(--mono); }
+      .act .how { display: block; margin-left: 2.3em; color: var(--grey); font-size: 11px; }
+      /* The credential is said in the border, because it is the whole point of
+         items 8 and 9: amber is the VIEW token, cyan never leaves the browser. */
+      .act.view { border-left: 3px solid var(--amber); }
+      .act.local { border-left: 3px solid var(--cyan); }
+
+      /* The log. The same shape the driver prints — `▶ POST …` then `◀ HTTP …` —
+         so the two drivers show identical evidence. */
+      #log {
+        flex: 0 0 38%;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 10px 12px;
+        border-top: 1px solid var(--edge);
+        font-family: var(--mono);
+        font-size: 11px;
+        line-height: 1.5;
+      }
+      #log .entry { margin-bottom: 9px; word-break: break-word; }
+      #log .req { color: var(--fg); }
+      #log .res { color: var(--green); }
+      #log .res.bad { color: var(--red); }
+      #log .res.mine { color: var(--amber); }
+      #log .ms, #log .dim { color: var(--grey); }
+      #log .look { color: var(--cyan); }
+      #log .idle { color: var(--grey); }
+
+      /* ── the footer ───────────────────────────────────────────────────── */
+      #note {
+        flex: none;
+        padding: 8px 16px;
+        background: var(--panel);
+        border-top: 1px solid var(--edge);
+        color: var(--grey);
+        font-size: 11.5px;
+        line-height: 1.5;
+      }
+      #note code { color: var(--fg); font-family: var(--mono); }
+      #escalation { color: var(--amber); }
+      #escalation.off { display: none; }
+
+      /* A narrow window stacks: the terminal above, the driver below. The
+         terminal keeps fitting itself, because fit() measures the stage it
+         actually got rather than the window. */
+      @media (max-width: 900px) {
+        #main { flex-direction: column; }
+        /* The stage hugs the terminal and the driver takes what is left: on a
+           phone-shaped window the dead space around a 13-row pane is the most
+           expensive thing on the page. */
+        #stage { flex: 0 0 auto; padding: 10px; }
+        /* …except in full width, where there is no driver to leave room for and
+           the terminal should take the height as well as the width. */
+        body.full #stage { flex: 1 1 auto; }
+        #driver { width: auto; flex: 1 1 auto; border-left: none; border-top: 1px solid var(--edge); }
+        #log { flex: 1 1 auto; }
+        #brand span { display: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status" class="connecting">
+      <span id="brand">magmux <span>remote control</span></span>
+      <span id="dot">○</span>
+      <span id="state">connecting</span>
+      <span id="detail"></span>
+      <span id="reason"></span>
+      <select id="panes" class="ctl" title="Which pane this page is watching" disabled></select>
+      <button id="full" class="ctl" type="button" aria-pressed="false" title="Give the terminal the whole page (f, Esc to come back)">⤢ full width</button>
+      <button id="reconnect" class="ctl" type="button">Reconnect</button>
+    </div>
+
+    <div id="main">
+      <div id="stage">
+        <div id="term">
+          <div id="termbar">
+            <i class="lamp" style="background: #f85149"></i>
+            <i class="lamp" style="background: #d29922"></i>
+            <i class="lamp" style="background: #3fb950"></i>
+            <span id="termtitle">waiting for the first frame</span>
+          </div>
+          <div id="screenwrap">
+            <div id="screen"><span id="measure">MMMMMMMMMMMMMMMMMMMM</span><div class="cur"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="driver" class="off">
+        <div id="driverhead">
+          <b>THE DRIVER</b>
+          <p>
+            Every button is one real request to magmux. This page holds only the
+            <b>read-only view token</b>; the actions that type are performed by
+            <code>demo/rc/serve.ts</code>, which holds the session token, and what appears below is
+            magmux's own status and body — <b>including the 403s</b>.
+          </p>
+        </div>
+        <div id="actions"></div>
+        <div id="log"><span class="idle">press an action — the request and the response both land here</span></div>
+      </div>
+    </div>
+
+    <div id="note">
+      <b>Read-only stream.</b> This page's WebSocket holds magmux's
+      <code>--view-token-file</code> token, which <code>input</code>, <code>send</code>,
+      <code>open_pane</code> and <code>close_pane</code> all refuse with <code>forbidden</code>.
+      <span id="escalation">
+        The driver panel is an escalation, not a detail: <code>serve.ts</code> holds the session token and
+        types on this page's behalf, so whoever can reach this page's origin and its per-run path can type
+        into the shell rather than merely watch it. Same guards, bigger prize —
+        <code>RC_DEMO_WEB_DRIVER=0</code> removes the endpoint and this panel.
+      </span>
+      <b>Press <code>f</code></b> to give the terminal the whole page, <code>Esc</code> to come back.
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

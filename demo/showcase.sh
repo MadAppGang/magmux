@@ -25,7 +25,7 @@ THEME="${THEME:-light}"
 PANES="${PANES:-3}"
 
 if [ ! -x "$MAGMUX" ]; then
-  echo "demo: $MAGMUX not built — run 'go build -o magmux .' first" >&2
+  echo "demo: $MAGMUX not built — run 'go build -o magmux ./cmd/magmux' first" >&2
   exit 1
 fi
 

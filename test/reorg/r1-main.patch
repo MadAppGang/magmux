@@ -1,0 +1,97 @@
+--- main.go
++++ mux/main.go
+@@ -1,7 +1,7 @@
+ // magmux — Minimal Go Terminal Multiplexer
+ // Port of MTM (Rob King) from C to Go, zero third-party dependencies.
+ // Uses only golang.org/x/sys and golang.org/x/term.
+-package main
++package mux
+ 
+ import (
+ 	"bufio"
+@@ -22,26 +22,21 @@
+ 	"time"
+ 	"unicode/utf8"
+ 
++	"github.com/MadAppGang/magmux/buildinfo"
+ 	"golang.org/x/sys/unix"
+ 	"golang.org/x/term"
+ )
+ 
+-// Set by GoReleaser ldflags. Default value used for local builds.
+-var (
+-	Version = "dev"
+-	Commit  = "none"
+-)
+-
+ // magmuxLabel returns the status-bar app label, e.g. "magmux v3.4.2".
+ // Falls back to "magmux" when the version is the unreleased "dev" value.
+ func magmuxLabel() string {
+-	if Version == "" || Version == "dev" {
++	if buildinfo.Version == "" || buildinfo.Version == "dev" {
+ 		return "magmux"
+ 	}
+-	if strings.HasPrefix(Version, "v") {
+-		return "magmux " + Version
++	if strings.HasPrefix(buildinfo.Version, "v") {
++		return "magmux " + buildinfo.Version
+ 	}
+-	return "magmux v" + Version
++	return "magmux v" + buildinfo.Version
+ }
+ 
+ // approxStatusWidth estimates the on-screen width of a tab-separated
+@@ -7883,26 +7878,29 @@
+ 	return "/bin/sh"
+ }
+ 
+-func main() {
++// Main is the whole magmux process after the cmd/magmux shim: it takes the
++// command-line arguments without the program name and returns the exit
++// status. Most failure paths still call os.Exit themselves.
++func Main(args []string) int {
+ 	// The MCP server hook must be the FIRST statement here: it has to come
+ 	// before the --version/--help scan below (which walks every argument and
+ 	// would claim a --help meant for `magmux mcp`), and long before init()
+ 	// puts the tty in raw mode or anything writes to stdout — a single stray
+ 	// byte on stdout desynchronises a JSON-RPC client for the rest of the
+ 	// session.
+-	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+-		os.Exit(runMCP(os.Args[2:]))
++	if len(args) > 0 && args[0] == "mcp" {
++		os.Exit(runMCP(args[1:]))
+ 	}
+ 
+ 	// Handle --version / -v / --help / -h first pass
+-	for _, arg := range os.Args[1:] {
++	for _, arg := range args {
+ 		if arg == "--version" || arg == "-v" {
+-			fmt.Printf("magmux %s (%s)\n", Version, Commit)
++			fmt.Printf("magmux %s (%s)\n", buildinfo.Version, buildinfo.Commit)
+ 			os.Exit(0)
+ 		}
+ 		if arg == "--help" || arg == "-h" {
+ 			fmt.Println("magmux — Minimal Go Terminal Multiplexer")
+-			fmt.Printf("Version: %s (%s)\n\n", Version, Commit)
++			fmt.Printf("Version: %s (%s)\n\n", buildinfo.Version, buildinfo.Commit)
+ 			fmt.Println("Usage: magmux [options]")
+ 			fmt.Println("       magmux -e 'command1' -e 'command2'")
+ 			fmt.Println("       magmux -e 'bun test' --label tests -e 'bun dev' --label server")
+@@ -8052,8 +8050,7 @@
+ 
+ 	shell := getUserShell()
+ 
+-	// Parse flags
+-	args := os.Args[1:]
++	// Parse flags (args is Main's parameter: os.Args[1:], passed by the shim)
+ 	var gridFile string
+ 	var customCmds []PaneConfig
+ 	autoExit := false
+@@ -8408,6 +8405,7 @@
+ 	}
+ 
+ 	mux.cleanup()
++	return 0
+ }
+ 
+ // Suppress unused import warning

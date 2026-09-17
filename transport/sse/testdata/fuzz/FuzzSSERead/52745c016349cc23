@@ -1,0 +1,2 @@
+go test fuzz v1
+string("event:\r0\n\n")

@@ -1,12 +1,20 @@
 {
   "name": "magmux-ui-tests",
   "private": true,
-  "description": "The pi.dev pilot that drives a controlled magmux session, plus the visual end-to-end cases that exercise it against a real magmux binary and real Claude Code panes. Not part of `go test` — these cost real model usage and need auth, so they are run on demand.",
+  "description": "Two families of end-to-end cases, neither part of `go test`. test/ui/* drive a real magmux with real Claude Code panes — they cost model usage and need auth, so they are run on demand. test/rc/* are the six remote-control validation criteria: a real binary over HTTP, WebSocket, SSE, the unix socket, `magmux mcp` and a Firebase emulator, with no model, no network and no key anywhere.",
   "scripts": {
     "test:ui:case1": "bun test/ui/case1.ts",
     "test:ui:case2": "bun test/ui/case2.ts",
     "test:ui:case3": "bun test/ui/case3.ts",
     "test:ui:case4": "bun test/ui/case4.ts",
+    "test:rc": "bun test/rc/run-all.ts",
+    "test:rc:full": "MAGMUX_FIREBASE_EMULATOR=1 bun test/rc/run-all.ts",
+    "test:rc:http": "bun test/rc/case1-http.ts",
+    "test:rc:ws": "bun test/rc/case2-ws.ts",
+    "test:rc:firebase": "MAGMUX_FIREBASE_EMULATOR=1 bun test/rc/case3-firebase.ts",
+    "test:rc:mcp": "bun test/rc/case4-mcp.ts",
+    "test:rc:plugin": "bun test/rc/case5-plugin.ts",
+    "test:rc:slow": "bun test/rc/case6-slow-client.ts",
     "pilot": "bun pilot/pilot.ts"
   },
   "devDependencies": {

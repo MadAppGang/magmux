@@ -54,7 +54,7 @@ if (!InlineMagmuxRun.supported()) {
 }
 
 if (!process.env.MAGMUX_BIN) {
-  execSync(`go build -o ${JSON.stringify(BIN)} .`, { cwd: REPO, stdio: "inherit" });
+  execSync(`go build -o ${JSON.stringify(BIN)} ./cmd/magmux`, { cwd: REPO, stdio: "inherit" });
   console.log(`  ${C.green}✓${C.reset} built ${path.relative(REPO, BIN)}`);
 } else {
   console.log(`  ${C.yellow}!${C.reset} MAGMUX_BIN override ${C.grey}${BIN}${C.reset}`);
