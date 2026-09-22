@@ -35,3 +35,9 @@ ai-docs/sessions/
 # The rc demo driver, if `go build` is run inside its module directory.
 # The demo and the Taskfile both build it into .task-grids/ instead.
 /demo/rc/driver/driver
+
+# The Linear API key lives here. Never commit it.
+.claude/settings.local.json
+
+# Linked worktrees live here. The checkouts are git's own state, not sources.
+.claude/worktrees/
