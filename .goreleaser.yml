@@ -71,37 +71,36 @@ homebrew_casks:
     directory: Casks
     homepage: https://github.com/MadAppGang/magmux
     description: Minimal terminal multiplexer written in Go. Zero third-party dependencies.
-    hooks:
-      post:
-        install: |
-          # LOAD-BEARING, and measured rather than assumed.
-          #
-          # The quarantine is not something a Go binary attracts, and it is
-          # nothing to do with .app bundles — Gatekeeper enforces
-          # com.apple.quarantine on any Mach-O executable. Two separate steps
-          # produce it, and only the second is ours:
-          #   1. Homebrew quarantines whatever it DOWNLOADS. The tarball in
-          #      ~/Library/Caches/Homebrew/downloads already carries the
-          #      attribute before anything is extracted.
-          #   2. CASKS then copy it onto the extracted payload
-          #      (Quarantine.propagate, cask/download.rb:129). FORMULAS never
-          #      call it — every call site is under cask/. That difference is
-          #      the whole reason this hook did not exist before v0.12.0.
-          # Being unsigned is not why the attribute is applied; it is why
-          # Gatekeeper then REFUSES the quarantined file.
-          # Installing the cask with this hook removed, on a real machine:
-          # com.apple.quarantine was set on the staged binary and
-          # `magmux --version` printed NOTHING and exited — Gatekeeper killed
-          # it silently, which is the worst shape a failure can take because
-          # `brew install` still reported success. With the hook, the attribute
-          # is absent and the binary runs. The old formula sidestepped this
-          # entirely by using bin.install on an already-extracted file.
-          #
-          # GoReleaser renders this as Homebrew's `postflight`, which Homebrew
-          # now warns is deprecated in favour of `postflight_steps`. That
-          # warning is GoReleaser's template to fix, not ours, and it is a
-          # warning rather than a failure — removing the hook to silence it
-          # would trade a visible warning for a silent broken install.
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/magmux"]
-          end
+    # LOAD-BEARING, and measured rather than assumed.
+    #
+    # The quarantine is not something a Go binary attracts, and it is nothing to
+    # do with .app bundles — Gatekeeper enforces com.apple.quarantine on any
+    # Mach-O executable. Two separate steps produce it, and only the second is
+    # ours:
+    #   1. Homebrew quarantines whatever it DOWNLOADS. The tarball in
+    #      ~/Library/Caches/Homebrew/downloads carries the attribute before
+    #      anything is extracted.
+    #   2. CASKS copy it onto the extracted payload (Quarantine.propagate,
+    #      cask/download.rb:129). FORMULAS never call it — every call site is
+    #      under cask/.
+    # Being unsigned is not why the attribute is applied; it is why Gatekeeper
+    # then REFUSES the quarantined file. Installing the cask without this strip,
+    # on a real machine: com.apple.quarantine was set on the staged binary and
+    # `magmux --version` produced no output — Gatekeeper killed it while
+    # `brew install` still reported success, the worst shape a failure can take.
+    #
+    # Written through custom_block, not `hooks.post.install`: that key renders a
+    # `postflight do` wrapper, which Homebrew deprecated in favour of the
+    # declarative `postflight_steps` (cask/dsl.rb, INSTALL_STEP_ARTIFACT_CLASSES).
+    # `run` and `on_macos` are both permitted steps. Needs Homebrew >= 6.0.0, the
+    # first release carrying that DSL.
+    #
+    # GoReleaser runs custom_block through Go templates, and Homebrew's own
+    # staged_path token is brace-delimited too, so it is emitted as a string
+    # literal. Written directly it fails the render as an undefined function.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ "{{staged_path}}" }}/magmux"]
+        end
+      end
