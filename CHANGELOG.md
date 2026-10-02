@@ -9,7 +9,7 @@ Releases before v0.11.0 predate this file; their notes were generated from
 commit subjects and remain on the
 [GitHub releases page](https://github.com/MadAppGang/magmux/releases).
 
-## [Unreleased]
+## [0.14.0] - 2026-10-02
 
 ### Added
 
@@ -243,5 +243,6 @@ commit subjects and remain on the
   nudges, and the summary "the pilot stopped without calling finish". The
   provider's own error is now reported, and nudging stops once one is seen.
 
+[0.14.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.14.0
 [0.12.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.12.0
 [0.11.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.11.0
