@@ -115,6 +115,92 @@ func (p *Pane) injectPTY(data []byte) bool {
 	return err == nil
 }
 
+// sendMode is how a send's text reaches the PTY.
+type sendMode string
+
+const (
+	// sendAuto writes the text in one write, bracketed only when it holds a
+	// newline and the pane asked for bracketed paste (pasteWrap).
+	sendAuto sendMode = ""
+	// sendTyped types the text as keystrokes, the way a person at the keyboard
+	// would: short runs of characters with a pause between them, and every
+	// newline as a ctrl-j of its own. It is never bracketed.
+	//
+	// It exists because a TUI cannot tell one large write from a paste, and
+	// treats it as one. Claude Code, measured on 2.1.286, takes any single read
+	// over 800 characters as a paste even without the markers, and a paste over
+	// 800 characters or 2 newlines reaches its model as <pasted_content> — text
+	// the user did not write. Typed, the same instruction is the user's own.
+	sendTyped sendMode = "typed"
+	// sendPaste writes the text as ONE bracketed paste, whatever it holds: one
+	// line, many, or nothing at all. An empty paste is what a terminal sends for
+	// Cmd+V over a clipboard holding an image, and a pasted image file path is
+	// what a drag and drop sends; a TUI that accepts images reads both.
+	sendPaste sendMode = "paste"
+)
+
+// sendModeOf reads the two request flags. They are exclusive because they
+// describe opposite gestures — typing a thing and pasting it.
+func sendModeOf(typed, paste bool) (sendMode, error) {
+	switch {
+	case typed && paste:
+		return sendAuto, sockErrf(sockCodeBadRequest, `send: "typed" and "paste" are exclusive — a text is either typed or pasted`)
+	case typed:
+		return sendTyped, nil
+	case paste:
+		return sendPaste, nil
+	}
+	return sendAuto, nil
+}
+
+// typedChunkRunes is the most text one typed write carries, and typedChunkGap
+// the pause between two writes. Small and spaced so the far end reads them as
+// keystrokes: back-to-back writes can be read as one chunk, and even twenty
+// chunks read together stay under the 800-character paste threshold above.
+const (
+	typedChunkRunes = 32
+	typedChunkGap   = 8 * time.Millisecond
+)
+
+// typedNewline is the byte a typed newline becomes: ctrl-j, the line feed a
+// terminal sends for a newline that is not Return. Return (CR) is what submits,
+// so it is never typed in the middle of an instruction.
+const typedNewline = "\n"
+
+// typedWrites splits text into the writes sendTyped makes, in order: runs of at
+// most typedChunkRunes runes, and one typedNewline write for each newline,
+// whether the text spells it \n, \r\n or \r.
+func typedWrites(text string) [][]byte {
+	var (
+		out [][]byte
+		run []rune
+	)
+	flush := func() {
+		if len(run) > 0 {
+			out = append(out, []byte(string(run)))
+			run = run[:0]
+		}
+	}
+	rs := []rune(text)
+	for i := 0; i < len(rs); i++ {
+		switch r := rs[i]; r {
+		case '\r', '\n':
+			if r == '\r' && i+1 < len(rs) && rs[i+1] == '\n' {
+				i++
+			}
+			flush()
+			out = append(out, []byte(typedNewline))
+		default:
+			run = append(run, r)
+			if len(run) == typedChunkRunes {
+				flush()
+			}
+		}
+	}
+	flush()
+	return out
+}
+
 // pasteWrap wraps multi-line text in bracketed-paste markers when the pane
 // has requested that mode. Without this, the first newline of a multi-line
 // instruction submits a half-written prompt.
@@ -160,7 +246,7 @@ func (p *Pane) pasteWrap(text string) []byte {
 //
 // Caller must NOT hold p.mu.
 func (m *Magmux) sendToPane(idx int, text string, keys []string, enter bool, label string, done func(error)) error {
-	return m.sendToPaneVia(nil, nil, idx, text, keys, enter, label, done)
+	return m.sendToPaneVia(nil, nil, idx, sendAuto, text, keys, enter, label, done)
 }
 
 // sendToPaneVia is sendToPane with the connection named, so its delivery can be
@@ -169,11 +255,11 @@ func (m *Magmux) sendToPane(idx int, text string, keys []string, enter bool, lab
 // ctx bounds the DELIVERY, not the wait for it: it is the lane item's context
 // when there is one, so Quiesce can stop a send between keystrokes. Nil means
 // nothing can cancel it, which is the right answer for an in-process caller.
-func (m *Magmux) sendToPaneVia(ctx context.Context, sub *hub.Sub, idx int, text string, keys []string, enter bool, label string, done func(error)) error {
+func (m *Magmux) sendToPaneVia(ctx context.Context, sub *hub.Sub, idx int, mode sendMode, text string, keys []string, enter bool, label string, done func(error)) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	d, err := m.admitSend(idx, text, keys, enter, label)
+	d, err := m.admitSend(idx, mode, text, keys, enter, label)
 	if err != nil {
 		return err
 	}
@@ -207,6 +293,7 @@ type sendDelivery struct {
 	p     *Pane
 	idx   int
 	seq   int // the OUT row this delivery answers
+	mode  sendMode
 	text  string
 	keys  []string
 	enter bool
@@ -215,7 +302,7 @@ type sendDelivery struct {
 // admitSend resolves the target and files the request, with no I/O and no
 // waiting. Everything it does is what the panel and the pane's controller have
 // always been told the moment a send arrived.
-func (m *Magmux) admitSend(idx int, text string, keys []string, enter bool, label string) (*sendDelivery, error) {
+func (m *Magmux) admitSend(idx int, mode sendMode, text string, keys []string, enter bool, label string) (*sendDelivery, error) {
 	// Resolved through the identity table, never by raw index: after a
 	// close_pane the ids are sparse, and a bounds check alone would happily
 	// type an instruction into a pane that is no longer on screen.
@@ -226,6 +313,16 @@ func (m *Magmux) admitSend(idx int, text string, keys []string, enter bool, labe
 	if p.isControl {
 		// the panel is not a session; nothing to type into
 		return nil, sockErrf(sockCodePaneIsControl, "pane %d is the control panel and has no session to type into", idx)
+	}
+	if mode == sendPaste {
+		// Without the mode the markers would arrive as literal keystrokes, and a
+		// paste the program cannot see as one is not a paste.
+		p.mu.Lock()
+		bracketed := p.bracketPaste
+		p.mu.Unlock()
+		if !bracketed {
+			return nil, sockErrf(sockCodeBadRequest, "pane %d has not enabled bracketed paste, so a paste cannot be delivered as one", idx)
+		}
 	}
 
 	// Log before delivery so the panel shows the instruction even if the
@@ -254,7 +351,7 @@ func (m *Magmux) admitSend(idx int, text string, keys []string, enter bool, labe
 	if n, ok := p.controller.(InputNotifier); ok && p.controller != nil {
 		n.NotifyInput()
 	}
-	return &sendDelivery{m: m, p: p, idx: idx, seq: seq, text: text, keys: keys, enter: enter}, nil
+	return &sendDelivery{m: m, p: p, idx: idx, seq: seq, mode: mode, text: text, keys: keys, enter: enter}, nil
 }
 
 // deliver types the instruction. It is the body that used to be the `go func()`
@@ -289,10 +386,30 @@ func (d *sendDelivery) deliver(ctx context.Context, done func(error)) {
 		finish(d.cancelled("nothing"))
 		return
 	}
-	if d.text != "" {
-		if !d.p.injectPTY(d.p.pasteWrap(d.text)) {
+	switch d.mode {
+	case sendTyped:
+		for i, w := range typedWrites(d.text) {
+			if i > 0 && !pause(ctx, typedChunkGap) {
+				finish(d.cancelled("rest of the typed text"))
+				return
+			}
+			if !d.p.injectPTY(w) {
+				finish(dead("text"))
+				return
+			}
+		}
+	case sendPaste:
+		// Written even when empty: the markers alone are the gesture.
+		if !d.p.injectPTY([]byte("\x1b[200~" + d.text + "\x1b[201~")) {
 			finish(dead("text"))
 			return
+		}
+	default:
+		if d.text != "" {
+			if !d.p.injectPTY(d.p.pasteWrap(d.text)) {
+				finish(dead("text"))
+				return
+			}
 		}
 	}
 	for _, k := range d.keys {
