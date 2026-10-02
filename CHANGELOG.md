@@ -9,6 +9,23 @@ Releases before v0.11.0 predate this file; their notes were generated from
 commit subjects and remain on the
 [GitHub releases page](https://github.com/MadAppGang/magmux/releases).
 
+## [0.14.0] - 2026-10-02
+
+### Added
+
+- **`send` can type, and can paste.** `"typed":true` types the text the way a
+  person does: short runs of characters with a pause between them, and every
+  newline as a ctrl-j of its own, never bracketed. A TUI cannot tell one large
+  write from a paste, and Claude Code (2.1.286) treats any read over 800
+  characters as one, then hands a paste over 800 characters or 2 newlines to
+  its model as `<pasted_content>` — text the user did not write. Typed, the
+  same instruction is the user's own. `"paste":true` is the opposite gesture:
+  the text is one bracketed paste whatever it holds, a single line or nothing
+  at all, which is how a terminal delivers a dropped file path and Cmd+V over a
+  clipboard image. The two are exclusive; a paste into a pane that never
+  enabled bracketed paste is refused rather than typed. With neither, `send` is
+  unchanged.
+
 ## [0.13.0] - 2026-09-17
 
 ### Added
@@ -226,5 +243,6 @@ commit subjects and remain on the
   nudges, and the summary "the pilot stopped without calling finish". The
   provider's own error is now reported, and nudging stops once one is seen.
 
+[0.14.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.14.0
 [0.12.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.12.0
 [0.11.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.11.0

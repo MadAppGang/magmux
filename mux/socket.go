@@ -30,13 +30,17 @@ type sockMsg struct {
 	Project          string `json:"project,omitempty"`           // project name
 	NotificationType string `json:"notification_type,omitempty"` // idle_prompt, permission_prompt, etc.
 	// Controlled-session fields (type="send" / type="pilot")
-	Keys    []string `json:"keys,omitempty"`    // named keys to press after Text
-	Enter   *bool    `json:"enter,omitempty"`   // submit after Text; defaults true
-	Label   string   `json:"label,omitempty"`   // short tag for the control log ("step 2/5")
-	Goal    string   `json:"goal,omitempty"`    // the task the pilot is driving
-	Steps   int      `json:"steps,omitempty"`   // planned step count, 0 if open-ended
-	Model   string   `json:"model,omitempty"`   // model the pilot itself is running
-	Summary string   `json:"summary,omitempty"` // pilot's closing summary
+	Keys  []string `json:"keys,omitempty"`  // named keys to press after Text
+	Enter *bool    `json:"enter,omitempty"` // submit after Text; defaults true
+	// Typed and Paste choose how Text reaches the PTY; they are exclusive (see
+	// sendMode). Neither keeps the old shape.
+	Typed   bool   `json:"typed,omitempty"`   // type Text as keystrokes, newlines as ctrl-j
+	Paste   bool   `json:"paste,omitempty"`   // deliver Text as one bracketed paste, even empty
+	Label   string `json:"label,omitempty"`   // short tag for the control log ("step 2/5")
+	Goal    string `json:"goal,omitempty"`    // the task the pilot is driving
+	Steps   int    `json:"steps,omitempty"`   // planned step count, 0 if open-ended
+	Model   string `json:"model,omitempty"`   // model the pilot itself is running
+	Summary string `json:"summary,omitempty"` // pilot's closing summary
 	// Client is the controller's identity for the panel header
 	// ("claude-code/2.1"). The ONE field MCP adds to the pilot protocol —
 	// everything else an MCP client does arrives as an ordinary socket verb.
@@ -422,19 +426,23 @@ func (m *Magmux) dispatchSocketVerb(msg sockMsg, done func(map[string]any, error
 		if msg.Enter != nil {
 			enter = *msg.Enter
 		}
+		mode, err := sendModeOf(msg.Typed, msg.Paste)
+		if err != nil {
+			return nil, err
+		}
 		// Admitted here, on the reader; DELIVERED on this connection's lane for
 		// this pane (msg.sub), so two instructions to one pane cannot be typed
 		// into each other. A message with no connection behind it — an op
 		// called through the registry, a unit test — keeps the old
 		// one-goroutine-per-send shape.
 		if done == nil {
-			return nil, m.sendToPaneVia(msg.runCtx, msg.sub, paneIdx, msg.Text, msg.Keys, enter, msg.Label, nil)
+			return nil, m.sendToPaneVia(msg.runCtx, msg.sub, paneIdx, mode, msg.Text, msg.Keys, enter, msg.Label, nil)
 		}
 		// Delivery outlives this call, so the reply does too: it means "the
 		// bytes reached the PTY", which is the failure mode that used to live
 		// and die inside sendToPane's goroutine.
 		result := map[string]any{"pane": paneIdx, "bytes": len(msg.Text), "keys": len(msg.Keys), "enter": enter}
-		if err := m.sendToPaneVia(msg.runCtx, msg.sub, paneIdx, msg.Text, msg.Keys, enter, msg.Label, func(err error) {
+		if err := m.sendToPaneVia(msg.runCtx, msg.sub, paneIdx, mode, msg.Text, msg.Keys, enter, msg.Label, func(err error) {
 			done(result, err)
 		}); err != nil {
 			return nil, err

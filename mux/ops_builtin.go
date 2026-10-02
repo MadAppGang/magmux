@@ -156,6 +156,8 @@ func (m *Magmux) builtinOps() []hub.Op {
 				"text":  strProp("The instruction. Sent as a bracketed paste when the pane asked for one."),
 				"keys":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Named keys to press after the text, e.g. [\"tab\",\"down\"]."},
 				"enter": boolProp("Submit after the text. Defaults to true."),
+				"typed": boolProp("Type the text as keystrokes: short paced runs, every newline as ctrl-j, never bracketed. Exclusive with paste."),
+				"paste": boolProp("Deliver the text as one bracketed paste, even a single line or nothing at all (an empty paste is Cmd+V over a clipboard image). Exclusive with typed."),
 				"label": strProp("Short tag for the panel's OUT row, e.g. \"step 2/5\"."),
 			})),
 
