@@ -41,3 +41,9 @@ ai-docs/sessions/
 
 # Linked worktrees live here. The checkouts are git's own state, not sources.
 .claude/worktrees/
+
+# magus: generated profile config (source of truth: .claude/profiles.json)
+.claude/profiles/
+.claude/.magus-backups/
+.claude/settings.json
+.mcp.json

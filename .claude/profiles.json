@@ -15,10 +15,7 @@
         "go@magus": "latest",
         "browser-use@magus": "latest",
         "terminal@magus": "latest",
-        "kanban@magus": "latest",
         "setup@magus": "latest",
-        "style@magus": "latest",
-        "code-analysis@magus": "latest",
         "multimodel@magus": "latest",
         "dev@magus": "latest"
       },
@@ -28,7 +25,8 @@
           "type": "http",
           "url": "https://mcp.linear.app/mcp"
         }
-      }
+      },
+      "updatedAt": "2026-10-14T11:34:41.651Z"
     }
   }
 }
