@@ -281,8 +281,12 @@ func TestResizeKeyframeOverWatch(t *testing.T) {
 		}
 		return false
 	})
+	// The marker is COMPUTED, so only the shell's output can contain it: the
+	// tty echoes the command line, and when the input beats the first prompt
+	// the output row reads "$ FENCE_RZ2" rather than "FENCE_RZ2" (seen on
+	// ubuntu CI with dash).
 	rc.send(map[string]any{"type": "call", "op": "input", "id": "fence",
-		"args": map[string]any{"pane": 0, "text": "echo FENCE_RZ\r"}})
+		"args": map[string]any{"pane": 0, "text": "echo FENCE_RZ$((1+1))\r"}})
 	readUntil("the fence", 10*time.Second, func(ev map[string]any, raw string) bool {
 		countKeys(ev, raw)
 		f, ok := frame(ev, raw)
@@ -290,7 +294,7 @@ func TestResizeKeyframeOverWatch(t *testing.T) {
 			return false
 		}
 		for _, l := range f.Lines {
-			if strings.TrimSpace(l.T) == "FENCE_RZ" {
+			if strings.Contains(l.T, "FENCE_RZ2") {
 				return true
 			}
 		}
