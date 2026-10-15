@@ -86,6 +86,7 @@ Subcommands: [`magmux mcp`](#magmux-mcp) runs magmux as an MCP server.
 | `Ctrl-G Tab` | Switch focus to next pane |
 | `Ctrl-G p` | Show / hide the [control panel](#the-control-panel) |
 | `Ctrl-G s` | Show / hide the status bar |
+| `Ctrl-G r` | Return to the terminal's size after a client [`resize`](#screen-size) |
 | `Ctrl-G [` | Scroll the focused pane back through its [scrollback](#scrollback) |
 | Mouse click | Switch focus to clicked pane |
 | Mouse drag | Select text (auto-copies to clipboard) |
@@ -562,6 +563,58 @@ hides a light-on-dark program like Claude Code. A pane with no split beside it
 has no border to colour; use `{"type":"overlay"}` there, which sets both halves
 of its own colour and is legible anywhere.
 
+### Screen size
+
+`resize` sets the size of magmux's whole screen, so every child gets a real
+`SIGWINCH` and redraws — the way to make a headless session the size of the
+browser or terminal that is showing it.
+
+```jsonc
+// the one session pane, sized directly
+{"type":"resize","pane":0,"rows":40,"cols":100,"id":"r1"}
+// the whole screen, status row included
+{"type":"resize","rows":50,"cols":160,"id":"r2"}
+// give the size back to the terminal
+{"type":"resize","auto":true,"id":"r3"}
+
+// -> {"type":"reply","id":"r1","ok":true,
+//     "result":{"rows":40,"cols":100,"changed":true,"manual":true}}
+// -> {"type":"reply","id":"r1","ok":false,"code":"too_small","error":"…"}
+```
+
+Without `pane`, `rows`/`cols` are the whole screen. With it they are that
+pane's size, and the screen becomes `rows` plus the status row (none under
+`--no-status`) by `cols`. The pane form is only accepted when that pane is the
+**one** session on screen — with two, a pane's size does not decide the
+screen's, and the answer would claim a size the pane did not get — so it is
+refused `bad_request` with more than one session pane, or with the control
+panel visible. The result's `rows`/`cols` are the pane's size after the call
+when `pane` was given, else the screen's; `manual` says whether a client's size
+is now in force.
+
+A requested size stays until `{"auto":true}` or `Ctrl-G r`. The human's window
+changing size never releases it; on an interactive terminal a window smaller
+than the requested size **clips** it while it cannot be shown, and the window
+growing back restores it. Same size again answers `changed:false` and touches
+nothing — no reflow, no `SIGWINCH`, no keyframe — so a client may repeat itself
+freely. A watcher sees an applied resize as a keyframe at the new geometry.
+
+| Code | When |
+|---|---|
+| `bad_request` | `rows`/`cols` missing, not whole numbers, or below 1; `auto` together with a size; `pane` as described above |
+| `too_small` | any session pane would get less than **3 rows × 20 columns** |
+| `too_large` | a side over 10000, more than 4,000,000 cells, or — interactive only — larger than the terminal |
+| `no_such_pane`, `pane_is_control` | `pane` names nothing, or names the control panel |
+
+A refused resize leaves every pane exactly as it was: the size is checked by a
+dry run before any pane is touched. It is class `control`, so a view token
+cannot call it.
+
+**Shrinking is lossy; debounce.** Growing keeps scrollback at the width it was
+printed at, but a shrink discards the live cells that no longer fit, and
+nothing brings them back. A client following a browser window should send the
+size the drag ended at, not every size it passed through.
+
 ## Controlled Sessions
 
 A subscriber can also *drive* a pane, not just watch it. That closes the loop:
@@ -845,7 +898,7 @@ with a 409. Branch on `code`.
 `--view-token-file` is a second token that may READ and nothing else:
 `capabilities`, `list`, `ops`, `capture`, `transcript`, and `watch` / `unwatch`
 / `resync` so it can follow a pane live. `input`, `send`, `open_pane`,
-`close_pane`, `status`, `tint`, `overlay` and every plugin op are `403`. It is
+`close_pane`, `resize`, `status`, `tint`, `overlay` and every plugin op are `403`. It is
 for a dashboard on a wall, a
 screen-share, a status page — anywhere you want the session visible without
 handing over the keyboard.

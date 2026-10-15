@@ -45,6 +45,7 @@ const (
 	sockCodePaneHidden    = protocol.CodePaneHidden
 	sockCodeUnknownVerb   = protocol.CodeUnknownVerb
 	sockCodeTooSmall      = protocol.CodeTooSmall
+	sockCodeTooLarge      = protocol.CodeTooLarge
 	sockCodeForbidden     = protocol.CodeForbidden
 	sockCodeNotReady      = protocol.CodeNotReady
 	sockCodeUnsupported   = protocol.CodeUnsupported
@@ -63,7 +64,7 @@ const (
 var (
 	sockVerbs = []string{"capabilities", "list", "capture", "transcript", "open_pane", "close_pane",
 		"focus", "status", "tint", "overlay", "send", "pilot", "agent", "ops", "call",
-		"watch", "unwatch", "resync", "input"}
+		"watch", "unwatch", "resync", "input", "resize"}
 	sockEvents = []string{protocol.EventSnapshot, protocol.EventExit, protocol.EventControl, protocol.EventPaneOpened, protocol.EventPaneClosed,
 		protocol.EventResults, protocol.EventShutdown, protocol.EventReply,
 		protocol.EventFrame, protocol.EventChanged}
@@ -246,7 +247,7 @@ func (m *Magmux) dispatchSocketVerbExt(msg sockMsg, done func(map[string]any, er
 // it one would put a phantom connect/disconnect pair in the panel.
 func isControllerVerb(verb string) bool {
 	switch verb {
-	case "send", "pilot", "open_pane", "close_pane", "focus", "capture", "transcript", "list":
+	case "send", "pilot", "open_pane", "close_pane", "focus", "capture", "transcript", "list", "resize":
 		return true
 	}
 	return false

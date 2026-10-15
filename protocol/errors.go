@@ -21,9 +21,11 @@ const (
 	CodeUnknownVerb = "unknown_verb"
 	// CodeTooSmall means the layout has no room: a split that would leave
 	// either half below the minimum usable pane size is refused before
-	// anything is forked. Distinct from bad_request because the request was
-	// well formed and would succeed on a bigger terminal, which sends the
-	// caller to a different remedy: drop a pane, or find more columns.
+	// anything is forked, and a `resize` that would leave any session pane
+	// below it is refused before any pane is touched. Distinct from
+	// bad_request because the request was well formed and would succeed on a
+	// bigger terminal (or a bigger size), which sends the caller to a
+	// different remedy: drop a pane, or find more columns.
 	CodeTooSmall = "too_small"
 	// CodeForbidden means the caller is authenticated but not allowed: a
 	// read-only connection asking for an op that is not class read, or a
@@ -42,6 +44,9 @@ const (
 	// HTTP body, a WebSocket message, a plugin event. Distinct from
 	// bad_request because the payload may be perfectly well formed, and the
 	// caller's remedy is to send less rather than to send it differently.
+	// Also a requested GEOMETRY beyond magmux's bounds (a side over 10000, more
+	// than 4,000,000 cells) or, on an interactive terminal, beyond the terminal:
+	// the remedy is the same — ask for less.
 	CodeTooLarge = "too_large"
 	// CodePluginGone means the op existed and its plugin did not answer: the
 	// process died, or its connection dropped, with the call in flight. magmux

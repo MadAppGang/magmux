@@ -86,6 +86,9 @@ func TestOpsAdvertisesEveryBuiltinVerb(t *testing.T) {
 		"close_pane":   protocol.ClassControl,
 		"focus":        protocol.ClassControl,
 		"send":         protocol.ClassControl,
+		// resize changes every child's screen at once, so it is never a
+		// viewer's.
+		"resize": protocol.ClassControl,
 		// input is its own class, not control: `send` is a controller's
 		// instruction and is recorded as one, input is what a keyboard would
 		// have done. The view token is enforced on the class, so collapsing the
