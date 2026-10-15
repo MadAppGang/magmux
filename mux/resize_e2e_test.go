@@ -203,12 +203,33 @@ func TestResizeKeyframeOverWatch(t *testing.T) {
 		}
 		return f, f.Pane == 0
 	}
+	// On failure, say which step stalled and what the stream carried last: a
+	// bare read timeout names neither.
+	var step string
+	var seen []string
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("stalled waiting for %s; last %d events:", step, len(seen))
+			for _, s := range seen {
+				t.Logf("  %s", s)
+			}
+		}
+	})
 	// readUntil hands every event to fn until fn says stop.
 	readUntil := func(what string, within time.Duration, fn func(ev map[string]any, raw string) bool) {
 		t.Helper()
+		step = what
 		deadline := time.Now().Add(within)
+		_ = rc.c.SetReadDeadline(deadline)
 		for time.Now().Before(deadline) {
 			ev, raw, ok := rc.next()
+			short := raw
+			if len(short) > 300 {
+				short = short[:300] + "…"
+			}
+			if seen = append(seen, short); len(seen) > 8 {
+				seen = seen[1:]
+			}
 			if !ok {
 				t.Fatalf("the stream ended waiting for %s", what)
 			}
