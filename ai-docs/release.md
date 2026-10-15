@@ -5,7 +5,7 @@ stages it passes through, and what counts as done. Everything this file points
 at is authority; nothing is copied in, because a copied fact goes stale in
 silence.
 
-verified: 2026-10-02 @ 1900271
+verified: 2026-10-16 @ 1a7bdb5
 
 ## Authority
 
