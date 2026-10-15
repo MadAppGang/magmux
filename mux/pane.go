@@ -598,7 +598,24 @@ func (p *Pane) resize(y, x, h, w int) {
 	}
 }
 
-// reshapeChildren reflows a split node's two children.
+// reshapeChildren reflows a split node's two children into the boxes
+// splitBoxes computes.
+//
+// Caller holds treeMu.Lock (geometry is structural state).
+func (p *Pane) reshapeChildren() {
+	if p.splitType != SplitHorizontal && p.splitType != SplitVertical {
+		return
+	}
+	c1, c2 := splitBoxes(p.splitType, p.ratio, box{p.y, p.x, p.h, p.w})
+	p.child1.resize(c1.y, c1.x, c1.h, c1.w)
+	p.child2.resize(c2.y, c2.x, c2.h, c2.w)
+}
+
+// splitBoxes is reshapeChildren's arithmetic with the writes taken out: the
+// two children's boxes for a split of b. It is a separate function so the
+// resize op's dry run (planLayoutLocked) can ask "where would every leaf land?"
+// without touching a Pane, and without a second copy of this arithmetic to
+// drift from the first.
 //
 // The clamps are not defensive noise. w2 = p.w - w1 - 1 has no natural floor:
 // three splits deep on an 80-column terminal, or one SIGWINCH shrinking a tree
@@ -608,21 +625,21 @@ func (p *Pane) resize(y, x, h, w int) {
 // rather than in OpenPane is deliberate — OpenPane only covers the moment of
 // creation, and the terminal can shrink at any time afterwards.
 //
-// Caller holds treeMu.Lock (geometry is structural state).
-func (p *Pane) reshapeChildren() {
-	if p.splitType == SplitHorizontal {
-		w1 := clamp(int(float64(p.w)*p.ratio), 0, maxInt(0, p.w-1))
-		w2 := maxInt(0, p.w-w1-1) // -1 for border
-		h := maxInt(0, p.h)
-		p.child1.resize(p.y, p.x, h, w1)
-		p.child2.resize(p.y, p.x+w1+1, h, w2)
-	} else if p.splitType == SplitVertical {
-		h1 := clamp(int(float64(p.h)*p.ratio), 0, maxInt(0, p.h-1))
-		h2 := maxInt(0, p.h-h1-1) // -1 for border
-		w := maxInt(0, p.w)
-		p.child1.resize(p.y, p.x, h1, w)
-		p.child2.resize(p.y+h1+1, p.x, h2, w)
+// Pure: it reads nothing but its arguments.
+func splitBoxes(st SplitType, ratio float64, b box) (c1, c2 box) {
+	switch st {
+	case SplitHorizontal:
+		w1 := clamp(int(float64(b.w)*ratio), 0, maxInt(0, b.w-1))
+		w2 := maxInt(0, b.w-w1-1) // -1 for border
+		h := maxInt(0, b.h)
+		return box{b.y, b.x, h, w1}, box{b.y, b.x + w1 + 1, h, w2}
+	case SplitVertical:
+		h1 := clamp(int(float64(b.h)*ratio), 0, maxInt(0, b.h-1))
+		h2 := maxInt(0, b.h-h1-1) // -1 for border
+		w := maxInt(0, b.w)
+		return box{b.y, b.x, h1, w}, box{b.y + h1 + 1, b.x, h2, w}
 	}
+	return b, box{} // SplitNone has no children; no caller asks
 }
 
 // ── PaneConfig ────────────────────────────────────────────────────────────────

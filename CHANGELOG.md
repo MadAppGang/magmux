@@ -9,6 +9,38 @@ Releases before v0.11.0 predate this file; their notes were generated from
 commit subjects and remain on the
 [GitHub releases page](https://github.com/MadAppGang/magmux/releases).
 
+## [Unreleased]
+
+## [0.15.0] - 2026-10-16
+
+### Added
+
+- **`resize`: a client can set the screen's size.**
+  `{"type":"resize","rows":R,"cols":C}` sizes the whole screen, and
+  `{"type":"resize","pane":0,"rows":R,"cols":C}` sizes the one session pane
+  directly, so a headless session can be made the size of whatever is showing
+  it and every child gets a real `SIGWINCH`. The reply is
+  `{"rows","cols","changed","manual"}`. The size holds until
+  `{"type":"resize","auto":true}` or `Ctrl-G r`; the window changing size never
+  releases it, and on an interactive terminal a smaller window clips it until
+  the window grows back. The same size again answers `changed:false` and
+  touches nothing — no reflow, no `SIGWINCH`, no keyframe. Refusals are
+  `bad_request`, `too_small` (any session pane under 3×20), `too_large` (a side
+  over 10000, more than 4,000,000 cells, or larger than an interactive
+  terminal), `no_such_pane` and `pane_is_control`, and a refused resize leaves
+  every pane exactly as it was. It is a `control` op, so `call`,
+  `POST /v1/ops/resize` and the WebSocket reach it and a view token does not.
+  Growing keeps scrollback at its old width; **shrinking discards the live
+  cells that no longer fit**, so a client following a window should debounce.
+  `magmux mcp` has no tool for it yet.
+
+### Changed
+
+- **`Ctrl-G r` is now magmux's.** It returns to the terminal's size after a
+  client's `resize`, and says so in the status bar when there is nothing to
+  release. It used to reach the focused pane as `^G r`; like `Ctrl-G p`, `s`
+  and `[`, it is now claimed whether or not the mode it controls is on.
+
 ## [0.14.0] - 2026-10-02
 
 ### Added
@@ -243,6 +275,7 @@ commit subjects and remain on the
   nudges, and the summary "the pilot stopped without calling finish". The
   provider's own error is now reported, and nudging stops once one is seen.
 
+[0.15.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.15.0
 [0.14.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.14.0
 [0.12.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.12.0
 [0.11.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.11.0

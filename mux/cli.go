@@ -145,6 +145,7 @@ func Main(args []string) int {
 			fmt.Println("  Ctrl-G Tab    Switch focus to next pane")
 			fmt.Println("  Ctrl-G p      Show / hide the control panel (keeps its history)")
 			fmt.Println("  Ctrl-G s      Show / hide the status bar")
+			fmt.Println("  Ctrl-G r      Return to the terminal's size after a client resize")
 			fmt.Println("  Ctrl-G [      Scroll the focused pane back through its scrollback.")
 			fmt.Println("                Then k/j ↑/↓ PgUp/PgDn g/G move, q / Enter / Esc go live.")
 			fmt.Println("                Alternate-screen panes (Claude Code, vim, htop) keep none.")

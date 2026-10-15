@@ -72,6 +72,9 @@ The core's sections, in the old file's order:
    `mux/chrome.go`.
    magmux's default is to show none of itself: a lone session pane is a bare
    terminal, because `renderBorder` only ever paints a SPLIT node.
+9. **Size** — the virtual screen size decision and the dry-run fit
+   (`screenSizeLocked`, `applySizeLocked`, `checkScreenSize`, `treeFitsLocked`):
+   `mux/size.go`; the `resize` op, manual mode and `Ctrl-G r`: `mux/resize.go`.
 
 Socket lifecycle:
 
@@ -263,7 +266,8 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
 
 - **`treeMu` guards the layout; `p.mu` still guards content.** `treeMu` covers
   `m.root`, `m.allPanes` (header, elements, each element's `id`/`closed`/
-  `label`), `m.focused`, `m.statusText`, `m.rows`/`m.cols`, `m.closeAt`, the
+  `label`), `m.focused`, `m.statusText`, `m.rows`/`m.cols`, `m.autoRows`/
+  `m.autoCols`, `m.manualRows`/`m.manualCols`, `m.closeAt`, the
   package-level `sel`, and every `Pane`'s STRUCTURAL fields (`splitType, y, x,
   h, w, ratio, child1, child2, parent`). Content fields (`screen, dirty, dead,
   tint, inputReady, …`) stay under `p.mu`. Lock order:
@@ -451,6 +455,62 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   one-element slice and its own box, so left to itself it reports "cannot lay
   out 1 panes in 40x1" for a 40-pane request — true of the recursion, useless
   to the human. The count and the terminal ride down from `buildGrid`.
+
+### Size invariants (`resize`, manual mode)
+
+- **The size is four facts and one decision.** `autoRows/autoCols` is what
+  magmux picks when nobody asked (the tty in `init()` and on SIGWINCH, or
+  `headlessSize()`); `manualRows/manualCols` is what a client asked for through
+  `resize` (0 = nobody); `rows/cols` is the VIRTUAL screen the layout, clients
+  and `capabilities` see. `screenSizeLocked` is the ONE place it is decided
+  (manual, else auto, else unchanged), `applySizeLocked` the ONE writer of
+  `m.rows/m.cols` after `init()`, and `reflowLocked` the one place the tree is
+  resized. `grep -n 'm\.rows *=\|m\.cols *=\|m\.rows, m\.cols *=' mux/*.go`
+  must hit `init()` (twice) and `applySizeLocked` and nothing else. All six ints
+  are `treeMu`'s. Zero `auto*`/`manual*` is every struct-literal test, and then
+  `applySizeLocked` is exactly `reflowLocked`.
+- **SIGWINCH writes `auto*` and NEVER `manual*`.** `setAutoSize` is the whole
+  SIGWINCH body. Manual mode ends only at `{"auto":true}` or `Ctrl-G r`, never on
+  a timer, never on a window change. A client's size surviving the human's
+  window is the point of the mode.
+- **`Pane.resize` is never a no-op**: it rebuilds every Screen, forces a
+  keyframe and calls `SetWinSize`. So the op compares BEFORE `applySizeLocked`,
+  and a same-size request answers `changed:false` having touched nothing. It
+  still pins manual mode, so `manual` in the reply has one meaning.
+  `TestResizeKeyframeOverWatch` fences it on the real stream.
+- **REFUSE, never roll back.** `Screen.resize` destroys the cells that do not
+  fit and there is no undo, so every refusal is decided before any Pane is
+  touched: `checkScreenSize` (the ONE bound, also `headlessSize`'s), the tty
+  bound, then a dry run (`planLayoutLocked` over `splitBoxes`, the arithmetic
+  `reshapeChildren` uses, no second copy) through `treeFitsLocked`. All of it
+  runs under the same `treeMu.Lock` as the apply, so nothing can slip between
+  them. `TestRefusedResizeLeavesTreeByteIdentical` pins every code against
+  `treeFingerprint`, `frameGen` included. The op REFUSES; SIGWINCH and the auto
+  release CLAMP (CREATION refuses, RESHAPE clamps). Refusing a release would
+  trap a human in a mode they cannot leave.
+- **Which leaves are checked**: every leaf reachable from `m.root` that is not
+  `isControl`. Hidden panes are not in the tree, so their stale geometry is
+  never consulted. Dead panes are checked: they are on screen. The visible panel
+  is chrome, clamped as on SIGWINCH. The pane form exists only when the session
+  leaf IS the root. With two sessions, or with the panel visible, the pane's
+  size does not decide the screen's, so it is `bad_request`.
+- **`pty.SetWinSize` stays under `treeMu`.** `TIOCSWINSZ` does not block on a
+  peer or a buffer, so it is not a rule-1 violation. Moving it after the unlock
+  would let a concurrent op / SIGWINCH / Ctrl-G r deliver their winsizes in the
+  opposite order to their `Screen.resize`s, leaving a child believing a size its
+  screen is not.
+- **The renderer-clipping seam is two sites.** Until the renderer can clip, an
+  interactive manual size may not exceed the terminal (refused `too_large` at
+  request time), and `screenSizeLocked` CLIPS it to `auto*` while a later window
+  is smaller, leaving `manual*` intact so it returns when the window grows.
+  Headless does neither. Renderer clipping deletes both. `clearNext`
+  (atomic: `renderLocked` holds only RLock) makes the next full frame clear the
+  terminal after a shrink, because the renderer otherwise never clears.
+- **The panel row is run level (-1).** A resize touches the session, not a pane.
+  A route would make `targetPane` see a pane the controller never opened.
+  `Ctrl-G r` is a local key and files no row.
+- **MCP does not reach it.** `mcp/rc.go` skips built-in ops. A `resize` tool
+  would be hand-written in `mcp/mcp_tools.go`.
 
 ### Headless invariants (`--headless`, and stdin that is not a tty)
 

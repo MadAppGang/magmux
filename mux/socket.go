@@ -77,6 +77,15 @@ type sockMsg struct {
 	// claim that can be wrong, so 120 is clamped to 30 and the reply says so.
 	Mode string `json:"mode,omitempty"`
 	FPS  int    `json:"fps,omitempty"`
+	// Rows, Cols and Auto belong to `resize`. They are `any`, like Pane, and
+	// for a reason that matters more here: a typed field makes a bad value
+	// ("rows":"40") fail json.Unmarshal for the WHOLE line, the socket reader
+	// drops an undecodable line silently, and the caller would get no reply at
+	// all instead of the bad_request the contract promises. parseResize does
+	// the typing.
+	Rows any `json:"rows,omitempty"`
+	Cols any `json:"cols,omitempty"`
+	Auto any `json:"auto,omitempty"`
 	// Controller is open_pane's one privileged field: "self" asks magmux to
 	// make the CALLING PLUGIN the new pane's controller, so the plugin's own
 	// `controller.snapshot` messages become that pane's state.
@@ -343,6 +352,9 @@ func (m *Magmux) dispatchSocketVerb(msg sockMsg, done func(map[string]any, error
 
 	case "focus":
 		return m.sockFocus(msg)
+
+	case "resize":
+		return m.sockResize(msg)
 
 	case "status":
 		m.treeMu.Lock()

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -41,7 +42,8 @@ var dbgFile *os.File
 type Magmux struct {
 	// treeMu guards the LAYOUT: m.root, m.allPanes (its header, its elements,
 	// and each element's id/closed/label), m.focused, m.statusText, m.rows,
-	// m.cols, m.closeAt, the package-level `sel`, and the structural fields of
+	// m.cols, m.autoRows, m.autoCols, m.manualRows, m.manualCols, m.closeAt,
+	// the package-level `sel`, and the structural fields of
 	// every Pane (splitType, y, x, h, w, ratio, child1, child2, parent).
 	// Content fields (screen, dirty, dead, tint, inputReady, …) stay under
 	// Pane.mu exactly as before.
@@ -85,11 +87,28 @@ type Magmux struct {
 	// OpenPane checks it under the same lock, because an open_pane arriving
 	// during teardown would otherwise panic with "WaitGroup misuse: Add called
 	// concurrently with Wait".
-	closing    bool
-	root       *Pane
-	focused    *Pane
-	allPanes   []*Pane // leaf panes only; append-only, index == Pane.id
+	closing  bool
+	root     *Pane
+	focused  *Pane
+	allPanes []*Pane // leaf panes only; append-only, index == Pane.id
+	// rows/cols is the VIRTUAL screen: the layout, what clients see, what
+	// capabilities reports. Written by init() and, after it, ONLY by
+	// applySizeLocked (size.go), which takes it from screenSizeLocked.
 	rows, cols int
+	// autoRows/autoCols is the geometry magmux picks when nobody asked: the
+	// tty (init, SIGWINCH) or headlessSize(). 0 = unknown, which is every
+	// struct-literal test, and screenSizeLocked then keeps rows/cols as they are.
+	autoRows, autoCols int
+	// manualRows/manualCols is what a client asked for through `resize`; 0 =
+	// nobody asked. Never touched by SIGWINCH: that is the whole point of the
+	// mode.
+	manualRows, manualCols int
+	// clearNext asks the next FULL frame to clear the terminal first. Set by a
+	// resize that shrank the screen: the renderer never clears, so the rows and
+	// columns a shrink abandons would keep the old frame standing forever.
+	// Atomic because it is consumed in renderLocked, which holds only RLock and
+	// must not write a plain field.
+	clearNext  atomic.Bool
 	statusText string
 	renderer   Renderer
 	// out is where a painted frame goes. Nil means os.Stdout, which is what
@@ -434,32 +453,29 @@ func (m *Magmux) livePanesLocked(dst []*Pane) []*Pane {
 // COLUMNS=99999999 is an OOM with a stack trace instead of an error, and
 // COLUMNS=0 gives every pane a zero-width screen whose every capture comes back
 // empty with no error anywhere. Both arrive from the ENVIRONMENT, the input
-// class nobody validates.
-// A per-side bound is NOT enough, and the first version of this function only
-// had one. newScreen allocates rows*cols Cells and a Cell is 20 bytes here
-// (rune 4 + two 6-byte Colors + Attr 2 + two bools), so LINES=9999
-// COLUMNS=9999 — both inside a 10000 per-side cap — is 99,980,001 cells and a
-// ~2GB allocation before a single byte of output, which is the OOM the comment
-// above claims to have prevented. The PRODUCT is what costs memory, so the
-// product is what is capped. 4,000,000 cells is ~80MB: far past any real
-// terminal (a 300x600 pane is 180,000) and nowhere near a container limit.
-const maxHeadlessCells = 4_000_000
-
+// class nobody validates. A per-side bound alone is not enough — the PRODUCT is
+// what costs memory; see maxScreenCells in size.go, which is also the resize
+// op's bound.
 func headlessSize() (rows, cols int) {
 	rows, cols = 24, 80
-	if v, err := strconv.Atoi(os.Getenv("LINES")); err == nil && v > 0 && v < 10000 {
+	// EXCLUSIVE of maxScreenSide, unlike checkScreenSize; see the constant.
+	if v, err := strconv.Atoi(os.Getenv("LINES")); err == nil && v > 0 && v < maxScreenSide {
 		rows = v
 	}
-	if v, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && v > 0 && v < 10000 {
+	if v, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && v > 0 && v < maxScreenSide {
 		cols = v
 	}
 	// Both together, after both are known: either alone can be legal while the
 	// pair is not. Falling back to 80x24 rather than clamping one side keeps the
 	// answer a geometry somebody could actually have meant, and it is said out
 	// loud because a silently ignored COLUMNS is indistinguishable from a bug.
-	if rows*cols > maxHeadlessCells {
+	//
+	// checkScreenSize is the one bound; after the per-side parse above both
+	// sides are in [1, maxScreenSide), so the product is the only branch of it
+	// that can fire here, and the message below is still the true one.
+	if err := checkScreenSize(rows, cols); err != nil {
 		fmt.Fprintf(os.Stderr, "magmux: ignoring LINES=%d COLUMNS=%d (%d cells exceeds the %d-cell cap); using 80x24\n",
-			rows, cols, rows*cols, maxHeadlessCells)
+			rows, cols, rows*cols, maxScreenCells)
 		rows, cols = 24, 80
 	}
 	return rows, cols
@@ -534,7 +550,11 @@ func (m *Magmux) init() error {
 		// statusRowsLocked from m.rows; zeros there give every pane a zero-sized
 		// Screen and every capture comes back empty. errPanesDontFit is what
 		// turns "too small to be usable" into an error rather than that silence.
-		m.rows, m.cols = headlessSize()
+		// The auto size is recorded as well as applied: it is what a client's
+		// resize is released back to. No lock: init() runs before any
+		// goroutine exists, and before there is a tree to reflow.
+		m.autoRows, m.autoCols = headlessSize()
+		m.rows, m.cols = m.autoRows, m.autoCols
 		m.quit = make(chan struct{})
 		// Still called: --theme / MAGMUX_THEME / TERM_THEME / COLORFGBG still
 		// choose a palette, and the palette is what children are told about
@@ -557,8 +577,8 @@ func (m *Magmux) init() error {
 		m.restore()
 		return fmt.Errorf("get size: %w", err)
 	}
-	m.rows = h
-	m.cols = w
+	m.autoRows, m.autoCols = h, w
+	m.rows, m.cols = h, w
 	m.quit = make(chan struct{})
 
 	// Alternate screen + hide cursor + enable SGR mouse tracking
@@ -937,18 +957,9 @@ func (m *Magmux) handleSIGWINCH() {
 				if err != nil {
 					continue
 				}
-				// Geometry is structural, and m.root.resize writes it on
-				// every node in the tree — this is a writer, not a reader.
-				m.treeMu.Lock()
-				m.rows = h
-				m.cols = w
-				m.reflowLocked()
-				m.treeMu.Unlock()
-				// resize rebuilds each pane's Screen. A child process
-				// redraws itself on SIGWINCH; the control panel has no
-				// process to do that, so it must be repainted here or it
-				// comes back blank.
-				m.control.markDirty()
+				// The body lives in setAutoSize (size.go) so a test can
+				// reach it: headless never installs this handler.
+				m.setAutoSize(h, w)
 			case <-m.quit:
 				return
 			}
@@ -1334,6 +1345,12 @@ func (m *Magmux) inputLoop() {
 					m.togglePanel()
 				case 's':
 					m.toggleStatusBar()
+				case 'r':
+					// Back to the terminal's size after a client's resize.
+					// Claimed whether or not manual mode is on: a chord whose
+					// meaning depends on a mode the human may not know they
+					// are in is worse than one that says "already automatic".
+					m.releaseManualSize()
 				case '[':
 					// tmux's copy-mode binding, and an ACTION rather than a
 					// toggle: it scrolls back one page, which both enters the

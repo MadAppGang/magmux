@@ -1,8 +1,13 @@
 # A `resize` op: client-chosen screen geometry
 
-Status: **designed, not built.** Approved by the maintainer on 2026-09-17 and
-then deferred, because the change that prompted it turned out to be unnecessary
-(see "Why it was deferred"). This file exists so the design is not re-derived.
+Status: **Phases A and B built, released in v0.15.0; Phase C not built.**
+Approved by the maintainer on 2026-09-17, deferred (see "Why it was deferred"),
+then built on 2026-10-14 when claudish needed to resize a running headless
+session. What shipped is pinned in CLAUDE.md's "Size invariants"; the wire
+contract is in the README's "Screen size" section. Two decisions were taken
+while building that this file did not settle: the visible control panel is
+excluded from the fit check (it is chrome and clamps), and the pane form is
+`bad_request` while the panel is visible. Phase C below is still the design.
 
 ## The problem, in magmux's own terms
 

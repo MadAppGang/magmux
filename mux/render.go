@@ -27,6 +27,14 @@ func (r *Renderer) reset() {
 	r.prevAttr = 0
 }
 
+// clearScreen erases the whole terminal (ED 2). The renderer otherwise never
+// clears: every frame overwrites what it owns. See Magmux.clearNext. SGR is
+// reset first because ED fills with the CURRENT background, which is whatever
+// the previous frame last set; reset() already forces the next setAttr to emit.
+func (r *Renderer) clearScreen() {
+	r.buf.WriteString("\x1b[0m\x1b[2J")
+}
+
 func (r *Renderer) hideCursor() {
 	r.buf.WriteString("\x1b[?25l")
 }
@@ -1123,6 +1131,13 @@ func (m *Magmux) renderLocked() (events []any, out string, quit bool) {
 
 	r := &m.renderer
 	r.reset()
+	// A resize that shrank the screen left the old frame standing in the rows
+	// and columns it gave up; nothing below paints there any more. One clear,
+	// on a full frame, which then repaints every visible cell. A Swap, not a
+	// Load + Store: this goroutine holds only RLock.
+	if m.clearNext.Swap(false) {
+		r.clearScreen()
+	}
 	r.hideCursor()
 	r.renderPane(m.root)
 

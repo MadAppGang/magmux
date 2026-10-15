@@ -106,8 +106,9 @@ func (m *Magmux) statusRowsLocked() int {
 	return 1
 }
 
-// reflowLocked resizes the whole tree to the current terminal minus the status
-// row. It is the SIGWINCH path, reused verbatim by the two chrome toggles:
+// reflowLocked resizes the whole tree to the current virtual screen (m.rows /
+// m.cols, decided by screenSizeLocked) minus the status row. It is the
+// SIGWINCH path, and the resize op's, reused verbatim by the two chrome toggles:
 // showing or hiding either the panel or the status bar is a reflow and nothing
 // more, and a second copy of this arithmetic is how the two would drift.
 //
@@ -528,7 +529,8 @@ func (m *Magmux) appendPanelDigestLocked(segs string, d ctrlDigest, reserve int)
 // on screen either. So `p` is the discovery-critical hint and outranks
 // everything on the bar except `q`, the way out.
 //
-// Survival order as the terminal narrows, last dropped first: q, p, Tab, s.
+// Survival order as the terminal narrows, last dropped first: q, p, r (only
+// while a client's resize holds the screen), Tab, [, s.
 // `Tab` only matters with more than one pane on screen, and `s` is the least
 // useful column magmux can spend — hiding the bar hides its own hint, so the
 // one person who wants it gone can find it in `--help`.
@@ -550,6 +552,7 @@ const (
 	hintRankStatus = iota + 1 // s: hiding the bar hides this hint with it
 	hintRankScroll            // [: only offered when there is history to reach
 	hintRankTab               // Tab: nothing to switch to with one pane on screen
+	hintRankManual            // r: the only way out of a client's size, in the floor
 	hintRankPanel             // p: the surface nothing else can announce
 	hintRankQuit              // q: the way out
 )
@@ -569,7 +572,12 @@ const (
 // It ranks below Tab so the floor the rest of the bar yields to (panel + quit)
 // is unchanged: the hint appears when there is room, and is the second thing to
 // go when there is not.
-func keyHintItems(panelVisible, multiPane, canScroll bool) []hintItem {
+//
+// manual offers "r auto" while a client's resize holds the screen. It ranks
+// ABOVE Tab, so it joins the floor beside p and q: the bar is the only place
+// the mode can announce itself and Ctrl-G r is the only local way out of it,
+// the same argument that keeps "q quit" there.
+func keyHintItems(panelVisible, multiPane, canScroll, manual bool) []hintItem {
 	panel := "p panel"
 	if panelVisible {
 		panel = "p hide"
@@ -580,6 +588,9 @@ func keyHintItems(panelVisible, multiPane, canScroll bool) []hintItem {
 	}
 	if canScroll {
 		items = append(items, hintItem{"[ back", hintRankScroll})
+	}
+	if manual {
+		items = append(items, hintItem{"r auto", hintRankManual})
 	}
 	return append(items, hintItem{"s bar", hintRankStatus}, hintItem{"q quit", hintRankQuit})
 }
@@ -613,7 +624,7 @@ func (m *Magmux) keyHintLocked() []hintItem {
 		canScroll = f.screen.sbLen > 0
 		f.mu.Unlock()
 	}
-	return keyHintItems(!m.panelHiddenLocked(), onScreen > 1, canScroll)
+	return keyHintItems(!m.panelHiddenLocked(), onScreen > 1, canScroll, m.manualRows > 0 && m.manualCols > 0)
 }
 
 // keyHintList joins the hints, dropping everything ranked at or below `cut`.

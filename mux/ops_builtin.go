@@ -147,6 +147,22 @@ func (m *Magmux) builtinOps() []hub.Op {
 			"Move keyboard focus to a pane.",
 			objectSchema(map[string]any{"pane": paneProp}, "pane")),
 
+		// Control, not display: it changes every child's terminal, and a child
+		// redrawing on SIGWINCH is a session being acted on.
+		m.op("resize", protocol.ClassControl,
+			"Set the whole screen's size, so every child gets a real SIGWINCH. With `pane` "+
+				"(only when that pane is the one session on screen) rows/cols are that pane's size. "+
+				"The size stays put until {\"auto\":true} or Ctrl-G r; on an interactive terminal it "+
+				"may not exceed the terminal, and is clipped while the window is smaller. Growing "+
+				"keeps scrollback at its old width; SHRINKING DISCARDS live cells that no longer "+
+				"fit, so debounce. Minimum 3x20 per session pane.",
+			objectSchema(map[string]any{
+				"pane": paneProp,
+				"rows": intProp("Rows: of the pane when `pane` is given, else of the whole screen."),
+				"cols": intProp("Columns, as rows."),
+				"auto": boolProp("Release manual mode and return to the terminal's size. Exclusive with rows/cols."),
+			})),
+
 		m.op("send", protocol.ClassControl,
 			"Deliver an instruction to a session: text, then named keys, then Enter. This is "+
 				"the controller's path — it is recorded in the control panel as an OUT row and "+
