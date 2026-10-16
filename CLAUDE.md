@@ -998,7 +998,21 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   drawn late inside the window still verifies (`TestDrawnLateAt2500msIsNotRetyped`).
   A not-ready read in the window, any non-empty read, or a deadline that
   falls inside the window (`windowCut`) voids (b); the last ends the wait at
-  the settle interval as before.
+  the settle interval as before. So does any ready read whose
+  `BoxCheck.ConvChanged` is set (`boxSettle.convChanged`, sticky; r5 M1):
+  another writer's Enter inside the ~150 ms before the first verify read
+  submits the text before it is drawn and leaves exactly (b)'s empty box,
+  and the acceptance evidence can be blind (history blind spot + a transcript
+  lagging or unfound). A submit always adds an entry or starts a turn, so
+  `convChange` compares against the PRE-TYPING baseline (`BoxExpect.Pre`):
+  `convKey` (the region above the top rule minus the parser's own spinner
+  rows and faint runes — the same rows that set `Working`, no second
+  classification; the row under the spinner is content), a spinner APPEARING,
+  and the registry going `busy`. Any change is `text_mismatch` "another writer
+  may have submitted it", never "nothing was submitted". (a) does not take
+  the check: a reset is a terminal event, not a submit. A conversation that
+  streams during the window (a turn already running) voids (b) too; that is
+  the fail-safe direction.
   A box with neither signal is `text_mismatch` whose detail says which was
   missing ("no stdin reset, and the deadline left less than the 3s verify
   window", or "...was not seen empty on every read"), never a retype — one

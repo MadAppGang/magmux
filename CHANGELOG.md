@@ -39,14 +39,18 @@ commit subjects and remain on the
   stayed completely empty for that second AND the terminal reset after the
   text was typed (`retypeCause:"terminal_reset"`), or the box was completely
   empty on every read for the whole 3 s window, with no reset — Claude
-  dropped the text silently (`retypeCause:"never_drawn"`). The ok reply then
+  dropped the text silently (`retypeCause:"never_drawn"`), provided the
+  conversation above the box did not change and no turn started meanwhile —
+  otherwise somebody else's Enter may have submitted it before it was drawn,
+  and the reply is `text_mismatch` saying so. The ok reply then
   carries `retyped:true` and `retypeCause`. A box that held part of the text,
   all of it, or more than was typed is never retyped, and nor is a paste (a
   late-drawn paste plus its retype would be two `[Pasted text]` tokens, and
   two new tokens are now a mismatch on every verify). A box that showed the
   text and then emptied without magmux's Enter is `text_mismatch` saying it
   is unknown whether another Enter submitted it, never "nothing was
-  submitted". The ok reply adds
+  submitted" — and that includes a box whose text was drawn and then wiped by
+  a startup reset, which is therefore not retyped either. The ok reply adds
   `waitedMs` (including any return to the gate),
   `verified` (`exact`, `paste_token` or `non_empty`), `accept` (`confirmed`,
   `resent_enter`, `in_box` for a send with no Enter, or `submitted_by_other`

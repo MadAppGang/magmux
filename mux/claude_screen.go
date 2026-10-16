@@ -20,6 +20,7 @@ package mux
 
 import (
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -52,6 +53,9 @@ type claudeScreen struct {
 	// where acceptance finds the top of the conversation and a scrolled-off
 	// entry's tail.
 	conv []styledRow
+	// spinnerRows are the conv indexes of the rows that set Working: the
+	// region's ONE volatile row class besides faint runes (convKey).
+	spinnerRows []int
 }
 
 // promptEntry is one user prompt as Claude shows it in the conversation: a `❯`
@@ -345,6 +349,7 @@ func parseClaudeScreen(rows []styledRow, cols int) claudeScreen {
 		for i := top - 1; i >= 0 && i >= top-3; i-- {
 			if spinnerRe.MatchString(strings.TrimLeft(plain(rows[i]), " ")) {
 				sc.Working = true
+				sc.spinnerRows = append(sc.spinnerRows, i)
 			}
 		}
 		sc.Prompts = parsePromptEntries(rows[:top])
@@ -360,6 +365,31 @@ func parseClaudeScreen(rows []styledRow, cols int) claudeScreen {
 		}
 	}
 	return sc
+}
+
+// convKey is the conversation region's content as a submit would change it:
+// every row above the box's top rule except the parser's spinner rows, each
+// as visibleText (faint runes dropped, right-trimmed), blank rows skipped,
+// joined by "\n". The spinner row animates every frame of a turn (glyph,
+// seconds, token count) and faint text is placeholder and hint, so neither is
+// content; Working is how a spinner APPEARING is seen instead. Blank rows only
+// pad the region to the box, so a row shift is not a change. Everything else
+// — a `❯` entry, a queued entry and its hint, assistant output, the row under
+// the spinner — is compared as drawn.
+func convKey(sc claudeScreen) string {
+	var b strings.Builder
+	for i, r := range sc.conv {
+		if slices.Contains(sc.spinnerRows, i) {
+			continue
+		}
+		t := visibleText(r, 0)
+		if strings.TrimSpace(t) == "" {
+			continue
+		}
+		b.WriteString(t)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // findBox scans from the bottom up for the box: a column-0 rule, directly

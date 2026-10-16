@@ -265,11 +265,12 @@ func TestNotReadyReadRestartsTheSettleClock(t *testing.T) {
 	}
 }
 
-// TestVerifyWindowNeverPassesTheDeadline: a short readyTimeoutMs caps the
-// settle wait, but never below the verify's own minimum window (r4 M2): a
-// box that never settles is reported after ~verifyMin, not after verifyMax,
-// and not after one read either.
-func TestVerifyWindowNeverPassesTheDeadline(t *testing.T) {
+// TestVerifyWindowIsFlooredAtItsMinimum: a short readyTimeoutMs (400 ms)
+// caps the settle wait, but never below the verify's own minimum window (r4
+// M2) — so the verify DOES run past that deadline, to verifyMin: a box that
+// never settles is reported after ~verifyMin, not after verifyMax, and not
+// after one read either.
+func TestVerifyWindowIsFlooredAtItsMinimum(t *testing.T) {
 	g := &fakeGate{checkFn: func(_ BoxExpect, n int) BoxCheck {
 		return boxMismatchCheck(fmt.Sprintf("frame%d", n), "partial", false)
 	}}

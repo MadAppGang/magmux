@@ -749,7 +749,10 @@ add `noGate`.
    or the box was COMPLETELY empty on every read for the whole 3 s window,
    with no reset (Claude dropped the text silently and never drew a rune of
    it; render lag tops out well under a second, so a 3 s blank is not a slow
-   draw: `retypeCause:"never_drawn"`). The ok reply then carries
+   draw: `retypeCause:"never_drawn"`) and the conversation above the box did
+   not change and no turn started meanwhile (if either did, another writer's
+   Enter may have submitted the text before it was drawn, so it is
+   `text_mismatch` and not retyped). The ok reply then carries
    `retyped:true` and `retypeCause`. A blank box with no reset whose 3 s
    window the deadline cut short cannot be told from a slow draw, so it is
    `text_mismatch`, never a retype. Before retyping, magmux checks whether

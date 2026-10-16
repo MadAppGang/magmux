@@ -627,6 +627,7 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		lostAgain bool   // the box stayed empty after the one retype
 		pasteLost bool   // a paste's box stayed empty: never retyped
 		leftBox   bool   // the box showed the text, then emptied without our Enter
+		convMoved string // the box stayed empty and THIS changed since the pre-typing baseline: not retyped
 	)
 	for attempt := 0; ; attempt++ {
 		attemptN = attempt
@@ -733,7 +734,7 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 
 		// Step 6: the box check — a bounded settle wait (settleBox), to the
 		// SAME deadline, run at least once.
-		expect = BoxExpect{Class: d.class, TypedText: typedText, Pasted: pasted, PasteAbove: pasteAbove, TypedAt: typedAt}
+		expect = BoxExpect{Class: d.class, TypedText: typedText, Pasted: pasted, PasteAbove: pasteAbove, TypedAt: typedAt, Pre: pre}
 		if boxWasEmpty && allPrintable && (d.text != "" || len(exactKeys) > 0) {
 			// The box was empty when the first byte went in and nothing edited
 			// it, so its content is knowable. Pastes included: Claude shows them
@@ -780,7 +781,16 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		//                   not cut short by the deadline) was ready and empty
 		//                   — Claude never drew a rune of it (the V1 rerun's
 		//                   silent drop). Render lag tops out well under a
-		//                   second, so a 3 s blank is not a slow draw.
+		//                   second, so a 3 s blank is not a slow draw. AND no
+		//                   read saw the conversation change or a turn start
+		//                   since the pre-typing baseline (convChanged): a
+		//                   foreign Enter before the first draw leaves the
+		//                   same empty box, and the acceptance evidence
+		//                   above can be blind (the history blind spot plus a
+		//                   transcript lagging or never found), but a submit
+		//                   always adds an entry or starts a turn (r5 M1).
+		//                   terminal_reset needs no such check: a reset is a
+		//                   terminal event, not a submit.
 		//
 		// A box that is merely slow to draw shows neither (V1: retyping slow
 		// text put it in the box twice). The pre-typing baseline must exist
@@ -796,7 +806,7 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		// auto text, an auto text over the collapse threshold): a paste drawn
 		// late plus its retype are two tokens, and Enter would submit both
 		// (r4 M1).
-		lost := settle.termiosChanged || settle.neverDrawn
+		lost := settle.termiosChanged || (settle.neverDrawn && settle.convChanged == "")
 		if attempt == 0 && settle.emptyHeld && lost && sawExcess == "" && !settle.sawText &&
 			!expect.Pasted && typedText && expect.Exact != "" && !pre.At.IsZero() {
 			rep.retypeCause = retypeNeverDrawn
@@ -827,6 +837,8 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 				lostAgain = true
 			case expect.Pasted:
 				pasteLost = true
+			case settle.convChanged != "":
+				convMoved = settle.convChanged
 			case !lost:
 				noLoss, windowCut = true, settle.windowCut
 			}
@@ -856,6 +868,8 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 			detail += fmt.Sprintf("; the text was already retyped once (%s) and the box stayed empty again, so it was not retyped a second time", strings.ReplaceAll(rep.retypeCause, "_", " "))
 		case pasteLost:
 			detail += "; a paste is never retyped, because a late-drawn paste and its retype would be two tokens and Enter would submit both"
+		case convMoved != "":
+			detail += fmt.Sprintf("; it stayed empty, but %s since before the text was typed, so another writer may have submitted it, and the text was not retyped", convMoved)
 		}
 		if settle.unsettled > 0 {
 			detail += fmt.Sprintf("; it was still changing when the verify window closed after %s",
@@ -868,6 +882,15 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 			// invite a retry into a duplicate (r4 M3c).
 			fail(gateErr(protocol.CodeNotAccepted, reason, true,
 				"pane %d: the input box showed the text and then emptied without magmux's Enter (%s); it is unknown whether another Enter submitted it, so check the conversation before sending it again; magmux pressed no Enter and did not retype it",
+				d.idx, detail))
+			return
+		}
+		if convMoved != "" {
+			// Never drawn, and something a submit changes did change: the
+			// text may be in the conversation already, through an Enter that
+			// was not magmux's (r5 M1). Same honesty as leftBox.
+			fail(gateErr(protocol.CodeNotAccepted, reason, true,
+				"pane %d: the input box stayed empty after typing (%s); it is unknown whether another writer's Enter submitted it, so check the conversation before sending it again; magmux pressed no Enter",
 				d.idx, detail))
 			return
 		}
@@ -923,8 +946,13 @@ type boxSettle struct {
 	// sawText: some ready read showed the box holding something (part of the
 	// text, all of it, or more). A box that then empties is never retyped:
 	// the text LEFT it, perhaps through another writer's Enter.
-	sawText   bool
-	unsettled time.Duration // >0: the window closed with the box still changing
+	sawText bool
+	// convChanged: what the first ready read to see one reported as
+	// BoxCheck.ConvChanged — the conversation changed, or a turn started,
+	// since the pre-typing baseline. Sticky: a turn that came and went inside
+	// the window was still a submit. It forbids the never_drawn retype.
+	convChanged string
+	unsettled   time.Duration // >0: the window closed with the box still changing
 }
 
 // sameBox reports whether two ready reads saw the same box.
@@ -1021,6 +1049,9 @@ func (d *sendDelivery) settleBox(ctx context.Context, expect BoxExpect, deadline
 		}
 		if chk.Excess && out.excess == "" {
 			out.excess = chk.Detail
+		}
+		if chk.ConvChanged != "" && out.convChanged == "" {
+			out.convChanged = chk.ConvChanged
 		}
 		if first.IsZero() {
 			first = now

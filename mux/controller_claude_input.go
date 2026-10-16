@@ -116,6 +116,12 @@ type claudeBaseline struct {
 	// shell: the verified box was in bash mode, so only a `! cmd` entry is
 	// evidence, and a `❯` entry never is (and the reverse for a plain send).
 	shell bool
+	// conv (convKey) and working (Working) of the read, and regStatus,
+	// Claude's registry status at a PRE-TYPING baseline only (InputReadiness
+	// with a Baseline): what convChange compares a later read with.
+	conv      string
+	working   bool
+	regStatus string
 }
 
 // notePrompt records a transcript prompt and when it was submitted.
@@ -432,8 +438,37 @@ func (c *ClaudeCodeController) InputReadiness(q ReadinessQuery) InputReadiness {
 		// this same read: any user entry or transcript record for it that
 		// appears later was submitted after this moment.
 		r.Pre = newAcceptBaseline(sc, q.Baseline, q.Baseline, 0, now, c.transcriptSeq())
+		cd := r.Pre.controllerData.(claudeBaseline)
+		cd.regStatus = c.registry(now).Status
+		r.Pre.controllerData = cd
 	}
 	return r
+}
+
+// regBusy is the registry status of a session running a turn (F4).
+const regBusy = "busy"
+
+// convChange reports what changed on sc since the pre-typing baseline pre
+// that a SUBMIT would have changed, or "" (r5 M1). A submit by any writer
+// either adds a `❯` entry above the box — a queued one, mid-turn — or starts
+// a turn. So: the conversation's convKey differs; or a spinner appeared where
+// the baseline had none; or Claude's registry, when there is one, says busy
+// and did not at the baseline (absent then and busy now counts: a turn is
+// running that the baseline did not see). A spinner that was already
+// animating is volatile and is no change.
+func convChange(sc claudeScreen, pre AcceptBaseline, reg regEntry) string {
+	cd, ok := pre.controllerData.(claudeBaseline)
+	switch {
+	case !ok:
+		return "no conversation baseline was taken before typing"
+	case convKey(sc) != cd.conv:
+		return "the conversation above the input box changed"
+	case sc.Working && !cd.working:
+		return "a turn started (Claude's spinner appeared above the input box)"
+	case reg.Status == regBusy && cd.regStatus != regBusy:
+		return "a turn started (Claude's session registry went busy)"
+	}
+	return ""
 }
 
 // CheckBox implements InputGate: readiness with Types:false (the box holds the
@@ -450,6 +485,9 @@ func (c *ClaudeCodeController) CheckBox(want BoxExpect) BoxCheck {
 	}
 	if !r.Ready {
 		return out
+	}
+	if !want.Pre.At.IsZero() {
+		out.ConvChanged = convChange(sc, want.Pre, c.registry(now))
 	}
 	verdict, verified, paste, detail := judgeBox(sc, want)
 	out.Verdict, out.Verified, out.Detail = verdict, verified, detail
@@ -578,7 +616,7 @@ func boxHoldsMore(sc claudeScreen, want BoxExpect) bool {
 func newAcceptBaseline(sc claudeScreen, verified, sent string, paste int, at time.Time, seq uint64) AcceptBaseline {
 	b := AcceptBaseline{At: at, VerifiedKey: inputKey(verified), SentKey: inputKey(sent), Paste: paste}
 	cd := claudeBaseline{transcriptSeq: seq, verifiedRendered: renderedKey(verified), sentRendered: renderedKey(sent), shell: sc.BoxShell,
-		entries: entryIDs(sc.Prompts), topSeen: topVisible(sc)}
+		entries: entryIDs(sc.Prompts), topSeen: topVisible(sc), conv: convKey(sc), working: sc.Working}
 	if n := len(sc.Prompts); n > 0 {
 		cd.lastRows = entryRowsAt(sc, sc.Prompts[n-1])
 	}

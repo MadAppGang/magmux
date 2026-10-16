@@ -212,6 +212,10 @@ type BoxExpect struct {
 	// after it (BoxCheck.TermiosChanged) is the positive evidence of a reset
 	// that the auto-retype requires.
 	TypedAt time.Time
+	// Pre is the attempt's pre-typing acceptance baseline (InputReadiness.Pre),
+	// when it has one: what BoxCheck.ConvChanged compares the conversation
+	// against.
+	Pre AcceptBaseline
 }
 
 // BoxVerdict is CheckBox's judgement of the box.
@@ -243,6 +247,13 @@ type BoxCheck struct {
 	// is the evidence that typed text was SWALLOWED by a stdin reset, rather
 	// than merely slow to draw, and the auto-retype requires it.
 	TermiosChanged bool
+	// ConvChanged, when BoxExpect.Pre is set and Readiness.Ready: what changed
+	// since that pre-typing baseline that a SUBMIT would have changed — the
+	// conversation above the box, or a turn starting. "" = nothing. A submit
+	// by another writer before the text was ever drawn leaves an empty box
+	// that looks exactly like a silent drop; this is how the two are told
+	// apart, and a change forbids the never_drawn retype (r5 M1).
+	ConvChanged string
 }
 
 // Verified values.
