@@ -139,9 +139,17 @@ type Magmux struct {
 	rawState *term.State
 	quit     chan struct{}
 	quitOnce sync.Once
-	wg       sync.WaitGroup
-	gridMode bool // -g flag was used
-	autoExit bool // -w flag: quit automatically when all panes done
+	// lastWords is what the render that decided to quit observed — above all
+	// the final awaiting_input snapshot -w exists to deliver. It is handed to
+	// Finalize AHEAD of results instead of being published, because Finalize
+	// discards every backlog and a published event still queued behind a
+	// subscriber's writer was lost (issue #2, back through the hub). Written by
+	// render before m.quit closes, read by the teardown after: lastWordsMu.
+	lastWordsMu sync.Mutex
+	lastWords   [][]byte
+	wg          sync.WaitGroup
+	gridMode    bool // -g flag was used
+	autoExit    bool // -w flag: quit automatically when all panes done
 	// noIdleDone is --no-idle-done: manual mode, for a human driving a
 	// long-lived agent rather than watching a batch finish.
 	//

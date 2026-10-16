@@ -859,7 +859,14 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   (2 s) measured from the moment `Finalize` started, so the worst case is ~2.5 s
   from `m.quit` whatever the backlog was. Backlogs are DISCARDED and the finals
   jump the queue: a subscriber 1,024 events behind does not need those events,
-  it needs the answer. A `Session` opened after `Finalize` gets its aggregate and
+  it needs the answer. **So nothing that must arrive may be PUBLISHED on the
+  way out.** The render that decides to quit stores its events in
+  `m.lastWords` instead, and `shutdownSocket` hands them to `Finalize` as the
+  first finals, ahead of `results`. Publishing them, then closing `m.quit`, lost
+  the final `awaiting_input` snapshot whenever the subscriber's writer had not
+  reached it: issue #2 again, red on macOS CI as
+  `TestControllerSnapshotReachesAwaitingInput` and pinned by
+  `TestQuittingRendersEventsReachSubscribersAheadOfResults`. A `Session` opened after `Finalize` gets its aggregate and
   the finals on its own `lateDeadline` clock, because the teardown it missed is
   already over.
 

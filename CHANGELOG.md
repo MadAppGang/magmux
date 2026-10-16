@@ -22,6 +22,12 @@ commit subjects and remain on the
   A resize now resets the margins to the full screen, on both the primary and
   the alternate screen, as xterm does; a child that wants a region sets it
   again after `SIGWINCH`.
+- **`-w` delivers the final `awaiting_input` snapshot again.** When `-w`
+  ended a run, the last snapshot was published and then discarded with the
+  subscriber's backlog at teardown whenever its writer had not reached it, so
+  the live stream could end on `starting` while `results` said the pane was
+  idle (issue #2, back through the hub refactor). The quitting render's
+  events now travel with the finals, ahead of `results`.
 
 ## [0.15.0] - 2026-10-16
 

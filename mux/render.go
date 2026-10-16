@@ -810,17 +810,29 @@ func (m *Magmux) render() {
 		events = append(events, m.pollControllers(true)...)
 	}
 
+	if !quit {
+		for _, ev := range events {
+			m.broadcastEvent(ev)
+		}
+		return
+	}
+	// Quitting: these events are the session's last words, and they are NOT
+	// published. Closing m.quit wakes the teardown, whose Finalize discards
+	// every subscriber's backlog so results can jump it — and a snapshot
+	// published here was still in that backlog whenever the writer had not
+	// reached it, which a fast machine made routine (issue #2: the live stream
+	// ended on "starting" while results said idle). Handed to Finalize as the
+	// first finals instead, so every subscriber gets them, in order, ahead of
+	// results. They are stored BEFORE m.quit closes, which is what orders them
+	// against the teardown that reads them.
+	m.lastWordsMu.Lock()
 	for _, ev := range events {
-		m.broadcastEvent(ev)
+		if line := eventLine(ev); len(line) > 0 {
+			m.lastWords = append(m.lastWords, line)
+		}
 	}
-	// Quitting is signalled back rather than done under the lock, and only
-	// AFTER the events are out. Closing m.quit wakes the socket teardown,
-	// which broadcasts `results` and then closes every subscriber; a snapshot
-	// still sitting in this slice at that moment is simply lost. That is
-	// exactly the final awaiting_input snapshot -w exists to deliver (issue #2).
-	if quit {
-		m.quitOnce.Do(func() { close(m.quit) })
-	}
+	m.lastWordsMu.Unlock()
+	m.quitOnce.Do(func() { close(m.quit) })
 }
 
 // stdinFile is where keystrokes and the OSC 11 reply come from. Nil m.stdin
