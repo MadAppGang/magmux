@@ -578,6 +578,19 @@ func (m *Magmux) buildPaneResultsLocked() []map[string]any {
 		if p.controller != nil {
 			entry["controller"] = p.controller.Name()
 		}
+		// The input gate, additive: an ungated pane's entry is byte-identical.
+		// gateBasis and editorOverride are write-once before publication;
+		// `input` is the controller's published VIEW (history-based, 4 Hz) — a
+		// send decides on its own synchronous reads, so it is advisory.
+		if p.gateBasis != gateNone {
+			entry["gateBasis"] = string(p.gateBasis)
+		}
+		if p.editorOverride != overrideNone {
+			entry["editorOverride"] = string(p.editorOverride)
+		}
+		if snap.Input.Gated {
+			entry["input"] = snap.Input
+		}
 		if snap.Model != "" {
 			entry["model"] = snap.Model
 		}

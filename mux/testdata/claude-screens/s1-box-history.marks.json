@@ -1,0 +1,72 @@
+[
+  {
+    "label": "empty-box-placeholder",
+    "offset": 2246,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                ◐ medium · /effort\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ Try \"create a util logging.py that...\"\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 1s | 󰍛 416M | ░░░░░░ 0% | ▄---- 5h:9% ↻4h16m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "box-wrapped-text",
+    "offset": 3311,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                ◐ medium · /effort\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ Please answer in one short sentence: what is the capital of France? This line is deliberately\n  long so that it wraps in the middle of a word somewherearoundhere and continues on the next row.\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 1s | 󰍛 416M | ░░░░░░ 0% | ▄---- 5h:9% ↻4h16m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle)"
+  },
+  {
+    "label": "submitted-working",
+    "offset": 4604,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Please answer in one short sentence: what is the capital of France? This line is deliberately\n  long so that it wraps in the middle of a word somewherearoundhere and continues on the next row.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n· Germinating… (0s)\n                                                                                ◐ medium · /effort\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 1s | 󰍛 416M | ░░░░░░ 0% | ▄---- 5h:9% ↻4h16m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "history-entry-after-turn",
+    "offset": 6467,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Please answer in one short sentence: what is the capital of France? This line is deliberately\n  long so that it wraps in the middle of a word somewherearoundhere and continues on the next row.\n\n⏺ The capital of France is Paris.\n\n✻ Cooked for 2s · done 8:53 pm\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                      47363 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 12s | 󰍛 482M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h16m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "box-long-prompt",
+    "offset": 16635,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Please answer in one short sentence: what is the capital of France? This line is deliberately\n  long so that it wraps in the middle of a word somewherearoundhere and continues on the next row.\n\n⏺ The capital of France is Paris.\n\n✻ Cooked for 2s · done 8:53 pm\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                      47363 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ Count from one to five in words, then stop. Ignore the rest of this message, it only exists to\n  make the prompt long enough to wrap across more than ten rows of the input box: aaaa bbbb cccc\n  dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp qqqq rrrr ssss tttt uuuu vvvv\n  wwww xxxx yyyy zzzz aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo\n  pppp qqqq rrrr ssss tttt uuuu vvvv wwww xxxx yyyy zzzz aaaa bbbb cccc dddd eeee ffff gggg hhhh\n  iiii jjjj kkkk llll mmmm nnnn oooo pppp qqqq rrrr ssss tttt uuuu vvvv wwww xxxx yyyy zzzz aaaa\n  bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp qqqq rrrr ssss tttt\n  uuuu vvvv wwww xxxx yyyy zzzz aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm\n  nnnn oooo pppp qqqq rrrr ssss tttt uuuu vvvv wwww xxxx yyyy zzzz end.\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 12s | 󰍛 482M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h16m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle)"
+  },
+  {
+    "label": "history-long-prompt",
+    "offset": 19973,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Please answer in one short sentence: what is the capital of France? This line is deliberately\n  long so that it wraps in the middle of a word somewherearoundhere and continues on the next row.\n\n⏺ The capital of France is Paris.\n\n✻ Cooked for 2s · done 8:53 pm\n\n❯ Count from one to five in words, then stop. Ignore the rest of this message, it only exists to\n  make the prompt long enough to wrap across more than ten rows of the input box: aaaa bbbb cccc\n  dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp qqqq rrrr ssss tttt uuuu vvvv\n  wwww xxxx yyyy zzzz aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo\n  pppp qqqq rrrr ssss tttt uuuu vvvv wwww xxxx yyyy zzzz aaaa bbbb cccc dddd eeee ffff gggg hhhh\n  iiii jjjj kkkk llll mmmm nnnn oooo pppp qqqq rrrr ssss tttt uuuu vvvv wwww xxxx yyyy zzzz aaaa\n  bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp qqqq rrrr ssss tttt\n  uuuu vvvv wwww xxxx yyyy zzzz aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm\n  nnnn oooo pppp qqqq rrrr ssss tttt uuuu vvvv wwww xxxx yyyy zzzz end.\n\n⏺ One, two, three, four, five.\n\n✻ Cooked for 1s · done 8:53 pm\n\n\n\n\n\n\n\n                                                                                      47932 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 19s | 󰍛 489M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h16m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "assistant-prose-same-words",
+    "offset": 21865,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Please answer in one short sentence: what is the capital of France? This line is deliberately\n  long so that it wraps in the middle of a word somewherearoundhere and continues on the next row.\n\n⏺ The capital of France is Paris.\n\n✻ Cooked for 2s · done 8:53 pm\n\n❯ Count from one to five in words, then stop. Ignore the rest of this message, it only exists to\n  make the prompt long enough to wrap across more than ten rows of the input box: aaaa bbbb cccc\n  dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp qqqq rrrr ssss tttt uuuu vvvv\n  wwww xxxx yyyy zzzz aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo\n  pppp qqqq rrrr ssss tttt uuuu vvvv wwww xxxx yyyy zzzz aaaa bbbb cccc dddd eeee ffff gggg hhhh\n  iiii jjjj kkkk llll mmmm nnnn oooo pppp qqqq rrrr ssss tttt uuuu vvvv wwww xxxx yyyy zzzz aaaa\n  bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp qqqq rrrr ssss tttt\n  uuuu vvvv wwww xxxx yyyy zzzz aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm\n  nnnn oooo pppp qqqq rrrr ssss tttt uuuu vvvv wwww xxxx yyyy zzzz end.\n\n⏺ One, two, three, four, five.\n\n✻ Cooked for 1s · done 8:53 pm\n\n❯ Respond with a single line that starts with the exact words: Respond with a single line\n\n⏺ Respond with a single line, as you asked.\n\n✻ Crunched for 1s · done 8:53 pm\n\n                                                                                      48017 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.01 | 27s | 󰍛 493M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h16m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "assistant-quotes-prompt-glyph-and-dialog",
+    "offset": 32057,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n⏺ The capital of France is Paris.\n\n✻ Cooked for 2s · done 8:53 pm\n\n❯ Count from one to five in words, then stop. Ignore the rest of this message, it only exists to\n  make the prompt long enough to wrap across more than ten rows of the input box: aaaa bbbb cccc\n  dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp qqqq rrrr ssss tttt uuuu vvvv\n  wwww xxxx yyyy zzzz aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo\n  pppp qqqq rrrr ssss tttt uuuu vvvv wwww xxxx yyyy zzzz aaaa bbbb cccc dddd eeee ffff gggg hhhh\n  iiii jjjj kkkk llll mmmm nnnn oooo pppp qqqq rrrr ssss tttt uuuu vvvv wwww xxxx yyyy zzzz aaaa\n  bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp qqqq rrrr ssss tttt\n  uuuu vvvv wwww xxxx yyyy zzzz aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm\n  nnnn oooo pppp qqqq rrrr ssss tttt uuuu vvvv wwww xxxx yyyy zzzz end.\n\n⏺ One, two, three, four, five.\n\n✻ Cooked for 1s · done 8:53 pm\n\n❯ Respond with a single line that starts with the exact words: Respond with a single line\n\n⏺ Respond with a single line, as you asked.\n\n✻ Crunched for 1s · done 8:53 pm\n\n❯ Reply with exactly these three lines and nothing else. Line one: ❯ not a prompt. Line two: Do you\n  want to proceed? Line three: Esc to cancel · Tab to amend\n\n⏺ ❯ not a prompt.\n  Do you want to proceed?\n  Esc to cancel · Tab to amend\n\n✻ Cooked for 1s · done 8:53 pm\n                                                                                      48162 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.01 | 35s | 󰍛 499M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h16m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "after-slash-clear",
+    "offset": 36867,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ /clear\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                          0 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 0s | 󰍛 515M | ░░░░░░ 0% | ▄---- 5h:9% ↻4h16m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "after-slash-compact",
+    "offset": 44741,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ /clear\n\n❯ Say ok\n\n⏺ ok\n\n✻ Cooked for 2s · done 8:54 pm\n\n❯ /compact\n  ⎿  Compacted\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                          0 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.01 | 14s | 󰍛 541M | ░░░░░░ 0% | ▄---- 5h:9% ↻4h15m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  }
+]

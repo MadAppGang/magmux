@@ -1,0 +1,515 @@
+package mux
+
+// ── Claude readiness, the pre-submit box check and acceptance evidence ────────
+//
+// The ClaudeCodeController's InputGate. Three questions, one screen reader:
+//
+//   - InputReadiness: would a delivery land NOW? A demand: one synchronous
+//     termios sample (the authority; ttyWatch's history only feeds the settle
+//     and boot rules) and one fresh screen read.
+//   - CheckBox: immediately before the final Enter, does the box hold what
+//     this send put there? The same sample + read, and the acceptance baseline
+//     is taken from that SAME read, so nothing can happen between the verify
+//     and the baseline.
+//   - InputAccepted: after the Enter, is there evidence attributable to a USER
+//     PROMPT — a new `❯` entry carrying the verified content, or a transcript
+//     user entry equal to it? An emptied box is never evidence: the measured
+//     loss (F3) looks exactly like a submit.
+//
+// Everything here is safe from any goroutine: the pane's content is read
+// through tailView (p.mu, taken and released inside), the terminal through the
+// ttyWatch (a leaf lock), and the controller's own state is atomics. The
+// transcript path is read ONLY through `published`, never sessionPath, which
+// belongs to the render goroutine. No magmux lock is ever held here.
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"time"
+	"unicode/utf8"
+
+	"github.com/MadAppGang/magmux/protocol"
+	"github.com/MadAppGang/magmux/pty"
+)
+
+const (
+	// inputSettle: the terminal and the box must both have been still this
+	// long (R3's "~1 s"; F3's reset lasts 100–400 ms).
+	inputSettle = time.Second
+	// bootFloor: without an observed boot reset, the first READY waits this
+	// long from the first RAW sample — the loaded reset was measured ~2.5 s
+	// after spawn. Measured from the first raw sample, not the fork, because
+	// for a wrapper (claudish) the fork starts the wrapper, and the first raw
+	// sample is the first moment Claude itself owns the terminal.
+	bootFloor = 3500 * time.Millisecond
+	// regMaxAge / regScanEvery bound the registry's file reads.
+	regMaxAge    = 250 * time.Millisecond
+	regScanEvery = time.Second
+)
+
+// errNoTTY is the terminal state of a controller with no ttyWatch (an ungated
+// pane, or a pane with no PTY): not raw, so never ready.
+var errNoTTY = errors.New("no termios watch for this pane")
+
+// promptMark is the newest transcript user entry: its key and a sequence
+// number that grows by one per REAL user entry. Written by applyLine on the
+// render goroutine, read lock-free by acceptance.
+type promptMark struct {
+	key string
+	seq uint64
+	at  time.Time
+}
+
+// claudeBaseline is the Claude half of an AcceptBaseline.
+type claudeBaseline struct {
+	matchCount    int    // entries on the CheckBox screen that already match
+	transcriptSeq uint64 // lastPrompt.seq at the CheckBox read
+}
+
+// notePrompt records a real transcript user entry.
+func (c *ClaudeCodeController) notePrompt(text string) {
+	seq := uint64(1)
+	if prev := c.lastPrompt.Load(); prev != nil {
+		seq = prev.seq + 1
+	}
+	c.lastPrompt.Store(&promptMark{key: inputKey(text), seq: seq, at: time.Now()})
+}
+
+func (c *ClaudeCodeController) transcriptSeq() uint64 {
+	if lp := c.lastPrompt.Load(); lp != nil {
+		return lp.seq
+	}
+	return 0
+}
+
+// startTTYWatch builds and heats the termios watch for a GATED pane. It cannot
+// fail, which is why it runs first in Start: a declared pane always has a
+// working gate even when transcript discovery is dormant.
+func (c *ClaudeCodeController) startTTYWatch() {
+	p := c.pane
+	if c.tty != nil || p == nil || p.gateBasis == gateNone || p.ptmx == nil {
+		return
+	}
+	ptmx := p.ptmx
+	started := p.startedAt
+	if started.IsZero() {
+		started = time.Now()
+	}
+	c.tty = newTTYWatch(func() (pty.Mode, error) { return pty.ReadMode(ptmx) }, started)
+	// newTTYWatch starts nothing: the boot is covered by heating it here.
+	c.tty.heat(started.Add(ttyHotStartup))
+}
+
+// ── the decision ────────────────────────────────────────────────────────────
+
+// readinessInput is everything one readiness decision reads, so the decision
+// itself is a pure function the F3 timelines can be walked through.
+type readinessInput struct {
+	now          time.Time
+	tt           ttyState
+	sc           claudeScreen
+	reg          regEntry
+	everReady    bool
+	boxSince     time.Time // start of the box's current continuous visibility
+	bracketPaste bool
+	q            ReadinessQuery
+}
+
+// decideReadiness applies the rules in order; the first that matches decides.
+//
+//	a  terminal not raw (or unreadable)   starting | terminal_not_ready
+//	b  a dialog in the dialog region      dialog:<kind>
+//	c  no box, registry says waiting      dialog:permission | dialog:question
+//	d  -- INSERT -- under the box         vim_mode
+//	e  no box                             starting | no_input_box
+//	f  never ready, boot not over         starting
+//	g  box or termios changed < 1 s ago   starting | terminal_not_ready
+//	h  Types, and the box holds text      box_not_empty
+//	i  Paste, and bracketed paste is off  starting | terminal_not_ready
+//
+// "starting" is the answer while the pane has never been ready; afterwards the
+// same condition is a regression and says so.
+func decideReadiness(in readinessInput) InputReadiness {
+	sc, tt, now := in.sc, in.tt, in.now
+	r := InputReadiness{BoxHasText: sc.BoxText != "", MaxPaste: sc.MaxPaste}
+	notReady := starting
+	if in.everReady {
+		notReady = protocol.ReasonTerminalNotReady
+	}
+	refuse := func(reason, detail string) InputReadiness {
+		r.Reason, r.Detail = reason, detail
+		return r
+	}
+	switch {
+	case tt.Err != nil:
+		return refuse(notReady, "termios unreadable: "+tt.Err.Error())
+	case !tt.Raw:
+		return refuse(notReady, "the terminal is not in raw mode")
+	case sc.Dialog != "":
+		r.Dismissable = sc.Dismissable
+		return refuse(protocol.ReasonDialogPrefix+sc.Dialog, "a "+sc.Dialog+" dialog is showing")
+	case !sc.BoxVisible && in.reg.Status == "waiting":
+		kind := "question"
+		if strings.Contains(in.reg.WaitingFor, "permission") {
+			kind = "permission"
+		}
+		return refuse(protocol.ReasonDialogPrefix+kind,
+			fmt.Sprintf("Claude's session registry says waiting (%s)", in.reg.WaitingFor))
+	case sc.Insert:
+		return refuse(protocol.ReasonVimMode, "-- INSERT -- is showing: vim editing mode is on")
+	case !sc.BoxVisible:
+		if in.everReady {
+			return refuse(protocol.ReasonNoInputBox, "no input box and no recognised dialog on screen")
+		}
+		return refuse(starting, "no input box yet")
+	}
+	if !in.everReady && !bootDone(tt, now) {
+		left := bootFloor - now.Sub(tt.FirstRawAt)
+		return refuse(starting, fmt.Sprintf("no boot reset seen yet; floor in %s", left.Round(100*time.Millisecond)))
+	}
+	since := in.boxSince
+	if since.IsZero() {
+		since = now
+	}
+	if d := now.Sub(laterOf(since, tt.ChangedAt)); d < inputSettle {
+		what := "the input box appeared"
+		if tt.ChangedAt.After(since) {
+			what = "termios changed"
+		}
+		return refuse(notReady, fmt.Sprintf("%s %s ago", what, d.Round(10*time.Millisecond)))
+	}
+	if in.q.Types && sc.BoxText != "" {
+		return refuse(protocol.ReasonBoxNotEmpty, "the input box already holds text")
+	}
+	if in.q.Paste && !in.bracketPaste {
+		return refuse(notReady, "bracketed paste is not enabled yet")
+	}
+	r.Ready = true
+	return r
+}
+
+const starting = protocol.ReasonStarting
+
+// bootDone: a boot reset was observed, or the floor has passed since the first
+// raw sample.
+func bootDone(tt ttyState, now time.Time) bool {
+	return tt.SawReset || (!tt.FirstRawAt.IsZero() && now.Sub(tt.FirstRawAt) >= bootFloor)
+}
+
+func laterOf(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
+// readiness is the ONE function behind InputReadiness, CheckBox and Poll. A
+// demand takes a synchronous sample and heats the watch; Poll reads history
+// only (its answer is a published view, never the authority for a write).
+func (c *ClaudeCodeController) readiness(now time.Time, q ReadinessQuery, demand bool) (InputReadiness, claudeScreen) {
+	var tt ttyState
+	switch {
+	case c.tty == nil:
+		tt.Err = errNoTTY
+	case demand:
+		tt = c.tty.sampleNow()
+		c.tty.heat(now.Add(ttyDemandHold))
+	default:
+		tt = c.tty.state()
+	}
+
+	v := c.pane.tailView(0)
+	sc := parseClaudeScreen(v.Rows, v.Cols)
+	if sc.BoxVisible {
+		c.boxSince.CompareAndSwap(0, now.UnixNano())
+	} else {
+		c.boxSince.Store(0)
+	}
+	var since time.Time
+	if n := c.boxSince.Load(); n != 0 {
+		since = time.Unix(0, n)
+	}
+
+	var reg regEntry
+	if !sc.BoxVisible && sc.Dialog == "" {
+		reg = c.registry(now) // corroboration only, and only where rule c can use it
+	}
+	r := decideReadiness(readinessInput{
+		now: now, tt: tt, sc: sc, reg: reg,
+		everReady: c.everReady.Load(), boxSince: since,
+		bracketPaste: v.BracketPaste, q: q,
+	})
+	if r.Ready {
+		c.everReady.Store(true)
+	}
+	return r, sc
+}
+
+// ── InputGate ───────────────────────────────────────────────────────────────
+
+var _ InputGate = (*ClaudeCodeController)(nil)
+
+// InputReadiness implements InputGate.
+func (c *ClaudeCodeController) InputReadiness(q ReadinessQuery) InputReadiness {
+	r, _ := c.readiness(time.Now(), q, true)
+	r.Gated = inputGateOf(c.pane) != nil
+	return r
+}
+
+// CheckBox implements InputGate: readiness with Types:false (the box holds the
+// send's own text, so rule h must not refuse it), then the box against want,
+// both on ONE read.
+func (c *ClaudeCodeController) CheckBox(want BoxExpect) BoxCheck {
+	now := time.Now()
+	r, sc := c.readiness(now, ReadinessQuery{Class: want.Class}, true)
+	r.Gated = inputGateOf(c.pane) != nil
+	out := BoxCheck{Readiness: r}
+	if !r.Ready {
+		return out
+	}
+	verdict, verified, paste, detail := judgeBox(sc, want)
+	out.Verdict, out.Verified, out.Detail = verdict, verified, detail
+	if verdict == BoxVerified {
+		sentKey := sc.BoxKey
+		if want.Exact != "" {
+			sentKey = inputKey(want.Exact)
+		}
+		out.Baseline = newAcceptBaseline(sc, sc.BoxKey, sentKey, paste, now, c.transcriptSeq())
+	}
+	return out
+}
+
+// InputAccepted implements InputGate. It re-reads the screen and takes no
+// termios sample: it decides no write.
+func (c *ClaudeCodeController) InputAccepted(b AcceptBaseline) AcceptVerdict {
+	v := c.pane.tailView(0)
+	return acceptVerdict(parseClaudeScreen(v.Rows, v.Cols), b, c.lastPrompt.Load())
+}
+
+// judgeBox is the pre-submit verify on one parsed screen.
+//
+//	Exact set, inputKey(box) == inputKey(Exact)        verified exact
+//	Exact set, Pasted, a token N > PasteAbove in box   verified paste_token
+//	Exact set, anything else non-empty                 mismatch
+//	Exact unset, box non-empty                         verified non_empty
+//	box empty                                          empty
+func judgeBox(sc claudeScreen, want BoxExpect) (v BoxVerdict, verified string, paste int, detail string) {
+	if sc.BoxText == "" {
+		return BoxEmpty, "", 0, "the input box is empty"
+	}
+	if want.Exact == "" {
+		return BoxVerified, verifiedNonEmpty, 0, ""
+	}
+	if sc.BoxKey == inputKey(want.Exact) {
+		return BoxVerified, verifiedExact, 0, ""
+	}
+	if want.Pasted {
+		for _, n := range sc.BoxPastes {
+			if n > want.PasteAbove && n > paste {
+				paste = n
+			}
+		}
+		if paste > 0 {
+			return BoxVerified, verifiedPasteToken, paste, ""
+		}
+	}
+	return BoxMismatch, "", 0, fmt.Sprintf("the box holds %d of %d non-space runes",
+		utf8.RuneCountInString(sc.BoxKey), utf8.RuneCountInString(inputKey(want.Exact)))
+}
+
+// newAcceptBaseline takes the baseline from the screen the verify read.
+func newAcceptBaseline(sc claudeScreen, verifiedKey, sentKey string, paste int, at time.Time, seq uint64) AcceptBaseline {
+	b := AcceptBaseline{At: at, VerifiedKey: verifiedKey, SentKey: sentKey, Paste: paste}
+	b.controllerData = claudeBaseline{matchCount: countMatches(sc.Prompts, b), transcriptSeq: seq}
+	return b
+}
+
+// matches says whether an entry carries the baselined content:
+//
+//   - its key equals the VERIFIED key (what the box showed), or the SENT key.
+//     The second is not in the design's sketch and is what the captures
+//     demand: Claude shows a collapsed paste as `[Pasted text #N]` in the box
+//     but EXPANDED in history (s3 paste-submitted, auto-long-submitted, s4
+//     queued-paste), so a paste_token send's entry carries the sent text, not
+//     the token;
+//   - it begins with the baselined paste token;
+//   - its key is at least historyMatchMin runes and the verified or sent key
+//     starts with it (a history row Claude abbreviated; unseen in 2.1.301).
+func matches(e promptEntry, b AcceptBaseline) bool {
+	if e.Key == "" {
+		return false
+	}
+	if e.Key == b.VerifiedKey || e.Key == b.SentKey {
+		return true
+	}
+	if b.Paste > 0 && e.Paste == b.Paste {
+		return true
+	}
+	if utf8.RuneCountInString(e.Key) < historyMatchMin {
+		return false
+	}
+	return (b.VerifiedKey != "" && strings.HasPrefix(b.VerifiedKey, e.Key)) ||
+		(b.SentKey != "" && strings.HasPrefix(b.SentKey, e.Key))
+}
+
+func countMatches(es []promptEntry, b AcceptBaseline) int {
+	n := 0
+	for _, e := range es {
+		if matches(e, b) {
+			n++
+		}
+	}
+	return n
+}
+
+// acceptVerdict evaluates the evidence in order; the first match wins. Taken
+// is checked BEFORE InBox: if a new entry proves the submission AND the box
+// still shows the text, pressing Enter again would submit it twice.
+//
+//	1  more matching entries than at the baseline          Taken / history
+//	2  a transcript user entry after it, with its key      Taken / transcript
+//	3  the box still holds the verified content            InBox
+//	—  anything else (an empty box above all)              None
+func acceptVerdict(sc claudeScreen, b AcceptBaseline, lp *promptMark) AcceptVerdict {
+	cd, _ := b.controllerData.(claudeBaseline)
+	v := AcceptVerdict{Dialog: sc.Dialog}
+	if countMatches(sc.Prompts, b) > cd.matchCount {
+		v.State, v.Evidence = AcceptTaken, evidenceHistory
+		return v
+	}
+	if lp != nil && lp.seq > cd.transcriptSeq && lp.key != "" && (lp.key == b.SentKey || lp.key == b.VerifiedKey) {
+		v.State, v.Evidence = AcceptTaken, evidenceTranscript
+		return v
+	}
+	if sc.BoxVisible && b.VerifiedKey != "" &&
+		(sc.BoxKey == b.VerifiedKey || (b.Paste > 0 && slices.Contains(sc.BoxPastes, b.Paste))) {
+		v.State = AcceptInBox
+	}
+	return v
+}
+
+// ── Claude's session registry (corroboration only) ──────────────────────────
+//
+// ${CLAUDE_CONFIG_DIR:-~/.claude}/sessions/<pid>.json is Claude Code's own,
+// undocumented record of a session's status (F4). It is treated like
+// encodeProjectDir: optional, never the only source. It can name a dialog the
+// screen did not recognise (rule c); it never makes a pane ready and is never
+// acceptance evidence.
+
+// regEntry is the part of a registry file readiness reads.
+type regEntry struct {
+	Status     string `json:"status"`
+	WaitingFor string `json:"waitingFor"`
+	SessionID  string `json:"sessionId"`
+}
+
+type regCached struct {
+	e  regEntry
+	at time.Time
+}
+
+// claudeRegistry caches the last registry read. Atomics only: Poll (render
+// goroutine) and demands (lane goroutines) both read it.
+type claudeRegistry struct {
+	cur      atomic.Pointer[regCached]
+	lastScan atomic.Int64 // unix nanos of the last directory scan
+}
+
+// invalidate forgets the cache (tests).
+func (r *claudeRegistry) invalidate() {
+	r.cur.Store(nil)
+	r.lastScan.Store(0)
+}
+
+// registry returns the pane's registry entry, re-read at most every
+// regMaxAge. Lookup: <pid>.json for the pane's own process (zsh and bash exec
+// the last simple command of -c); otherwise the entry whose sessionId is the
+// transcript's, by a directory scan at most once per regScanEvery. A claudish
+// pane's pid is the wrapper's, so only the second can hit, and only once the
+// transcript is found. Missing anything: the zero entry.
+func (c *ClaudeCodeController) registry(now time.Time) regEntry {
+	if cached := c.reg.cur.Load(); cached != nil && now.Sub(cached.at) < regMaxAge {
+		return cached.e
+	}
+	dir := filepath.Join(c.claudeConfigDir(), "sessions")
+	var e regEntry
+	found := false
+	if p := c.pane; p != nil && p.cmd != nil && p.cmd.Process != nil {
+		e, found = readRegEntry(filepath.Join(dir, fmt.Sprintf("%d.json", p.cmd.Process.Pid)))
+	}
+	if !found {
+		if prev := c.reg.cur.Load(); prev != nil {
+			e = prev.e // a throttled scan keeps the last answer
+		}
+		if path := c.published.Load(); path != nil && *path != "" &&
+			now.Sub(time.Unix(0, c.reg.lastScan.Load())) >= regScanEvery {
+			c.reg.lastScan.Store(now.UnixNano())
+			e = scanRegistry(dir, strings.TrimSuffix(filepath.Base(*path), ".jsonl"))
+		}
+	}
+	c.reg.cur.Store(&regCached{e: e, at: now})
+	return e
+}
+
+// claudeConfigDir is CLAUDE_CONFIG_DIR as the pane's child sees it (the last
+// occurrence in the pane's env, as os/exec resolves it), else magmux's own,
+// else ~/.claude.
+func (c *ClaudeCodeController) claudeConfigDir() string {
+	if p := c.pane; p != nil && p.cmd != nil {
+		for i := len(p.cmd.Env) - 1; i >= 0; i-- {
+			if v, ok := strings.CutPrefix(p.cmd.Env[i], "CLAUDE_CONFIG_DIR="); ok {
+				return v
+			}
+		}
+	}
+	if v := os.Getenv("CLAUDE_CONFIG_DIR"); v != "" {
+		return v
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".claude")
+	}
+	return ""
+}
+
+// regFileMax bounds one registry read; the real files are a few hundred bytes.
+const regFileMax = 64 << 10
+
+func readRegEntry(path string) (regEntry, bool) {
+	var e regEntry
+	f, err := os.Open(path)
+	if err != nil {
+		return e, false
+	}
+	defer f.Close()
+	buf := make([]byte, regFileMax)
+	n, _ := f.Read(buf)
+	if json.Unmarshal(buf[:n], &e) != nil {
+		return regEntry{}, false
+	}
+	return e, true
+}
+
+func scanRegistry(dir, sessionID string) regEntry {
+	if sessionID == "" {
+		return regEntry{}
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return regEntry{}
+	}
+	for _, de := range ents {
+		if !de.Type().IsRegular() || !strings.HasSuffix(de.Name(), ".json") {
+			continue
+		}
+		if e, ok := readRegEntry(filepath.Join(dir, de.Name())); ok && e.SessionID == sessionID {
+			return e
+		}
+	}
+	return regEntry{}
+}

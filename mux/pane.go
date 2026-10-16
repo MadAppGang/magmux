@@ -42,6 +42,11 @@ type Pane struct {
 	// label is the short name open_pane was given, for clients that address
 	// panes by name. Immutable after publication.
 	label string
+	// gateBasis says why this pane's input is gated ("" = never; inputgate.go)
+	// and editorOverride what magmux did about Claude's editorMode. Both are
+	// write-once before publication and read lock-free, like id and label.
+	gateBasis      gateBasis
+	editorOverride editorOverride
 	// Structural fields — guarded by treeMu, NOT by mu. Everything below
 	// screen is content state and stays under mu exactly as before.
 	splitType     SplitType

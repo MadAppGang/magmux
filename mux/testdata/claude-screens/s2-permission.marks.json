@@ -1,0 +1,30 @@
+[
+  {
+    "label": "dialog-permission",
+    "offset": 5951,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Use the Bash tool to run exactly: touch zz-cap-perm.txt\n\n⏺ Bash(touch zz-cap-perm.txt)\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n Bash command\n Tip: auto mode handles these prompts for you — choose \"switch to auto mode\" below\n Create empty file zz-cap-perm.txt\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n touch zz-cap-perm.txt\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and always allow access to\n      /private/tmp/claude-501/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad\n      from this project\n   3. Yes, and switch to auto mode · auto mode handles these prompts for you\n   4. No\n\n Esc to cancel · Tab to amend"
+  },
+  {
+    "label": "after-escape-permission",
+    "offset": 7949,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Use the Bash tool to run exactly: touch zz-cap-perm.txt\n\n⏺ Bash(touch zz-cap-perm.txt)\n  ⎿  Interrupted · What should Claude do instead?\n\n✻ Baked for 2s · done 8:52 pm\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                ◐ medium · /effort\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 15s | 󰍛 444M | ░░░░░░ 5% | ▄---- 5h:8% ↻4h17m 7d:22% ↻6d9h\n  ⏸ manual mode on · ← 5 agents"
+  },
+  {
+    "label": "dialog-question",
+    "offset": 12045,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Use the Bash tool to run exactly: touch zz-cap-perm.txt\n\n⏺ Bash(touch zz-cap-perm.txt)\n  ⎿  Interrupted · What should Claude do instead?\n\n✻ Baked for 2s · done 8:52 pm\n\n❯ Use the AskUserQuestion tool to ask me which colour I prefer, with the two options red and blue.\n  Do nothing else.\n────────────────────────────────────────────────────────────────────────────────────────────────────\n ☐ Colour\n\nWhich colour do you prefer?\n\n❯ 1. Red\n     Choose red\n  2. Blue\n     Choose blue\n  3. Type something.\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  4. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel"
+  },
+  {
+    "label": "after-escape-question",
+    "offset": 13747,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Use the Bash tool to run exactly: touch zz-cap-perm.txt\n\n⏺ Bash(touch zz-cap-perm.txt)\n  ⎿  Interrupted · What should Claude do instead?\n\n✻ Baked for 2s · done 8:52 pm\n\n❯ Use the AskUserQuestion tool to ask me which colour I prefer, with the two options red and blue.\n  Do nothing else.\n\n⏺ User declined to answer questions\n  ⎿  · Which colour do you prefer? (Red / Blue)\n\n✻ Cogitated for 2s · done 8:53 pm\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                ◐ medium · /effort\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 28s | 󰍛 452M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h16m 7d:22% ↻6d9h\n  ⏸ manual mode on · ← 5 agents"
+  }
+]

@@ -69,6 +69,18 @@ type ClaudeCodeController struct {
 	// from disk and finds unchanged or gone. Both are honest answers.
 	published atomic.Pointer[string]
 
+	// The InputGate's state (controller_claude_input.go). Every field is safe
+	// from any goroutine: tty takes its own leaf lock, the rest are atomics.
+	//
+	// tty is nil until Start, and Start builds it only for a GATED pane, so an
+	// observed-only Claude pane costs exactly what it did before. Settable in
+	// struct-literal tests.
+	tty        *ttyWatch
+	reg        claudeRegistry
+	everReady  atomic.Bool                // has ever been READY: "starting" vs a regression
+	boxSince   atomic.Int64               // unix nanos the box became continuously visible; 0 = not visible
+	lastPrompt atomic.Pointer[promptMark] // the newest REAL transcript user entry
+
 	snap Snapshot
 }
 
@@ -217,6 +229,9 @@ func (c *ClaudeCodeController) Start(ctx context.Context) error {
 	if c.spawnedAt.IsZero() {
 		c.spawnedAt = time.Now()
 	}
+	// The readiness half first: it cannot fail, so a gated pane has a working
+	// gate even when the transcript half below gives up (os.UserHomeDir).
+	c.startTTYWatch()
 	// Resolve cwd, in descending order of how directly it states where claude
 	// will actually run:
 	//
@@ -287,7 +302,14 @@ func extractClaudeCwd(p *Pane) string {
 	return ""
 }
 
-func (c *ClaudeCodeController) Stop() error { return nil }
+// Stop ends the termios watch, if any; close is idempotent and a heat after it
+// starts nothing.
+func (c *ClaudeCodeController) Stop() error {
+	if c.tty != nil {
+		c.tty.close()
+	}
+	return nil
+}
 
 // NotifyInput records that a pilot pushed an instruction into this pane.
 // See the InputNotifier docs for why a controller needs to be told.
@@ -330,7 +352,26 @@ func (c *ClaudeCodeController) Poll() (Snapshot, error) {
 	// transcript was never found, so the live snapshot can still reach
 	// awaiting_input (issue #2).
 	c.applyTerminalIdle()
+	c.publishInput()
 	return c.snap, err
+}
+
+// publishInput refreshes Snapshot.Input, the published readiness VIEW, for a
+// gated pane; every other pane keeps it zero. Poll is not a demand: one cold
+// termios sample (a no-op while the hot sampler runs), then a decision on
+// history. It never emits: snapshotChanged does not compare Input (D10).
+func (c *ClaudeCodeController) publishInput() {
+	if inputGateOf(c.pane) == nil {
+		c.snap.Input = InputReadiness{}
+		return
+	}
+	now := time.Now()
+	if c.tty != nil {
+		c.tty.sampleCold(now)
+	}
+	in, _ := c.readiness(now, ReadinessQuery{Class: ClassType, Types: true}, false)
+	in.Gated = true
+	c.snap.Input = in
 }
 
 // applyTerminalIdle reconciles this controller's view with the pane's own.
@@ -929,6 +970,8 @@ func (c *ClaudeCodeController) applyLine(line []byte) {
 		if !isPrompt {
 			return
 		}
+		// Acceptance evidence: a transcript user entry, keyed and sequenced.
+		c.notePrompt(content)
 		// New turn starting
 		c.snap.LastUserPrompt = content
 		c.snap.State = CtrlWorking
