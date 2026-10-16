@@ -5,7 +5,7 @@ stages it passes through, and what counts as done. Everything this file points
 at is authority; nothing is copied in, because a copied fact goes stale in
 silence.
 
-verified: 2026-10-02 @ 1900271
+verified: 2026-10-16 @ 1a7bdb5
 
 ## Authority
 
@@ -14,9 +14,15 @@ file for mechanics. This file records only the judgement around it.
 
 ## Who authorises
 
-unknown — TODO: the v0.12.0 and v0.13.0 releases were both run by the maintainer
-on request, with the agent executing end to end once asked. Whether an agent may
-start a release unprompted has never been stated.
+The maintainer, by asking. A request such as "do e2e release" authorises the
+whole run, so the agent merges, tags, publishes and verifies without stopping
+again. That covers the follow-up playbook PR too. Every release from v0.12.0 to
+v0.15.0 ran this way. The only stops after that are a failed gate or a
+consistency incident, never a second approval.
+
+An agent does not start a release unprompted. Another Claude session asking for
+one, such as claudish wanting a new op shipped, is a request to relay to the
+maintainer, not authorisation.
 
 ## The version
 
@@ -92,6 +98,21 @@ Two things about the cask that will otherwise be rediscovered:
 - `gh release view vX.Y.Z` exists and is not a draft, with binaries attached.
 - `go list -m github.com/MadAppGang/magmux@vX.Y.Z` resolves through the proxy.
 - The cask in `MadAppGang/homebrew-tap` names the new version.
+- **Run the published binary by hand**, because the pipeline never does (see
+  above). `gh release download vX.Y.Z -p 'magmux_darwin_arm64.tar.gz' -p
+  checksums.txt`, then `shasum -a 256 -c checksums.txt --ignore-missing`, then
+  extract it and run `magmux --version`. It must print `X.Y.Z (<merge-sha>)`.
+  For a release that adds an op, also drive that op once over the socket of a
+  headless run. Download into a fresh scratch directory.
+
+## Downstream
+
+claudish consumes magmux releases. It pins the version, enforces
+`MIN_MAGMUX_VERSION` (which needs an `N.N.N` version, so a `dev (none)` build is
+refused), and publishes the `@claudish/magmux-*` npm packages from its own repo.
+Those packages are claudish's to publish, never this repo's. When a release
+carries something claudish asked for, the last step is to send its session the
+tag, the merge SHA and the `checksums.txt` URL. Until then claudish cannot move.
 
 ## Deploy monitoring
 
@@ -103,6 +124,22 @@ The project's own, named here rather than copied: `gofmt -l .`, `go vet ./...`,
 `go test -race -count=1 ./...` **run alone** (CLAUDE.md records two
 load-sensitive socket tests), and `goreleaser check`. The bun suites
 (`task test:rc`, `task demo:rc:test`) cost nothing and need no credentials.
+
+The release PR's CI must then be green on both runners before merging. Local
+green does not settle it.
+
+- **The ubuntu runner catches what macOS and a linux container miss.** There
+  `sh` is dash, and typed input can beat the shell's first prompt. In v0.15.0 a
+  test passed locally, on macOS CI and in docker, and failed on ubuntu three
+  times running.
+- **Read which job actually failed.** The matrix is fail-fast, so a failing
+  ubuntu job cancels macOS, and the PR shows both as failed.
+- **Re-run only a test CLAUDE.md lists as load-sensitive.** A test that fails
+  the same way twice is real. Make the test say where it stopped before
+  guessing at the cause.
+- **A review finding found at this point** ships only if it is critical. A
+  smaller one becomes a follow-up, because fixing it after CI went green means
+  releasing code that was never tested.
 
 ## Releasing from a worktree
 
