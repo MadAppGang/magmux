@@ -222,6 +222,7 @@ func ce2eMidTurn(t *testing.T, lg *ce2eLog) {
 	tok1 := ce2eToken("M1")
 	first := "Run `sleep 15` with the Bash tool, then reply with only the word " + tok1 + "."
 	rep, took := h.send(map[string]any{"pane": 0, "text": first, "label": "e2e mid 1"})
+	firstAt := time.Now() // the first turn cannot finish before this + its 15s sleep
 	lg.logf("first send, reply after %s: %s", took.Round(time.Millisecond), ce2eJSON(rep))
 	h.requireOkEvidence("mid-turn first", rep)
 
@@ -238,11 +239,47 @@ func ce2eMidTurn(t *testing.T, lg *ce2eLog) {
 	rep, took = h.send(map[string]any{"pane": 0, "text": ce2ePrompt(tok2), "label": "e2e mid 2"})
 	lg.logf("mid-turn send, reply after %s: %s", took.Round(time.Millisecond), ce2eJSON(rep))
 	h.requireOkEvidence("mid-turn second", rep)
-	if ev := ce2eStr(ce2eMap(rep["result"]), "evidence"); ev != "history" {
-		t.Errorf("mid-turn send evidence = %q, want history (the queued entry)", ev)
+	lg.logf("mid-turn send evidence = %q", ce2eStr(ce2eMap(rep["result"]), "evidence"))
+	// Taken mid-turn: confirmed before the first turn's sleep could have
+	// finished, and before the first turn had answered.
+	if since := time.Since(firstAt); since >= 15*time.Second {
+		t.Errorf("the mid-turn send was confirmed %s after the first, past its 15s sleep: not a mid-turn send", since.Round(time.Millisecond))
 	}
-	h.waitAnswer(0, tok1)
-	h.waitAnswer(0, tok2)
+	if ce2eAnswered(h.capture(0), tok1) {
+		t.Errorf("the first turn had already answered when the mid-turn send was confirmed: not a mid-turn send")
+	}
+
+	// Both prompts are `❯` entries in the pane. Which one the MODEL then
+	// answers is its own choice (given a queued prompt it may answer only the
+	// second), so that is logged and never judged.
+	h.waitScreen(0, ce2eTurnWait, "both prompts as ❯ entries", func(s string) bool {
+		return ce2ePromptRow(s, "Run sleep 15") && ce2ePromptRow(s, "Please reply with only the word "+tok2)
+	})
+	deadline := time.Now().Add(ce2eTurnWait)
+	for {
+		s := h.capture(0)
+		a1, a2 := ce2eAnswered(s, tok1), ce2eAnswered(s, tok2)
+		if a1 || a2 {
+			lg.logf("  +%-7s answered: %s=%v %s=%v", h.since().Round(time.Millisecond), tok1, a1, tok2, a2)
+			return
+		}
+		if time.Now().After(deadline) {
+			lg.logf("no answer carrying %s or %s within %s (model behaviour, not judged); screen:\n%s", tok1, tok2, ce2eTurnWait, s)
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// ce2ePromptRow: some `❯` history row in the pane begins with prefix. Claude
+// renders inline code without its backticks, so prefix is the rendered text.
+func ce2ePromptRow(screen, prefix string) bool {
+	for _, line := range strings.Split(screen, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "❯ "+prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func ce2ePermissionDialog(t *testing.T, lg *ce2eLog) {
