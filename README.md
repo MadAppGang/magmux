@@ -658,8 +658,12 @@ and `list`/`results` say so with `gateBasis`:
   such as `-e 'claude --model opus'` or `-e 'cd /x && claude'`. A loose match
   (`grep claude x`, `tail -f /tmp/claude`) is observed but never gated. Nor is
   an invocation that never shows a box: print mode (`claude -p`), a subcommand
-  (`claude mcp list`, `claude update`, `claude doctor`, …) and `--version` /
-  `--help`. Those are not rewritten either.
+  as the FIRST argument (`claude mcp list`, `claude update`, `claude doctor`, …)
+  and `--version` / `--help`. Those are not rewritten either. A subcommand word
+  after an option is not recognised: `claude --name doctor` is an interactive
+  session named doctor, and Claude's options take zero, one, several or an
+  optional value, so `claude --settings x mcp list` is also treated as direct,
+  gated and rewritten. A send to such a pane answers `busy` (no box).
 - **`declared`**: the pane was declared a Claude Code pane, whatever its command
   is. `--controller claude-code` declares every `-e` and `-g` pane, and
   `open_pane` with `"controller":"claude-code"` declares one. This is how a
@@ -730,7 +734,11 @@ add `noGate`.
    (`transcript`). An emptied box is never evidence, because a lost prompt
    looks exactly like a submitted one. If the text is still in the box, magmux
    verifies it again and presses Enter once more, and the reply then says
-   `accept:"resent_enter"`.
+   `accept:"resent_enter"`. If the verify finds the box COMPLETELY empty
+   (the text was swallowed whole, as a late startup terminal reset can do),
+   nothing was submitted and nothing partial is left, so magmux goes back to
+   step 1 and types it ONCE more, within the same deadline; the ok reply then
+   carries `retyped:true`. A box holding part of the text is never retyped.
 
 `readyTimeoutMs` (default 10000, at most 60000) is ONE deadline. Waiting for
 the box, waiting for another delivery to finish typing into the same pane, and
@@ -743,7 +751,8 @@ readiness.
      "waitedMs":2400,"verified":"exact","accept":"confirmed","evidence":"history"}}
 ```
 
-`waitedMs` is the time spent waiting for readiness. `dismissed` lists the
+`waitedMs` is the time spent waiting for readiness, including any return to
+the gate before the first key or a retype. `dismissed` lists the
 dialogs that were Escaped, in order, and is omitted when there were none.
 
 **`dismissDialogs:true`** presses Escape on a permission, question or plan
@@ -777,10 +786,10 @@ prescribe a retry.
 | `busy` `dialog:<kind>` | no | a blocking dialog: `permission`, `question`, `plan`, `select`, `trust`, `bypass`, `api_key` or `onboarding`. Only Escapes were written before typing |
 | `busy` `typing_in_progress` | no | another delivery was still typing into the pane at the deadline |
 | `busy` with `typed:true` | no | the text was typed and the Enter withheld, by a dialog or by a terminal that did not come back in time. The box may hold the text, or part of it |
-| `not_accepted` `text_mismatch` | no | the box held something other than what was typed: partial text, or nothing. Nothing was submitted. A retype is refused `box_not_empty` until the box is cleared |
+| `not_accepted` `text_mismatch` | no | the box held something other than what was typed: partial text, or nothing even after the one automatic retype. Nothing was submitted. A retype is refused `box_not_empty` until the box is cleared |
 | `not_accepted` `empty_box` | no | a submit found the box empty, so there was nothing to submit |
 | `not_accepted` `still_in_box` | yes, once or twice | the text is still in the box, unsubmitted. **Do not retype it**: it is there |
-| `not_accepted` `unconfirmed` | yes | no user-prompt entry and no transcript entry that can be attributed to THIS send appeared within the windows. An identical older prompt does not count: a history entry must appear below the conversation as it stood at the verify, and a transcript entry must be stamped after it. A command that wipes the screen, such as `/clear`, therefore answers this. The prompt may have been lost, or taken without a visible sign. You decide |
+| `not_accepted` `unconfirmed` | yes | no user-prompt entry and no transcript entry that can be attributed to THIS send appeared within the windows. An identical older prompt does not count. A history entry must be a NEW user-prompt entry after the ones the verify saw, and magmux must be able to tell where those end: when the visible prompts are all the same text (a resent `continue`) and the top of the conversation is not on screen, or a command wipes the screen (`/clear`), the history cannot say, and only the transcript can. A transcript record must have been SUBMITTED after the verify: a queued prompt counts from its enqueue, and an older identical queued prompt that runs later is still the older one. The prompt may have been lost, or taken without a visible sign. You decide |
 
 **How long to wait for the reply.** Every part of a gated send is paced by a
 constant, so its upper bound is a formula: `readyTimeoutMs`, plus the typing,

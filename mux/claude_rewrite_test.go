@@ -227,7 +227,7 @@ func checkRewriteProperties(t *testing.T, cfg PaneConfig, rw launchRewrite) {
 		u := inUses[len(inUses)-1]
 		v := u.value
 		if !isInlineSettings(v) {
-			path, why := settingsPath(u, true, cfg.Dir, cfg.Env)
+			path, why := settingsPath(u, true, true, cfg.Dir, cfg.Env)
 			if why != "" {
 				t.Fatalf("a rewritten input's settings path: %s", why)
 			}

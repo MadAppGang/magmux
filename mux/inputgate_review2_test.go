@@ -136,13 +136,17 @@ func TestHistoryEvidenceIsAttributedToTheFrontier(t *testing.T) {
 		t.Errorf("the old entry scrolled back into view counted as this send's: %+v", got)
 	}
 
-	// Taken: the same prompt as a NEW entry below the frontier.
+	// The same prompt as a NEW entry: the verify showed NO user-prompt entry
+	// and not the top of the conversation, so there is nothing to place the
+	// later entries against — the old entry and the new one look alike, and
+	// which is which is unknowable from the screen (r3 H1: entries are the only
+	// anchor). No history evidence; the transcript confirms such a send.
 	taken := append(append([]string(nil), conv...), "")
 	taken = append(taken, promptRows...)
 	taken = append(taken, "", "· Germinating… (0s)")
 	got := acceptVerdict(parseClaudeScreen(claudeFrame(taken, []string{"❯ "}), frontierCols), b, nil)
-	if got.State != AcceptTaken || got.Evidence != evidenceHistory {
-		t.Errorf("a new entry below the frontier: %+v, want taken/history", got)
+	if got.State != AcceptNone {
+		t.Errorf("an entry with no placed baseline: %+v, want none", got)
 	}
 
 	// The frontier scrolled off (a reply pushed it away) while the new entry
@@ -239,6 +243,11 @@ func TestFirstKeyNotReadyToDeadlineIsBusy(t *testing.T) {
 	wantErr(t, o, protocol.CodeBusy, protocol.ReasonDialogPrefix+"permission", false)
 	if got := log.settle(); got != "" {
 		t.Errorf("bytes %q reached a pane that never became ready again", got)
+	}
+	// Review r3 (internal M1, gpt M3): a send that wrote nothing announced
+	// nothing — the turn starts at the first byte, not before it.
+	if n := g.notified.Load(); n != 0 {
+		t.Errorf("a zero-byte busy send called NotifyInput %d times, want 0", n)
 	}
 }
 

@@ -167,33 +167,33 @@ var claudeSubcommands = map[string]bool{
 // the arguments before a bare `--`:
 //
 //   - -p / --print, or -v / --version / -h / --help, anywhere;
-//   - a subcommand as the FIRST positional argument. A positional directly
-//     after a `-x` / `--flag` with no `=` may be that flag's value
-//     (`--model opus mcp list`), so the next positional is a candidate too;
-//     the first positional NOT after such a flag ends the search, which is
-//     what keeps `claude fix the doctor script` a prompt.
+//   - a subcommand as the FIRST argument, with no option before it.
+//
+// A subcommand anywhere later is NOT recognised, deliberately (r3 gpt H2).
+// Claude's options take values of every arity — none (`--verbose`), one
+// (`--name <name>`), several (`--add-dir <directories...>`, `--mcp-config
+// <configs...>`) and an optional one (`--resume [value]`, `-d, --debug
+// [filter]`; claude-2.1.301-help.txt) — so after any option a positional word
+// may be that option's value, and telling `claude --name doctor` (an
+// interactive session NAMED doctor) from `claude --model opus mcp list` needs
+// an arity table magmux does not own and that changes between releases. The
+// conservative answer is the gated one: a direct launch is gated and
+// rewritten, and a send to a pane that is really non-interactive just answers
+// busy (no input box). Ungating an interactive session would lose both the
+// editor-mode override and the gate.
 //
 // An expansion ("" here) is a positional that names nothing.
 func noInputBox(args []string) bool {
-	afterFlag, searching := false, true
-	for _, a := range args {
+	for i, a := range args {
 		switch a {
 		case "--":
 			return false
 		case "-p", "--print", "-v", "--version", "-h", "--help":
 			return true
 		}
-		if strings.HasPrefix(a, "-") && a != "-" {
-			afterFlag = !strings.Contains(a, "=")
-			continue
-		}
-		if searching && claudeSubcommands[a] {
+		if i == 0 && claudeSubcommands[a] {
 			return true
 		}
-		if !afterFlag {
-			searching = false
-		}
-		afterFlag = false
 	}
 	return false
 }
@@ -645,6 +645,9 @@ func rewriteClaudeLaunch(cfg PaneConfig, launch launchInfo, basis gateBasis, dir
 		// relOK: a relative settings path resolves against cfg.Dir only when
 		// nothing runs before the invocation; a `cd` would move the base.
 		relOK = true
+		// homeOK: a `~/` path is expanded with the HOME the shell has when it
+		// reaches the invocation, so nothing before it may be able to set it.
+		homeOK = true
 	)
 	if launch.line == "" {
 		uses, why = argvSettings(cfg.Args)
@@ -656,6 +659,7 @@ func rewriteClaudeLaunch(cfg PaneConfig, launch launchInfo, basis gateBasis, dir
 				break
 			}
 		}
+		homeOK = homeKept(launch)
 	}
 	if why != "" {
 		return unparsed(why)
@@ -689,7 +693,7 @@ func rewriteClaudeLaunch(cfg PaneConfig, launch launchInfo, basis gateBasis, dir
 			word = shellQuoteJSON(merged)
 		}
 	} else {
-		path, why := settingsPath(use, relOK, cfg.Dir, cfg.Env)
+		path, why := settingsPath(use, relOK, homeOK, cfg.Dir, cfg.Env)
 		if why != "" {
 			return unparsed(why)
 		}
@@ -741,7 +745,7 @@ func withLine(args []string, line string) []string {
 // it names, or says why it cannot: an expansion, `-`, a relative path that a
 // preceding command could have moved the base of, a `~/` whose HOME is not
 // knowable. env is cfg.Env, the child's overrides.
-func settingsPath(use settingsUse, relOK bool, base string, env []string) (string, string) {
+func settingsPath(use settingsUse, relOK, homeOK bool, base string, env []string) (string, string) {
 	v := use.value
 	switch {
 	case v == "" || v == "-":
@@ -751,10 +755,11 @@ func settingsPath(use settingsUse, relOK bool, base string, env []string) (strin
 	case use.tilde:
 		// The CHILD's shell expands the ~, with the child's HOME (review M5):
 		// cfg.Env's last HOME= when it sets one, else the HOME the child
-		// inherits from magmux. A command before the invocation could change
-		// HOME (`export HOME=…;`), exactly as a `cd` moves a relative base.
-		if !relOK {
-			return "", "~/ --settings path after another command"
+		// inherits from magmux. A command before the invocation that could
+		// change HOME (`export HOME=…;`) makes it unknowable; a plain `cd`
+		// cannot (homeKept).
+		if !homeOK {
+			return "", "~/ --settings path after a command that could change HOME"
 		}
 		home, ok := childHome(env)
 		if !ok {
@@ -774,6 +779,47 @@ func settingsPath(use settingsUse, relOK bool, base string, env []string) (strin
 		base = wd
 	}
 	return filepath.Join(base, v), ""
+}
+
+// homeSafeCommands are the commands that cannot change the shell's HOME:
+// directory moves and a few inert builtins. Everything else — an assignment,
+// export / declare / readonly / unset, eval, source / `.`, env, read, a
+// function definition, any command magmux does not know — might, and so does
+// a word that is an expansion (`${HOME:=x}` assigns). An allowlist, because
+// doubt must land on unparsed, never on a guessed HOME.
+var homeSafeCommands = map[string]bool{
+	"cd": true, "pushd": true, "popd": true, "true": true, "false": true, ":": true,
+	"echo": true, "mkdir": true, "sleep": true, "pwd": true, "clear": true,
+}
+
+// homeKept reports that no simple command BEFORE the invocation (the ones a
+// control operator ends) can change HOME: each is a homeSafeCommand whose
+// every word is literal and none an assignment. The invocation's own prefix
+// assignments (`HOME=/x claude …`) are not before it: the shell expands the
+// `~` before it applies them, with the HOME it already had.
+func homeKept(launch launchInfo) bool {
+	last := -1
+	for i, t := range launch.toks[:launch.claude] {
+		if t.kind == tokOp {
+			last = i
+		}
+	}
+	if last < 0 {
+		return true
+	}
+	ok := true
+	forEachSimpleCommand(launch.toks[:last], func(words []int) {
+		first := launch.toks[words[0]]
+		if !first.literal || !homeSafeCommands[first.lit] {
+			ok = false
+		}
+		for _, w := range words {
+			if t := launch.toks[w]; !t.literal || isAssignment(t) {
+				ok = false
+			}
+		}
+	})
+	return ok
 }
 
 // childHome is the HOME the pane's child will have: the LAST HOME= in env

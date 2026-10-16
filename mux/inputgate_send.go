@@ -179,7 +179,10 @@ type sendReport struct {
 	accept      string
 	evidence    string
 	resentEnter bool
-	lastEsc     time.Time
+	// retyped: the box was found completely empty after typing and the text
+	// was typed once more (the auto-retype). Additive in the reply.
+	retyped bool
+	lastEsc time.Time
 }
 
 // addTo puts the gated reply keys on a send's result (§5.4). An ungated
@@ -203,6 +206,9 @@ func (r sendReport) addTo(result map[string]any) {
 	if r.evidence != "" {
 		result["evidence"] = r.evidence
 	}
+	if r.retyped {
+		result["retyped"] = true
+	}
 }
 
 // gatedAckText is the ⇦ continuation for a gated send:
@@ -214,6 +220,9 @@ func gatedAckText(bytes int, r sendReport, err error) string {
 		parts = append(parts, "dismissed "+protocol.ReasonDialogPrefix+k)
 	}
 	parts = append(parts, deliveryParts(bytes, r.keys, r.enter))
+	if r.retyped {
+		parts = append(parts, "retyped (the box was empty)")
+	}
 	if r.verified != "" {
 		parts = append(parts, "verified "+strings.ReplaceAll(r.verified, "_", " "))
 	}
@@ -440,8 +449,7 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 	// there is only NotifyInput, an atomic flip: no pause, no I/O, no lock wait.
 	q := d.query()
 	// gate runs steps 1 and 2 until the post-token re-ask is ready, and
-	// returns holding the token. It is entered again, token released, when
-	// the first byte's own re-ask (the keys loop) finds the pane not ready.
+	// returns holding the token. It is entered again through regate.
 	gate := func() (InputReadiness, error) {
 		for {
 			if err := d.waitReady(ctx, q, start, deadline, rep); err != nil {
@@ -471,24 +479,48 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 			}
 		}
 	}
+	// regate is the gate entered again, token released, to the SAME
+	// deadline: when the first byte's own re-ask (the keys loop) finds the
+	// pane not ready, and before a retype. Its time is the gate's, so
+	// waitedMs counts it (r3 LOW).
+	regate := func() (InputReadiness, error) {
+		if held {
+			<-tok
+			held = false
+		}
+		t0 := time.Now()
+		r, err := gate()
+		gateWaited += time.Since(t0)
+		return r, err
+	}
 	r, err := gate()
 	if err != nil {
 		finish(err)
 		return
 	}
 	gateWaited = time.Since(start)
-	boxWasEmpty := !r.BoxHasText
-	pasteAbove := r.MaxPaste
 
-	// Step 3: the turn starts now, and only now (D9).
-	notifyInput(d.p)
+	// Step 3: the turn starts at the FIRST byte of the delivery, and only
+	// then (D9, r3 M1). announce runs inside write and before the Enter —
+	// after the last readiness check that authorised that byte — so a send
+	// that writes nothing (busy at the first key's re-ask, cancelled) never
+	// announces a turn, and a retype does not announce a second one.
+	announced := false
+	announce := func() {
+		if !announced {
+			announced = true
+			notifyInput(d.p)
+		}
+	}
 
-	// Step 4: typing. Before every write after the first, a screen-and-termios
-	// check: a dialog stops the typing (busy, typed); anything else not ready
-	// stops it and goes to the box check, which re-waits and then verifies.
-	wrote, typedText, pasted, stopped := false, false, false, false
+	// Step 4: typing. Before every write after an attempt's first, a
+	// screen-and-termios check: a dialog stops the typing (busy, typed);
+	// anything else not ready stops it and goes to the box check, which
+	// re-waits and then verifies. wrote is the whole delivery's (the typed
+	// flag); this is the current attempt's.
+	wrote, this := false, false
 	between := func() (stop bool, err *protocol.Error) {
-		if !wrote {
+		if !this {
 			return false, nil
 		}
 		c := d.g.InputReadiness(ReadinessQuery{Class: ClassSubmit})
@@ -503,11 +535,12 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		return true, nil
 	}
 	write := func(b []byte, what string) *protocol.Error {
+		announce()
 		if !d.p.injectPTY(b) {
 			return gateErr(protocol.CodePaneDead, "", wrote,
 				"pane %d rejected the %s: its child has exited or its PTY is closed", d.idx, what)
 		}
-		wrote = true
+		wrote, this = true, true
 		return nil
 	}
 	cancelledTyped := func(before string) error {
@@ -518,12 +551,85 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		return err
 	}
 
-	switch d.mode {
-	case sendTyped:
-		for i, w := range typedWrites(d.text) {
-			if i > 0 && !pause(ctx, typedChunkGap) {
-				finish(cancelledTyped("rest of the typed text"))
+	var (
+		chk    BoxCheck
+		expect BoxExpect
+	)
+	for attempt := 0; ; attempt++ {
+		boxWasEmpty, pasteAbove := !r.BoxHasText, r.MaxPaste
+		typedText, pasted, stopped := false, false, false
+		this = false
+
+		switch d.mode {
+		case sendTyped:
+			for i, w := range typedWrites(d.text) {
+				if i > 0 && !pause(ctx, typedChunkGap) {
+					finish(cancelledTyped("rest of the typed text"))
+					return
+				}
+				stop, err := between()
+				if err != nil {
+					fail(err)
+					return
+				}
+				if stop {
+					stopped = true
+					break
+				}
+				if err := write(w, "text"); err != nil {
+					fail(err)
+					return
+				}
+				typedText = true
+			}
+		case sendPaste:
+			// Written even when empty: the markers alone are the gesture.
+			if err := write([]byte("\x1b[200~"+d.text+"\x1b[201~"), "text"); err != nil {
+				fail(err)
 				return
+			}
+			typedText, pasted = d.text != "", true
+		default:
+			if d.text != "" {
+				b, bracketed := d.p.pasteWrapped(d.text)
+				if err := write(b, "text"); err != nil {
+					fail(err)
+					return
+				}
+				typedText = true
+				pasted = bracketed || utf8.RuneCountInString(d.text) > pasteCollapseRunes || len(d.text) > pasteCollapseRunes
+			}
+		}
+		var exactKeys []rune
+		allPrintable := true
+		for _, k := range d.keys {
+			kr, printable := printableKey(k)
+			if printable {
+				exactKeys = append(exactKeys, kr)
+			} else {
+				allPrintable = false
+			}
+			if stopped {
+				continue
+			}
+			if !pause(ctx, keyGap) {
+				finish(cancelledTyped("key " + k))
+				return
+			}
+			if !this {
+				// The attempt's FIRST byte is this key, and the readiness that
+				// authorised it is a keyGap old now: a reset or a dialog in
+				// that pause would be missed (review H4). Re-ask with the
+				// gate's own query; not ready sends the delivery back to the
+				// gate, nothing written.
+				rr := d.g.InputReadiness(q)
+				if !rr.Ready {
+					if rr, err = regate(); err != nil {
+						finish(err)
+						return
+					}
+				}
+				boxWasEmpty, pasteAbove = !rr.BoxHasText, rr.MaxPaste
 			}
 			stop, err := between()
 			if err != nil {
@@ -532,125 +638,85 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 			}
 			if stop {
 				stopped = true
+				continue
+			}
+			b, _ := keyBytes(k)
+			if err := write(b, "key "+k); err != nil {
+				fail(err)
+				return
+			}
+			if printable {
+				typedText = true
+			}
+		}
+
+		// Step 5: let the TUI draw the last write.
+		if !pause(ctx, pilotSendDelay) {
+			finish(cancelledTyped("box check"))
+			return
+		}
+
+		// Step 6: the box check, to the SAME deadline, run at least once.
+		expect = BoxExpect{Class: d.class, TypedText: typedText, Pasted: pasted, PasteAbove: pasteAbove}
+		if boxWasEmpty && allPrintable && (d.text != "" || len(exactKeys) > 0) {
+			// The box was empty when the first byte went in and nothing edited
+			// it, so its content is knowable. Pastes included: Claude shows them
+			// expanded in history, so the SENT key is what confirms them (phase 3).
+			expect.Exact = d.text + string(exactKeys)
+		}
+		for {
+			if err := d.liveness(wrote); err != nil {
+				fail(err)
+				return
+			}
+			chk = d.g.CheckBox(expect)
+			if chk.Readiness.Ready {
 				break
 			}
-			if err := write(w, "text"); err != nil {
+			cr := chk.Readiness
+			pressed, err := d.tryDismiss(cr, rep)
+			if err != nil {
 				fail(err)
 				return
 			}
-			typedText = true
-		}
-	case sendPaste:
-		// Written even when empty: the markers alone are the gesture.
-		if err := write([]byte("\x1b[200~"+d.text+"\x1b[201~"), "text"); err != nil {
-			fail(err)
-			return
-		}
-		typedText, pasted = d.text != "", true
-	default:
-		if d.text != "" {
-			b, bracketed := d.p.pasteWrapped(d.text)
-			if err := write(b, "text"); err != nil {
-				fail(err)
+			if !pressed && !time.Now().Before(deadline) {
+				fail(gateErr(protocol.CodeBusy, cr.Reason, wrote,
+					"pane %d: claude-code was not ready for the Enter (%s: %s) by the deadline; the text was typed and Enter was not pressed",
+					d.idx, cr.Reason, cr.Detail))
 				return
 			}
-			typedText = true
-			pasted = bracketed || utf8.RuneCountInString(d.text) > pasteCollapseRunes || len(d.text) > pasteCollapseRunes
+			t0 := time.Now()
+			if !pause(ctx, gateStep) {
+				finish(cancelledTyped("enter"))
+				return
+			}
+			waitedPre += time.Since(t0)
 		}
-	}
-	var exactKeys []rune
-	allPrintable := true
-	for _, k := range d.keys {
-		kr, printable := printableKey(k)
-		if printable {
-			exactKeys = append(exactKeys, kr)
-		} else {
-			allPrintable = false
-		}
-		if stopped {
-			continue
-		}
-		if !pause(ctx, keyGap) {
-			finish(cancelledTyped("key " + k))
-			return
-		}
-		if !wrote {
-			// The FIRST byte of the delivery is this key, and the post-token
-			// re-ask is a keyGap old now: a reset or a dialog in that pause
-			// would be missed (review H4). Re-ask with the gate's own query;
-			// not ready sends the delivery back to the gate, nothing written.
-			rr := d.g.InputReadiness(q)
-			if !rr.Ready {
-				<-tok
-				held = false
-				if rr, err = gate(); err != nil {
-					finish(err)
-					return
+
+		// The auto-retype, ONCE: the verify found the box COMPLETELY empty
+		// after the send typed knowable content into an empty box. Nothing
+		// was submitted (no Enter has been pressed) and nothing partial is
+		// left, so typing it again cannot duplicate anything — this is the
+		// late startup stdin reset swallowing the text (F3, the real-Claude
+		// smoke). Back through the gate to the same deadline, then the same
+		// typing and the same verify. A box holding PARTIAL text is a
+		// mismatch and is never retyped: what is left in it is unknown.
+		if attempt == 0 && chk.Verdict == BoxEmpty && typedText && expect.Exact != "" {
+			rep.retyped = true
+			if r, err = regate(); err != nil {
+				if e, ok := err.(*protocol.Error); ok && e.Code == protocol.CodeBusy {
+					err = gateErr(protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true,
+						"pane %d: the input box was empty after typing (the text was lost) and the pane was not ready to retype it (%s); Enter was not pressed, nothing was submitted",
+						d.idx, e.Msg)
+				} else if ok {
+					e.Typed = true
 				}
+				finish(err)
+				return
 			}
-			boxWasEmpty, pasteAbove = !rr.BoxHasText, rr.MaxPaste
-		}
-		stop, err := between()
-		if err != nil {
-			fail(err)
-			return
-		}
-		if stop {
-			stopped = true
 			continue
 		}
-		b, _ := keyBytes(k)
-		if err := write(b, "key "+k); err != nil {
-			fail(err)
-			return
-		}
-		if printable {
-			typedText = true
-		}
-	}
-
-	// Step 5: let the TUI draw the last write.
-	if !pause(ctx, pilotSendDelay) {
-		finish(cancelledTyped("box check"))
-		return
-	}
-
-	// Step 6: the box check, to the SAME deadline, run at least once.
-	expect := BoxExpect{Class: d.class, TypedText: typedText, Pasted: pasted, PasteAbove: pasteAbove}
-	if boxWasEmpty && allPrintable && (d.text != "" || len(exactKeys) > 0) {
-		// The box was empty when the first byte went in and nothing edited
-		// it, so its content is knowable. Pastes included: Claude shows them
-		// expanded in history, so the SENT key is what confirms them (phase 3).
-		expect.Exact = d.text + string(exactKeys)
-	}
-	var chk BoxCheck
-	for {
-		if err := d.liveness(wrote); err != nil {
-			fail(err)
-			return
-		}
-		chk = d.g.CheckBox(expect)
-		if chk.Readiness.Ready {
-			break
-		}
-		cr := chk.Readiness
-		pressed, err := d.tryDismiss(cr, rep)
-		if err != nil {
-			fail(err)
-			return
-		}
-		if !pressed && !time.Now().Before(deadline) {
-			fail(gateErr(protocol.CodeBusy, cr.Reason, wrote,
-				"pane %d: claude-code was not ready for the Enter (%s: %s) by the deadline; the text was typed and Enter was not pressed",
-				d.idx, cr.Reason, cr.Detail))
-			return
-		}
-		t0 := time.Now()
-		if !pause(ctx, gateStep) {
-			finish(cancelledTyped("enter"))
-			return
-		}
-		waitedPre += time.Since(t0)
+		break
 	}
 	if chk.Verdict != BoxVerified {
 		reason := boxVerdictReason(chk.Verdict, expect)
@@ -675,7 +741,10 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		return
 	}
 
-	// Step 7: Enter, with the baseline already taken from step 6's read.
+	// Step 7: Enter, with the baseline already taken from step 6's read. A
+	// submit that typed nothing (Enter on text already in the box) starts
+	// its turn here.
+	announce()
 	if !d.p.injectPTY([]byte("\r")) {
 		fail(gateErr(protocol.CodePaneDead, "", true,
 			"pane %d rejected the enter: its child has exited or its PTY is closed", d.idx))

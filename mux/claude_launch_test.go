@@ -85,8 +85,8 @@ func TestClaudeLaunchOf(t *testing.T) {
 		{"claude --help", false},
 		{"claude -h", false},
 		{"claude --model opus --version", false},
-		{"claude --model opus mcp list", false}, // root option, then the subcommand
-		{"claude --settings='{}' mcp list", false},
+		{"claude --model opus mcp list", true}, // after an option: direct, gated (r3 H2)
+		{"claude --settings='{}' mcp list", true},
 		{"cd /x && claude doctor", false},
 		{"claude 'update the docs'", true},     // a prompt is ONE word; "update" alone is the subcommand
 		{"claude fix the doctor script", true}, // only the first positional names a subcommand

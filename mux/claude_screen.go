@@ -48,11 +48,13 @@ type claudeScreen struct {
 	Prompts     []promptEntry // USER-PROMPT entries above the box, top to bottom
 	MaxPaste    int           // largest N of any `[Pasted text #N` token in the box or the entries
 
-	// conv is the conversation region (every row above the box's top rule)
-	// and spinnerRow the first of its rows in the spinner zone (len(conv)
-	// when there is no spinner): what acceptance's frontier is read from.
-	conv       []styledRow
-	spinnerRow int
+	// conv is the conversation region (every row above the box's top rule):
+	// where acceptance finds the top of the conversation and a scrolled-off
+	// entry's tail.
+	conv []styledRow
+	// blankTail is how many rows at the very bottom of the screen are blank: a
+	// box that is not at the bottom (an inline layout with room to spare).
+	blankTail int
 }
 
 // promptEntry is one user prompt as Claude shows it in the conversation: a `❯`
@@ -69,8 +71,8 @@ type promptEntry struct {
 	// send, and a `❯` entry never is for one (matches).
 	Shell bool
 	// row/end: the screen rows of its `❯` row and of its last row (the
-	// queued hint, when it has one). Acceptance places it against the
-	// frontier with them.
+	// queued hint, when it has one). Acceptance reads a scrolled entry's
+	// rows with them.
 	row, end int
 }
 
@@ -342,16 +344,18 @@ func parseClaudeScreen(rows []styledRow, cols int) claudeScreen {
 				sc.Insert = true
 			}
 		}
-		sc.conv, sc.spinnerRow = rows[:top], top
+		sc.conv = rows[:top]
 		for i := top - 1; i >= 0 && i >= top-3; i-- {
 			if spinnerRe.MatchString(strings.TrimLeft(plain(rows[i]), " ")) {
 				sc.Working = true
-				sc.spinnerRow = i
 			}
 		}
 		sc.Prompts = parsePromptEntries(rows[:top])
 	} else {
 		sc.Dialog, sc.Dismissable = parseDialog(rows, cols)
+	}
+	for i := len(rows) - 1; i >= 0 && strings.TrimSpace(plain(rows[i])) == ""; i-- {
+		sc.blankTail++
 	}
 	for _, n := range sc.BoxPastes {
 		sc.MaxPaste = max(sc.MaxPaste, n)

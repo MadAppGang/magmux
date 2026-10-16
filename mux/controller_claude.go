@@ -75,11 +75,16 @@ type ClaudeCodeController struct {
 	// tty is nil until Start, and Start builds it only for a GATED pane, so an
 	// observed-only Claude pane costs exactly what it did before. Settable in
 	// struct-literal tests.
-	tty        *ttyWatch
-	reg        claudeRegistry
-	everReady  atomic.Bool                // has ever been READY: "starting" vs a regression
-	boxSince   atomic.Int64               // unix nanos the box became continuously visible; 0 = not visible
-	lastPrompt atomic.Pointer[promptMark] // the newest REAL transcript user entry
+	tty       *ttyWatch
+	reg       claudeRegistry
+	everReady atomic.Bool  // has ever been READY: "starting" vs a regression
+	boxSince  atomic.Int64 // unix nanos the box became continuously visible; 0 = not visible
+	// prompts is the recent transcript PROMPT records (real user entries,
+	// queue enqueues, queued_command attachments), published for acceptance.
+	// queue is the render goroutine's own list of enqueued prompts not yet
+	// dequeued, which dates a dequeued prompt by its ENQUEUE (F11).
+	prompts atomic.Pointer[promptLog]
+	queue   []queuedPrompt
 
 	snap Snapshot
 }
@@ -1005,9 +1010,10 @@ func (c *ClaudeCodeController) applyLine(line []byte) {
 			return
 		}
 		// Acceptance evidence: a transcript user entry, keyed, sequenced and
-		// stamped with its OWN timestamp (freshness, review H2).
+		// dated by when it was SUBMITTED — its own timestamp, or its enqueue's
+		// when it is a dequeued prompt (review H2, r3 M2).
 		written := parseClaudeTimestamp(entry["timestamp"])
-		c.notePrompt(content, written)
+		c.notePrompt(content, c.dequeuedAt(content, written))
 		// New turn starting
 		c.snap.LastUserPrompt = content
 		c.snap.State = CtrlWorking
@@ -1045,6 +1051,11 @@ func (c *ClaudeCodeController) applyLine(line []byte) {
 			c.snap.State = CtrlAwaitingInput
 			c.snap.CompletedAt = parseClaudeTimestamp(entry["timestamp"])
 		}
+
+	case "queue-operation", "attachment":
+		// A queued (mid-turn) prompt: acceptance evidence only, never a turn
+		// boundary — research F11 (controller_claude_input.go, noteQueued).
+		c.noteQueued(t, entry)
 
 	case "permission-mode":
 		// Permission mode change — informational only

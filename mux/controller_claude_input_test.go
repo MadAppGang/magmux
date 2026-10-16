@@ -497,19 +497,19 @@ func TestAcceptedByTranscript(t *testing.T) {
 	}
 }
 
-// TestApplyLineRecordsLastPrompt: only a REAL user prompt advances lastPrompt;
+// TestApplyLineRecordsLastPrompt: only a REAL user prompt adds a prompt mark;
 // a tool result filed as a "user" entry does not.
 func TestApplyLineRecordsLastPrompt(t *testing.T) {
 	c := newClaudeCodeController(&Pane{})
 	c.applyLine([]byte(`{"type":"user","message":{"role":"user","content":"hello there"}}`))
 	c.applyLine([]byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"x"}]}}`))
-	lp := c.lastPrompt.Load()
+	lp := c.lastMark()
 	if lp == nil || lp.seq != 1 || lp.key != inputKey("hello there") {
-		t.Fatalf("lastPrompt = %+v", lp)
+		t.Fatalf("lastMark = %+v", lp)
 	}
 	c.applyLine([]byte(`{"type":"user","message":{"role":"user","content":"again"}}`))
-	if lp := c.lastPrompt.Load(); lp.seq != 2 || lp.key != "again" {
-		t.Errorf("lastPrompt = %+v", lp)
+	if lp := c.lastMark(); lp.seq != 2 || lp.key != "again" {
+		t.Errorf("lastMark = %+v", lp)
 	}
 }
 

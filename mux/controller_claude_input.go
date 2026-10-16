@@ -12,10 +12,10 @@ package mux
 //     is taken from that SAME read, so nothing can happen between the verify
 //     and the baseline.
 //   - InputAccepted: after the Enter, is there evidence attributable to THIS
-//     SEND — a `❯` entry carrying the verified content below the verify's
-//     conversation frontier, or a transcript user entry equal to it and written
-//     after the verify? An emptied box is never evidence: the measured loss
-//     (F3) looks exactly like a submit.
+//     SEND — a NEW `❯` entry carrying the verified content after the verify's
+//     own user-prompt entries, uniquely placed, or a transcript prompt record
+//     equal to it and submitted after the verify? An emptied box is never
+//     evidence: the measured loss (F3) looks exactly like a submit.
 //
 // Everything here is safe from any goroutine: the pane's content is read
 // through tailView (p.mu, taken and released inside), the terminal through the
@@ -30,6 +30,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -59,28 +60,47 @@ const (
 // pane, or a pane with no PTY): not raw, so never ready.
 var errNoTTY = errors.New("no termios watch for this pane")
 
-// promptMark is the newest transcript user entry: its key, a sequence number
-// that grows by one per REAL user entry, and the entry's OWN timestamp — when
-// Claude wrote it, not when the render goroutine got round to reading it
-// (zero when the entry carried none). Written by applyLine on the render
-// goroutine, read lock-free by acceptance.
+// promptMark is one transcript PROMPT record: its key, a sequence number that
+// grows by one per record, and when the prompt was SUBMITTED — the record's
+// own timestamp, or for a dequeued prompt its enqueue's (zero when the record
+// carried none). Never when the render goroutine got round to reading it.
 type promptMark struct {
-	key     string
-	seq     uint64
-	written time.Time
+	key       string
+	seq       uint64
+	submitted time.Time
 }
+
+// promptLog is the published, immutable list of the most recent marks, oldest
+// first. applyLine (the render goroutine) replaces it; acceptance reads it
+// lock-free.
+type promptLog struct{ marks []promptMark }
+
+// promptLogMax bounds the log. Acceptance only looks at marks newer than its
+// verify, and a send's window is seconds long.
+const promptLogMax = 64
+
+// queuedPrompt is an enqueued prompt not yet dequeued (render goroutine only).
+// A dequeued one keeps its enqueue time in `dequeued` until the user entry it
+// becomes, if any, is written.
+type queuedPrompt struct {
+	key      string
+	at       time.Time
+	dequeued bool
+}
+
+// queuedPromptMax bounds the render goroutine's queue list.
+const queuedPromptMax = 64
 
 // claudeBaseline is the Claude half of an AcceptBaseline.
 type claudeBaseline struct {
-	// frontier is the conversation's last stable rows on the CheckBox screen
-	// (frontierOf); below is how many entries under it already matched. An
-	// entry is this send's only if it appears below the frontier's
-	// re-location, so an older identical entry a box resize or a scroll
-	// brings back into view is never counted (review H3). Empty: no
-	// frontier, no history evidence.
-	frontier      []string
-	below         int
-	transcriptSeq uint64 // lastPrompt.seq at the CheckBox read
+	// entries is the ordered list of user-prompt entries on the CheckBox
+	// screen, topSeen whether the top of the conversation was on it, and
+	// lastRows the last entry's rows as drawn: what newEntriesFrom places the
+	// later screen's entries against (review H3, r3 H1).
+	entries       []entryID
+	topSeen       bool
+	lastRows      []string
+	transcriptSeq uint64 // the newest promptMark's seq at the CheckBox read
 	// renderedKey of the verified and of the sent text: what a HISTORY entry
 	// is compared with, because Claude renders markdown there (F10).
 	verifiedRendered, sentRendered string
@@ -89,21 +109,113 @@ type claudeBaseline struct {
 	shell bool
 }
 
-// notePrompt records a real transcript user entry and the timestamp Claude
-// wrote on it.
-func (c *ClaudeCodeController) notePrompt(text string, written time.Time) {
+// notePrompt records a transcript prompt and when it was submitted.
+func (c *ClaudeCodeController) notePrompt(text string, submitted time.Time) {
+	var marks []promptMark
 	seq := uint64(1)
-	if prev := c.lastPrompt.Load(); prev != nil {
-		seq = prev.seq + 1
+	if prev := c.prompts.Load(); prev != nil {
+		marks = prev.marks
+		if len(marks) > 0 {
+			seq = marks[len(marks)-1].seq + 1
+		}
 	}
-	c.lastPrompt.Store(&promptMark{key: inputKey(text), seq: seq, written: written})
+	if len(marks) >= promptLogMax {
+		marks = marks[len(marks)-promptLogMax+1:]
+	}
+	next := append(slices.Clip(marks), promptMark{key: inputKey(text), seq: seq, submitted: submitted})
+	c.prompts.Store(&promptLog{marks: next})
+}
+
+// lastMark is the newest prompt record, or nil.
+func (c *ClaudeCodeController) lastMark() *promptMark {
+	if l := c.prompts.Load(); l != nil && len(l.marks) > 0 {
+		return &l.marks[len(l.marks)-1]
+	}
+	return nil
 }
 
 func (c *ClaudeCodeController) transcriptSeq() uint64 {
-	if lp := c.lastPrompt.Load(); lp != nil {
-		return lp.seq
+	if m := c.lastMark(); m != nil {
+		return m.seq
 	}
 	return 0
+}
+
+// noteQueued reads the two records Claude writes for a queued (mid-turn)
+// prompt — research F11, measured on 2.1.301:
+//
+//	{"type":"queue-operation","operation":"enqueue","timestamp":T0,"content":P}   at queue time
+//	{"type":"queue-operation","operation":"remove","timestamp":T1,"content":P}    when it is taken
+//	{"type":"attachment","attachment":{"type":"queued_command","prompt":P,"timestamp":T0}}
+//
+// The attachment is WRITTEN after the remove but carries the ORIGINAL enqueue
+// time, so an earlier identical prompt's late attachment is not fresh. The
+// enqueue is a queued send's own evidence, the moment it is queued. A remove
+// marks the oldest matching enqueue dequeued, so that a user entry the
+// dequeued prompt becomes is dated by its enqueue (dequeuedAt), not by when
+// it ran: the run time of an older queued `continue` must never confirm a new
+// one (r3 internal M2).
+func (c *ClaudeCodeController) noteQueued(kind string, entry map[string]any) {
+	at := parseClaudeTimestamp(entry["timestamp"])
+	if kind == "attachment" {
+		a, _ := entry["attachment"].(map[string]any)
+		if t, _ := a["type"].(string); t != "queued_command" {
+			return
+		}
+		prompt, _ := a["prompt"].(string)
+		if own := parseClaudeTimestamp(a["timestamp"]); !own.IsZero() {
+			at = own
+		}
+		if prompt != "" {
+			c.notePrompt(prompt, at)
+		}
+		return
+	}
+	content, _ := entry["content"].(string)
+	key := inputKey(content)
+	switch op, _ := entry["operation"].(string); op {
+	case "enqueue":
+		if content == "" {
+			return
+		}
+		c.notePrompt(content, at)
+		if len(c.queue) >= queuedPromptMax {
+			c.queue = c.queue[1:]
+		}
+		c.queue = append(c.queue, queuedPrompt{key: key, at: at})
+	case "remove":
+		// The oldest pending enqueue of this content; with no content, the
+		// oldest pending one of any — the conservative reading, since it
+		// makes a later user entry OLDER, never fresher. A prompt removed
+		// as absorbed_mid_turn (F11) reached the model inside the running
+		// turn and never becomes a user entry, so it is dropped rather than
+		// left to misdate the next identical send's own entry.
+		reason, _ := entry["reason"].(string)
+		for i := range c.queue {
+			if !c.queue[i].dequeued && (content == "" || c.queue[i].key == key) {
+				if reason == "absorbed_mid_turn" {
+					c.queue = slices.Delete(c.queue, i, i+1)
+				} else {
+					c.queue[i].dequeued = true
+				}
+				break
+			}
+		}
+	}
+}
+
+// dequeuedAt dates a real user entry: a dequeued enqueue of the same content
+// is this entry, and its submit time is the enqueue's. Otherwise the entry's
+// own timestamp.
+func (c *ClaudeCodeController) dequeuedAt(text string, written time.Time) time.Time {
+	key := inputKey(text)
+	for i, q := range c.queue {
+		if q.dequeued && q.key == key {
+			c.queue = slices.Delete(c.queue, i, i+1)
+			return q.at
+		}
+	}
+	return written
 }
 
 // startTTYWatch builds and heats the termios watch for a GATED pane. It cannot
@@ -294,20 +406,37 @@ func (c *ClaudeCodeController) CheckBox(want BoxExpect) BoxCheck {
 	verdict, verified, paste, detail := judgeBox(sc, want)
 	out.Verdict, out.Verified, out.Detail = verdict, verified, detail
 	if verdict == BoxVerified {
-		sent := sc.BoxText
-		if want.Exact != "" {
-			sent = want.Exact
-		}
-		out.Baseline = newAcceptBaseline(sc, sc.BoxText, sent, paste, now, c.transcriptSeq())
+		out.Baseline = newAcceptBaseline(sc, sc.BoxText, sentOf(sc, want.Exact), paste, now, c.transcriptSeq())
 	}
 	return out
+}
+
+// sentOf is the text a verified send put into the box, as acceptance compares
+// it: Exact, or the box text when Exact is undetermined. In bash mode the
+// leading `!` of Exact was the mode switch (s7) — it is the entry's glyph, not
+// its text, in the box and in history alike — so it is not part of the sent
+// text, on every path: a collapsed paste is confirmed by its sent key alone
+// (r3 gemini L1). judgeBox has already refused a shell box whose Exact did
+// not start with `!`.
+func sentOf(sc claudeScreen, exact string) string {
+	if exact == "" {
+		return sc.BoxText
+	}
+	if sc.BoxShell {
+		return strings.TrimPrefix(exact, "!")
+	}
+	return exact
 }
 
 // InputAccepted implements InputGate. It re-reads the screen and takes no
 // termios sample: it decides no write.
 func (c *ClaudeCodeController) InputAccepted(b AcceptBaseline) AcceptVerdict {
 	v := c.pane.tailView(0)
-	return acceptVerdict(parseClaudeScreen(v.Rows, v.Cols), b, c.lastPrompt.Load())
+	var marks []promptMark
+	if l := c.prompts.Load(); l != nil {
+		marks = l.marks
+	}
+	return acceptVerdict(parseClaudeScreen(v.Rows, v.Cols), b, marks)
 }
 
 // judgeBox is the pre-submit verify on one parsed screen.
@@ -361,146 +490,175 @@ func judgeBox(sc claudeScreen, want BoxExpect) (v BoxVerdict, verified string, p
 // there (Exact), or the box text again when that is undetermined.
 func newAcceptBaseline(sc claudeScreen, verified, sent string, paste int, at time.Time, seq uint64) AcceptBaseline {
 	b := AcceptBaseline{At: at, VerifiedKey: inputKey(verified), SentKey: inputKey(sent), Paste: paste}
-	cd := claudeBaseline{transcriptSeq: seq, verifiedRendered: renderedKey(verified), sentRendered: renderedKey(sent), shell: sc.BoxShell}
-	b.controllerData = cd // countMatches reads the rendered keys from it
-	if row, sig := frontierOf(sc); sig != nil {
-		cd.frontier = sig
-		cd.below = countMatches(entriesBelow(sc.Prompts, row), b)
+	cd := claudeBaseline{transcriptSeq: seq, verifiedRendered: renderedKey(verified), sentRendered: renderedKey(sent), shell: sc.BoxShell,
+		entries: entryIDs(sc.Prompts), topSeen: topVisible(sc)}
+	if n := len(sc.Prompts); n > 0 {
+		cd.lastRows = entryRowsAt(sc, sc.Prompts[n-1])
 	}
 	b.controllerData = cd
 	return b
 }
 
-// ── the history frontier (review H3) ────────────────────────────────────────
+// ── the entry frontier (review H3, r3 gpt H1 / internal M3) ─────────────────
 //
 // A VISIBLE count of matching entries is not evidence: the conversation region
 // is whatever the box leaves of the viewport, so a long box hides an older
 // identical entry at the verify and the same entry reappears when the box
-// empties. Evidence is an entry that appears BELOW the conversation's last
-// stable rows as they stood at the verify — the frontier — re-located on the
-// new screen. New output and new entries can only appear below it; anything a
-// resize or a scroll brings back is above it. Where it cannot be re-located
-// (it scrolled off, a resize reflowed it, /clear wiped it) nothing visible is
-// attributable and the history gives no evidence; the transcript still can.
+// empties. And no assistant, tool or spinner row is an anchor either: they
+// stream, redraw and repeat ("⏺ ok"), so a signature taken from them can
+// vanish (a correct queued send goes unconfirmed) or re-locate onto an older
+// identical copy (an old entry counts as new — gpt's S → ❯ retry → S).
+//
+// The anchor is the ordered list of USER-PROMPT entries, which are immutable
+// once drawn and are only ever appended (a queued entry keeps its place in
+// that order while live output is inserted above it, s4). The verify records
+// that list; a later screen's list must EXTEND it — the baseline is located
+// in it as an aligned run ending where it ended — and only the entries after
+// that end are new. Entries can scroll off the top (the run is then a
+// prefix of the later list that equals a suffix of the baseline), and a
+// shrinking box can bring older entries back above it (the whole baseline
+// appears after them) unless the top of the conversation was on screen at the
+// verify, in which case nothing older exists. If the baseline's end cannot be
+// placed UNIQUELY — no candidate, or more than one (a run of identical
+// entries) — nothing visible is attributable and the history gives no
+// evidence; the transcript still can.
 
-// frontierRows is how many stable rows make the frontier's signature: enough
-// that a repeated reply ("⏺ ok") does not re-locate it somewhere else.
-const frontierRows = 3
-
-// frontierIndentMax: a row indented further than this is right-aligned
-// chrome — `◐ medium · /effort`, the token count — that Claude draws above the
-// box and moves as the conversation grows (s1, s3). Never conversation.
-const frontierIndentMax = 16
-
-// stableRow is one conversation row that can serve as the frontier: its
-// index on the screen and its normalised text (frontierText).
-type stableRow struct {
-	row  int
-	text string
+// entryID is an entry's identity in the ordered list: its kind and its key.
+// Queued is not part of it: the hint goes when the queued prompt runs.
+type entryID struct {
+	shell bool
+	key   string
 }
 
-// frontierText normalises a row for the frontier comparison: the `⏺` glyph
-// blinks on a running tool row (s4BlinkOff/On), and NBSPs and the edges carry
-// nothing. "" = not a usable row.
-func frontierText(r styledRow) string {
-	t := strings.ReplaceAll(plain(r), "⏺", " ")
-	indent := len(t) - len(strings.TrimLeft(t, " "))
-	t = strings.TrimSpace(t)
-	if t == "" || indent > frontierIndentMax || allFaint(r) {
-		return ""
-	}
-	return t
-}
-
-// stableRows lists the conversation rows that can serve as a frontier, top to
-// bottom: every non-blank row above the box except right-aligned chrome,
-// faint rows, and the spinner zone (Claude's working row and everything under
-// it, which redraws every frame).
-func stableRows(sc claudeScreen) []stableRow {
-	var out []stableRow
-	for i, r := range sc.conv {
-		if i >= sc.spinnerRow {
-			break
-		}
-		if t := frontierText(r); t != "" {
-			out = append(out, stableRow{row: i, text: t})
-		}
+func entryIDs(es []promptEntry) []entryID {
+	out := make([]entryID, len(es))
+	for i, e := range es {
+		out[i] = entryID{shell: e.Shell, key: e.Key}
 	}
 	return out
 }
 
-// frontierOf is the verify screen's frontier: the last frontierRows stable
-// rows ABOVE the trailing run of prompt entries — a queued (mid-turn) entry
-// is pinned under the live output, which Claude inserts above it (s4
-// queued-c → queued-paste), so it is not a fixed point. row is the
-// frontier's last screen row; a nil signature means there is none.
-func frontierOf(sc claudeScreen) (row int, sig []string) {
-	rows := stableRows(sc)
-	end := len(rows)
-	for end > 0 && inEntry(sc.Prompts, rows[end-1].row) {
-		end--
-	}
-	if end == 0 {
-		return 0, nil
-	}
-	start := max(0, end-frontierRows)
-	for _, r := range rows[start:end] {
-		sig = append(sig, r.text)
-	}
-	return rows[end-1].row, sig
-}
+// bannerRe is Claude's welcome banner row (s1): the top of the document.
+var bannerRe = regexp.MustCompile(`▐▛.*Claude Code v[0-9]`)
 
-// inEntry: screen row i belongs to a prompt entry (its rows, and the queued
-// hint under it).
-func inEntry(es []promptEntry, i int) bool {
-	for _, e := range es {
-		if i >= e.row && i <= e.end {
-			return true
+// fitBlankRows: a region whose last rows above the box are this many blank
+// rows has room to spare, so the whole conversation is in it.
+const fitBlankRows = 3
+
+// topVisible: the conversation's first row is on screen, so nothing older
+// than the visible entries exists. Either the banner is the region's first
+// non-blank row (within its first three rows), or the conversation FITS:
+// Claude lays a short conversation out from the top and pads under it down to
+// the box (s1), while a conversation taller than the region fills it to the
+// box — so content from the region's top AND fitBlankRows of padding, above
+// the box or (an inline layout, box drawn right after the content) at the
+// bottom of the screen, means nothing was cut off above.
+func topVisible(sc claudeScreen) bool {
+	blank := func(r styledRow) bool { return strings.TrimSpace(plain(r)) == "" }
+	first := -1
+	for i, r := range sc.conv {
+		if !blank(r) {
+			first = i
+			break
 		}
 	}
-	return false
-}
-
-// locateFrontier finds the frontier on a later screen: the LOWEST run of
-// stable rows equal to the signature. The lowest, because the true frontier
-// can only be at or above any copy of it that new output repeated, so every
-// entry below the lowest match is new.
-func locateFrontier(sc claudeScreen, sig []string) (row int, ok bool) {
-	rows := stableRows(sc)
-	for j := len(rows) - 1; j >= len(sig)-1; j-- {
-		match := true
-		for k := range sig {
-			if rows[j-len(sig)+1+k].text != sig[k] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return rows[j].row, true
-		}
+	if first < 0 {
+		return false // a box so tall it leaves no conversation proves nothing
 	}
-	return 0, false
-}
-
-// entriesBelow is the entries that start under screen row r.
-func entriesBelow(es []promptEntry, r int) []promptEntry {
-	for i, e := range es {
-		if e.row > r {
-			return es[i:]
-		}
+	if first < 3 && bannerRe.MatchString(plain(sc.conv[first])) {
+		return true
 	}
-	return nil
-}
-
-// newHistoryEntry: the screen shows a matching entry below the re-located
-// frontier that was not there at the verify.
-func newHistoryEntry(sc claudeScreen, b AcceptBaseline) bool {
-	cd, _ := b.controllerData.(claudeBaseline)
-	if len(cd.frontier) == 0 {
+	if first > 1 {
 		return false
 	}
-	row, ok := locateFrontier(sc, cd.frontier)
-	return ok && countMatches(entriesBelow(sc.Prompts, row), b) > cd.below
+	if sc.blankTail >= fitBlankRows {
+		return true
+	}
+	n := len(sc.conv)
+	if n < first+1+fitBlankRows {
+		return false
+	}
+	for _, r := range sc.conv[n-fitBlankRows:] {
+		if !blank(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// entryRowsAt is an entry's own rows as drawn (its queued hint excluded),
+// right-trimmed: what a partly scrolled-off copy of it is compared with.
+func entryRowsAt(sc claudeScreen, e promptEntry) []string {
+	end := e.end
+	if e.Queued {
+		end--
+	}
+	var out []string
+	for i := e.row; i <= end && i < len(sc.conv); i++ {
+		out = append(out, strings.TrimRight(plain(sc.conv[i]), " "))
+	}
+	return out
+}
+
+// tailAtTop: the region's first rows are the last rows of the baseline's last
+// entry — its `❯` row scrolled off the top, the rest still showing, row for
+// row. That is the proof the baseline's end sits just above the first visible
+// entry; without it an entry list that shares nothing with the baseline is
+// unplaceable.
+func tailAtTop(sc claudeScreen, last []string) bool {
+	if len(last) < 2 || len(sc.conv) == 0 || strings.TrimSpace(plain(sc.conv[0])) == "" {
+		return false
+	}
+	first := len(sc.conv)
+	if len(sc.Prompts) > 0 {
+		first = sc.Prompts[0].row
+	}
+	k := 0
+	for k < first && continuesEntry(sc.conv[k]) {
+		k++
+	}
+	if k == 0 || k >= len(last) {
+		return false
+	}
+	for i := range k {
+		if strings.TrimRight(plain(sc.conv[i]), " ") != last[len(last)-k+i] {
+			return false
+		}
+	}
+	return true
+}
+
+// newEntriesFrom places the baseline's entry list in the later screen's and
+// returns the index of the first NEW entry. ok is false when the place is not
+// unique: no candidate, or several.
+func newEntriesFrom(sc claudeScreen, cd claudeBaseline) (start int, ok bool) {
+	post, base := entryIDs(sc.Prompts), cd.entries
+	n, found := len(base), 0
+	for e := 0; n > 0 && e < len(post); e++ { // e: where the baseline's last entry is
+		l := min(n, e+1)
+		if !slices.Equal(post[e-l+1:e+1], base[n-l:]) {
+			continue
+		}
+		if cd.topSeen && e-n+1 > 0 {
+			continue // entries above the whole baseline, yet nothing older exists
+		}
+		found, start = found+1, e+1
+	}
+	// The baseline's last entry is off screen: every visible entry is new,
+	// provably only when there was no entry and the top was on screen, or the
+	// last entry's tail is still showing at the top.
+	if (n == 0 && cd.topSeen) || (n > 0 && tailAtTop(sc, cd.lastRows)) {
+		found, start = found+1, 0
+	}
+	return start, found == 1
+}
+
+// newHistoryEntry: a NEW entry, after the uniquely placed baseline, carries
+// this send's content.
+func newHistoryEntry(sc claudeScreen, b AcceptBaseline) bool {
+	cd, _ := b.controllerData.(claudeBaseline)
+	start, ok := newEntriesFrom(sc, cd)
+	return ok && countMatches(sc.Prompts[start:], b) > 0
 }
 
 // matches says whether an entry carries the baselined content. The entry's
@@ -554,28 +712,32 @@ func countMatches(es []promptEntry, b AcceptBaseline) int {
 // is checked BEFORE InBox: if a new entry proves the submission AND the box
 // still shows the text, pressing Enter again would submit it twice.
 //
-//	1  a new matching entry below the frontier             Taken / history
-//	2  a transcript user entry WRITTEN after it, its key   Taken / transcript
-//	3  the box still holds the verified content            InBox
-//	—  anything else (an empty box above all)              None
+//	1  a new matching entry after the placed baseline        Taken / history
+//	2  a transcript prompt SUBMITTED after it, its key       Taken / transcript
+//	3  the box still holds the verified content              InBox
+//	—  anything else (an empty box above all)                None
 //
-// Both kinds of evidence must be ATTRIBUTABLE to this send. History: below
-// the frontier (newHistoryEntry). Transcript: the entry's own timestamp is at
-// or after the verify — an identical prompt submitted earlier but read late
-// (delayed polling, a late discovery) is that earlier submission, and an
-// entry with no timestamp proves nothing (review H2). The sequence check
-// stays as well: an entry already read at the verify is never new.
-func acceptVerdict(sc claudeScreen, b AcceptBaseline, lp *promptMark) AcceptVerdict {
+// Both kinds of evidence must be ATTRIBUTABLE to this send. History: a new
+// entry after the baseline's uniquely placed entry list (newHistoryEntry).
+// Transcript: a record read after the verify whose SUBMIT time is at or after
+// it — the record's own timestamp, the original enqueue time for a queued
+// prompt's attachment, and the enqueue's for a dequeued prompt (F11). An
+// identical prompt submitted earlier but read late (delayed polling, a late
+// discovery, a queue that drained late) is that earlier submission, and a
+// record with no timestamp proves nothing (review H2, r3 M2).
+func acceptVerdict(sc claudeScreen, b AcceptBaseline, marks []promptMark) AcceptVerdict {
 	cd, _ := b.controllerData.(claudeBaseline)
 	v := AcceptVerdict{Dialog: sc.Dialog}
 	if newHistoryEntry(sc, b) {
 		v.State, v.Evidence = AcceptTaken, evidenceHistory
 		return v
 	}
-	if lp != nil && lp.seq > cd.transcriptSeq && writtenSince(lp.written, b.At) &&
-		lp.key != "" && (lp.key == b.SentKey || lp.key == b.VerifiedKey) {
-		v.State, v.Evidence = AcceptTaken, evidenceTranscript
-		return v
+	for _, m := range marks {
+		if m.seq > cd.transcriptSeq && writtenSince(m.submitted, b.At) &&
+			m.key != "" && (m.key == b.SentKey || m.key == b.VerifiedKey) {
+			v.State, v.Evidence = AcceptTaken, evidenceTranscript
+			return v
+		}
 	}
 	if sc.BoxVisible && b.VerifiedKey != "" &&
 		(sc.BoxKey == b.VerifiedKey || (b.Paste > 0 && slices.Contains(sc.BoxPastes, b.Paste))) {

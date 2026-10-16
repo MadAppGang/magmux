@@ -273,10 +273,11 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   settle the pane again, so a dropped instruction surfaces as a suspiciously
   fast empty turn rather than a permanent "working". Both paths go through
   one helper, `notifyInput`, and WHEN differs: an ungated send calls it at
-  admit, a gated send only after the gate and the token, immediately before
-  its first byte — so a gated send refused `busy` at the gate, or
-  `bad_request` at admit, never announces a turn
-  (`TestNotifyInputOnlyAfterGatePasses`). A gated send that types and then
+  admit, a gated send only inside its FIRST actual write, after the last
+  readiness check that authorised it — so a gated send that writes nothing
+  (`busy` at the gate or at the first key's re-ask, `bad_request` at admit)
+  never announces a turn (`TestNotifyInputOnlyAfterGatePasses`,
+  `TestFirstKeyNotReadyToDeadlineIsBusy`). A gated send that types and then
   ends `not_accepted`, or `busy` with `typed:true`, HAS called it. That is the
   one phantom turn left, it happens only on a failed delivery the reply
   already reports, and the non-sticky demotion settles it.
@@ -763,11 +764,18 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   is `declared` (`--controller claude-code`, `open_pane controller:"claude-code"`)
   or `direct` (the lexer found exactly one command-position `claude` word whose
   BASENAME is `claude` — a `$TMPDIR` of `/private/tmp/claude-501` makes no pane
-  direct — and the invocation shows an input box: not print mode, not a
-  subcommand as the first positional (`claude mcp list`, `claude update`; a
-  positional right after a `--flag` without `=` may be its value, so the next
-  one is checked too), not `--version`/`--help`. `noInputBox`; a non-direct
-  invocation is not rewritten either. `TestClaudeLaunchOf`,
+  direct — and the invocation shows an input box: not print mode, not
+  `--version`/`--help`, and not a subcommand as the FIRST argument with no
+  option before it (`claude mcp list`, `claude update`). A subcommand word
+  anywhere later is NOT recognised, on purpose (review r3 H2): Claude's options
+  take zero, one, several (`--add-dir <directories...>`) or an optional value
+  (`--resume [value]`), so `claude --name doctor` is an interactive session
+  NAMED doctor and only an arity table magmux does not own could tell it from
+  `claude --settings x mcp list`. Doubt lands on DIRECT — gated and rewritten —
+  because a send to a pane that really has no box just answers busy, while
+  ungating an interactive session loses the override and the gate.
+  `noInputBox`; a non-direct invocation is not rewritten either.
+  `TestClaudeLaunchOf`, `TestSubcommandOnlyAsFirstArgument`,
   `TestTmpdirClaudeIsObservedNotGated`). A loose substring match attaches a controller for OBSERVATION and
   is never gated, because magmux cannot know what such a pane runs; a plugin's
   pane is never gated. Every gate decision, the `list`/`results` `input` key and
@@ -813,8 +821,11 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   compares a shell box with `Exact` minus its leading `!`, and refuses a shell
   box the send did not switch into (submitting it would run a shell command);
   `matches` takes a shell entry only for a shell send and a `❯` entry only for
-  any other. `TestBashModeSendVerifiedAndAccepted`,
-  `TestBashModeMismatchStillRefused`, `TestShellEntryMatchesOnlyAShellSend`.
+  any other. The `!` is also dropped from the SENT text every acceptance key is
+  computed from (`sentOf`), so a long bash-mode command that collapses to a
+  paste token is confirmed by its expanded `! cmd` entry (review r3 L1).
+  `TestBashModeSendVerifiedAndAccepted`, `TestBashModeMismatchStillRefused`,
+  `TestShellEntryMatchesOnlyAShellSend`, `TestBashModeCollapsedPasteIsConfirmed`.
 
 - **`send`'s Budget hook is a pure lookup.** It runs before the op on every
   transport, so a pane-less send resolves its pane with `peekTargetPane` (no
@@ -843,9 +854,10 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   of the box equals what was typed), `paste_token` (a NEW `[Pasted text #N` above
   the post-token `MaxPaste`) or, when the content is unknowable from the
   request, `non_empty`; anything else is `not_accepted` with Enter withheld.
-  (2) No ok without EVIDENCE ATTRIBUTABLE TO THIS SEND: a `❯` history entry
-  carrying the verified content BELOW THE FRONTIER, or a transcript user entry
-  equal to it and WRITTEN after the verify. When attribution is ambiguous the
+  (2) No ok without EVIDENCE ATTRIBUTABLE TO THIS SEND: a NEW `❯` history entry
+  carrying the verified content after the verify's own entries, uniquely
+  placed, or a transcript prompt record equal to it and SUBMITTED after the
+  verify. When attribution is ambiguous the
   answer is `unconfirmed`, never ok. An emptied box is NEVER evidence — the measured
   loss looks exactly like a submit — and neither is the pane going
   working/awaiting (NotifyInput manufactures that transition). The baseline is
@@ -868,31 +880,69 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   `TestLostIdenticalResendDuringToolCallIsUnconfirmed`, `TestTakenBeatsInBox`,
   `TestPreSubmitMismatchWithholdsEnter`.
 
-- **History evidence is attributed to a FRONTIER, never counted.** A rise in
-  the VISIBLE number of matching entries proves nothing: the conversation
-  region is whatever the box leaves of the viewport, so a long box hides an
-  older identical prompt at the verify and the same entry reappears when the
-  lost text leaves the box (review H3). The baseline records the frontier —
-  the last 3 stable conversation rows (`frontierOf`: no blank rows, no
-  right-aligned chrome such as `◐ medium · /effort` or the token count, no
-  spinner zone, `⏺` folded because it blinks) ABOVE the trailing run of prompt
-  entries, because Claude inserts live output above a queued entry
-  (`queued-c → queued-paste`) — and how many matching entries were already
-  below it. Acceptance re-locates the LOWEST copy of that signature and counts
-  only entries below it; anything a resize or a scroll brings back is above.
-  A frontier that cannot be found (scrolled off, reflowed by a resize, wiped
-  by `/clear`) means nothing visible is attributable: no history evidence, so
-  a gated `/clear` answers `unconfirmed`. `TestHistoryEvidenceIsAttributedToTheFrontier`,
+- **History evidence is anchored on USER-PROMPT ENTRIES ONLY, and is placed,
+  never counted.** A rise in the VISIBLE number of matching entries proves
+  nothing: the conversation region is whatever the box leaves of the
+  viewport, so a long box hides an older identical prompt at the verify and
+  the same entry reappears when the lost text leaves the box (review H3). And
+  no assistant, tool or spinner row may be the anchor (review r3 H1/M3): they
+  stream, redraw and repeat, so an anchor taken from them vanishes (a correct
+  queued send goes `unconfirmed`) or re-locates onto an older identical copy
+  (gpt's `S → ❯ retry → S`: the old `❯ retry` counted as new). Entries are
+  immutable once drawn and only ever appended — a queued entry keeps its place
+  in their order while live output is inserted above it (`queued-c →
+  queued-paste`). So the baseline records the ORDERED list of visible entries
+  (`entryID`: kind + key), whether the top of the conversation was on screen
+  (`topVisible`: the banner, or a conversation that FITS — content from the
+  region's top and padding above the box or at the screen's bottom), and the
+  last entry's rows. `newEntriesFrom` places that list in the later screen's:
+  the baseline must appear as an aligned run ending where it ended — whole,
+  possibly under older entries a shrinking box brought back (refused when the
+  top was seen, since nothing older exists), or as a prefix of the later list
+  when entries scrolled off the top — and only the entries after its end are
+  new. When the last entry itself scrolled off, a visible tail of its rows at
+  the top of the region (`tailAtTop`) proves where it ended. NO candidate, or
+  MORE THAN ONE (a run of identical entries), means nothing visible is
+  attributable: no history evidence, and the transcript may still confirm.
+  So an identical `continue` resent when only `continue`s are visible and the
+  top is not, and a gated `/clear`, answer `unconfirmed` unless the transcript
+  confirms. `TestRepeatedAssistantBlocksAreNoAnchor`,
+  `TestQueuedSendConfirmedWhileLiveOutputChanges`,
+  `TestIdenticalEntriesWithoutTheTopAreAmbiguous`,
+  `TestRepeatedPromptUnderTheBannerIsConfirmed`,
+  `TestHistoryEvidenceIsAttributedToTheFrontier`,
   `TestNoFrontierIsNoHistoryEvidence`, `TestInputAccepted`.
 
-- **Transcript evidence is fresh by the entry's OWN timestamp.** `notePrompt`
-  stores the timestamp Claude wrote on the entry, not the moment the render
-  goroutine read it: with delayed polling or a late discovery, an identical
-  prompt submitted earlier is read AFTER a new, lost send, and a consumption
-  sequence alone would call it this send's (review H2). `writtenSince` needs a
-  stamp at or after the verify (truncated to Claude's millisecond); an entry
-  with no timestamp is never fresh. The sequence check stays too.
-  `TestTranscriptOldEntryConsumedLateIsNotEvidence`, `TestAcceptedByTranscript`.
+- **Transcript evidence is fresh by the prompt's SUBMIT time, never by when it
+  was written or read.** Measured (research F11): a queued prompt is recorded
+  AT QUEUE TIME as `{"type":"queue-operation","operation":"enqueue",
+  "timestamp":…,"content":…}`, removed later (`"operation":"remove"`, reason
+  `absorbed_mid_turn`), and its `queued_command` attachment is WRITTEN after the
+  remove but carries the ORIGINAL enqueue timestamp. So the controller keeps a
+  bounded log of prompt records (`promptLog`: real user entries, enqueues,
+  attachments), each dated by the record's own timestamp — a dequeued prompt's
+  user entry by its ENQUEUE's (`dequeuedAt`), so an older queued `continue` that
+  runs after a new identical send's verify is never that send's (review r3 M2).
+  An absorbed prompt never becomes a user entry and is dropped from the queue,
+  so it cannot misdate the next identical send. A record counts when it was
+  read after the verify (sequence), its key matches, and `writtenSince` holds
+  (at or after the verify, truncated to Claude's millisecond); no timestamp is
+  never fresh. `TestTranscriptOldEntryConsumedLateIsNotEvidence`,
+  `TestAcceptedByTranscript`, `TestQueuedSendConfirmedByEnqueue`,
+  `TestEarlierIdenticalQueuedSendIsNotEvidence`,
+  `TestAbsorbedQueuedPromptDoesNotMisdateTheNextSend`.
+
+- **An emptied box is retyped ONCE.** The late startup stdin reset can swallow
+  the typed text whole (the real-Claude smoke: 1 of 5 early sends answered
+  `text_mismatch` over an empty box). When the pre-Enter verify finds the box
+  COMPLETELY empty (`BoxEmpty`: no typed rune, placeholder only) after a send
+  that typed knowable content (`Exact` set) into an empty box, nothing was
+  submitted and nothing partial exists, so retyping cannot duplicate: the
+  delivery goes back through the gate to the SAME deadline, types again, and
+  verifies again. The ok reply carries `retyped:true` (additive). Lost twice
+  is `text_mismatch`; a box holding PARTIAL text is never retyped.
+  `TestEmptiedBoxIsRetypedOnce`, `TestEmptiedBoxTwiceIsTextMismatch`,
+  `TestPartialBoxIsNeverRetyped`, `TestREQ4_LostTextIsRetypedOnceThenConfirmed`.
 
 - **History shows a collapsed paste EXPANDED, so a paste is confirmed by the
   text it SENT.** Claude 2.1.301 never writes a `[Pasted text #N]` history
@@ -943,10 +993,15 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   authorises the first byte — and nothing but `NotifyInput` may stand between
   it and that byte. A keys-only send pauses `keyGap` before its first key, so
   it RE-ASKS after that pause, and a not-ready answer sends it back to the gate
-  with nothing written (review H4). Timeout is `busy`/`typing_in_progress`,
-  nothing typed. `TestTypingTokenSerialisesConnections`,
-  `TestTokenDeadlineIsTypingInProgress`, `TestFirstKeyRechecksReadinessAfterItsGap`,
-  `TestFirstKeyNotReadyToDeadlineIsBusy`.
+  with nothing written (review H4); the time spent back in the gate counts in
+  `waitedMs`. `NotifyInput` itself fires exactly ONCE, inside the first actual
+  delivery write (or before the Enter of a submit that typed nothing), after
+  the last readiness check that authorised it — never for a send that wrote
+  zero bytes, and not again for a retype (review r3 M1/M3). Timeout is
+  `busy`/`typing_in_progress`, nothing typed.
+  `TestTypingTokenSerialisesConnections`, `TestTokenDeadlineIsTypingInProgress`,
+  `TestFirstKeyRechecksReadinessAfterItsGap`, `TestFirstKeyNotReadyToDeadlineIsBusy`,
+  `TestResumedFirstKeyNotifiesOnce`, `TestWaitedCountsTheReenteredGate`.
 
 - **`ttyWatch.mu` is a LEAF.** Never held across `read()` (the ioctl), never
   while taking another lock; `heat` may start the goroutine under it because a
@@ -997,7 +1052,14 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   that may `cd`), and an unquoted `~/` value is expanded with the child's HOME
   — `cfg.Env`'s last `HOME=`, else the inherited one — or is `unparsed` when
   that HOME is empty or relative, or when a command before the invocation could
-  have changed it. `TestSettingsCopyPathIsAbsolute`, `TestTildeSettingsUseTheChildsHome`.
+  have changed it. "Could" is an ALLOWLIST (`homeKept`, `homeSafeCommands`):
+  a preceding command keeps HOME only if it is `cd`/`pushd`/`popd` or a few
+  inert builtins with every word literal and no assignment, so
+  `cd /x && claude --settings ~/s.json` resolves, while an assignment, `export`,
+  `env`, `eval`, `source`/`.`, a function definition, an expansion
+  (`${HOME:=x}` assigns) or any unknown command leaves it `unparsed`.
+  `TestSettingsCopyPathIsAbsolute`, `TestTildeSettingsUseTheChildsHome`,
+  `TestTildeSettingsAfterPlainCd`.
 
 - **Nothing may set `msg.sub` on an `opMsg`.** An op that runs `send` already
   OCCUPIES the lane; a `sub` would enqueue the delivery on that same lane

@@ -20,15 +20,28 @@ commit subjects and remain on the
   the terminal has been raw and still for a second, no dialog is showing, the
   box is empty and vim mode is off. It presses Enter only once the box holds
   exactly what was typed, and it answers ok only when evidence attributable to
-  THAT send appears: a user-prompt entry carrying the text below the
-  conversation as it stood at the verify, or a transcript entry stamped after
-  it. An identical older prompt scrolling back into view, or read late from the
-  transcript, is not evidence, so a screen-wiping `/clear` answers
-  `unconfirmed`. The ok reply adds `waitedMs`,
+  THAT send appears: a NEW user-prompt entry carrying the text after the
+  prompt entries the verify saw (placed by those entries alone, never by
+  assistant or tool output, which streams and repeats), or a transcript record
+  of it SUBMITTED after the verify — a queued prompt counts from its
+  `queue-operation` enqueue, and an older identical queued prompt that runs
+  later is still the older one. An identical older prompt scrolling back into
+  view, or read late from the transcript, is not evidence; where the screen
+  cannot say which entries are new (only identical prompts visible and the top
+  of the conversation off screen, or a screen-wiping `/clear`) the history
+  gives none, and without the transcript the reply is `unconfirmed`. If the
+  pre-Enter verify finds the box completely empty — the text swallowed whole
+  by a late startup terminal reset — it is typed ONCE more within the same
+  deadline, and the ok reply carries `retyped:true`; a box holding part of the
+  text is never retyped. The ok reply adds `waitedMs` (including any return to
+  the gate),
   `verified` (`exact`, `paste_token` or `non_empty`), `accept` (`confirmed`,
   `resent_enter`, or `in_box` for a send with no Enter) and `evidence`
   (`history` or `transcript`). Typing while Claude is working is allowed:
-  Claude queues it, and the queued entry is the evidence. Sends to every other
+  Claude queues it, and the queued entry is the evidence. A pane is `direct`
+  unless it is print mode, `--version`/`--help`, or a subcommand as the FIRST
+  argument: `claude --name doctor` is an interactive session and is gated, and
+  so, conservatively, is `claude --settings x mcp list`. Sends to every other
   pane are byte-identical to before, reply included.
 - **`--controller claude-code` declares every `-e` and `-g` pane a Claude Code
   pane, whatever command starts it.** This is how a wrapper that runs `claude`
@@ -87,12 +100,18 @@ commit subjects and remain on the
   `\n` in every mode, so the only Return a gated send presses is its final,
   checked Enter; any other control character but tab is `bad_request`. A text
   starting with `!` (Claude's bash mode) is verified as the mode switch plus
-  the command, and confirmed by its `! command` history entry. Ungated panes
+  the command, and confirmed by its `! command` history entry, also when a
+  long command collapses to a paste token in the box. Ungated panes
   get `text` exactly as sent.
 - **`claude` subcommands and `--version`/`--help` are not gated or
   rewritten.** Like `claude -p`, `claude mcp list`, `claude update`,
   `claude doctor` and the rest never show an input box, so a launch of one is
-  not a direct Claude pane.
+  not a direct Claude pane. Only the FIRST argument is read as a subcommand:
+  after an option a word may be that option's value (`--name doctor`), so such
+  a launch stays direct and gated. An unquoted `~/` `--settings` path after a
+  plain `cd` is still merged, since `cd` cannot change HOME; after a command
+  that could (an assignment, `export`, `eval`, `source`, …) it is left
+  unparsed.
 - **Go API: `protocol.Error` has four fields now (`Code`, `Msg`, `Reason`,
   `Typed`).** Additive, but a composite literal written WITHOUT field names,
   `protocol.Error{code, msg}`, no longer compiles. Name the fields, or use

@@ -276,30 +276,37 @@ func TestREQ4_NoHistoryEntryIsUnconfirmedWithEveryContractField(t *testing.T) {
 	}
 }
 
-// TEST-15 (REQ-4): the child resets stdin as the text arrives and the text is
-// LOST → never ok; not_accepted with a reason; Enter never pressed.
-func TestREQ4_LostTextIsNeverReportedOK(t *testing.T) {
+// TEST-15 (REQ-4, amended by review r3 item 5): the child resets stdin as the
+// text arrives and the text is LOST, leaving the box completely empty. Nothing
+// was submitted and nothing partial is left, so magmux retypes it ONCE; the
+// reply is ok only with retyped:true, the text reached the child undropped
+// exactly once, one Enter was pressed, and the child submitted exactly the
+// text. (Lost twice is text_mismatch — the fake loses only the first chunk,
+// so that half is pinned in package mux, TestEmptiedBoxTwiceIsTextMismatch.)
+func TestREQ4_LostTextIsRetypedOnceThenConfirmed(t *testing.T) {
 	t.Parallel()
 	m, cn, pane := declared(t, fake{"FAKE_LOSE_ON_INPUT": "1", "FAKE_LOSE_LEN_MS": "400"})
 	text := "lost " + shortID(t)
 
 	r := cn.send(pane, map[string]any{"text": text})
 
-	if r.OK {
-		t.Fatalf("lost text was reported ok: %s", r)
-	}
-	if r.Code != codeNotAccepted || !slices.Contains([]string{"text_mismatch", "empty_box"}, r.Reason) {
-		t.Fatalf("want not_accepted with reason text_mismatch|empty_box, got %s", r)
-	}
-	if !r.typedTrue() {
-		t.Errorf("lost-text refusal must carry typed:true (text was written); reply: %s", r)
-	}
+	res := wantGatedOK(t, r)
+	wantField(t, res, "retyped", true, r)
 	evs := m.events(t)
-	if n := countEnter(received(evs)); n != 0 {
-		t.Errorf("child received %d Enters; text_mismatch/empty_box means Enter was never pressed", n)
+	var kept []string
+	for _, e := range ofKind(evs, "in") {
+		if !e.Dropped && e.Data == text {
+			kept = append(kept, e.Data)
+		}
 	}
-	if got := submits(evs); len(got) != 0 {
-		t.Errorf("child submitted %q; nothing may be submitted", got)
+	if len(kept) != 1 {
+		t.Errorf("the text reached the child undropped %d times, want exactly 1 (the retype)", len(kept))
+	}
+	if n := countEnter(received(evs)); n != 1 {
+		t.Errorf("child received %d Enters, want 1", n)
+	}
+	if got := submits(evs); len(got) != 1 || got[0] != text {
+		t.Errorf("child submitted %q, want exactly [%q]", got, text)
 	}
 }
 
