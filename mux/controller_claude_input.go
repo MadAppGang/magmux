@@ -70,6 +70,9 @@ type promptMark struct {
 type claudeBaseline struct {
 	matchCount    int    // entries on the CheckBox screen that already match
 	transcriptSeq uint64 // lastPrompt.seq at the CheckBox read
+	// renderedKey of the verified and of the sent text: what a HISTORY entry
+	// is compared with, because Claude renders markdown there (F10).
+	verifiedRendered, sentRendered string
 }
 
 // notePrompt records a real transcript user entry.
@@ -276,11 +279,11 @@ func (c *ClaudeCodeController) CheckBox(want BoxExpect) BoxCheck {
 	verdict, verified, paste, detail := judgeBox(sc, want)
 	out.Verdict, out.Verified, out.Detail = verdict, verified, detail
 	if verdict == BoxVerified {
-		sentKey := sc.BoxKey
+		sent := sc.BoxText
 		if want.Exact != "" {
-			sentKey = inputKey(want.Exact)
+			sent = want.Exact
 		}
-		out.Baseline = newAcceptBaseline(sc, sc.BoxKey, sentKey, paste, now, c.transcriptSeq())
+		out.Baseline = newAcceptBaseline(sc, sc.BoxText, sent, paste, now, c.transcriptSeq())
 	}
 	return out
 }
@@ -324,9 +327,14 @@ func judgeBox(sc claudeScreen, want BoxExpect) (v BoxVerdict, verified string, p
 }
 
 // newAcceptBaseline takes the baseline from the screen the verify read.
-func newAcceptBaseline(sc claudeScreen, verifiedKey, sentKey string, paste int, at time.Time, seq uint64) AcceptBaseline {
-	b := AcceptBaseline{At: at, VerifiedKey: verifiedKey, SentKey: sentKey, Paste: paste}
-	b.controllerData = claudeBaseline{matchCount: countMatches(sc.Prompts, b), transcriptSeq: seq}
+// verified is the box text the verify read; sent is the text the send put
+// there (Exact), or the box text again when that is undetermined.
+func newAcceptBaseline(sc claudeScreen, verified, sent string, paste int, at time.Time, seq uint64) AcceptBaseline {
+	b := AcceptBaseline{At: at, VerifiedKey: inputKey(verified), SentKey: inputKey(sent), Paste: paste}
+	cd := claudeBaseline{transcriptSeq: seq, verifiedRendered: renderedKey(verified), sentRendered: renderedKey(sent)}
+	b.controllerData = cd // countMatches reads the rendered keys from it
+	cd.matchCount = countMatches(sc.Prompts, b)
+	b.controllerData = cd
 	return b
 }
 
@@ -338,24 +346,31 @@ func newAcceptBaseline(sc claudeScreen, verifiedKey, sentKey string, paste int, 
 //     but EXPANDED in history (s3 paste-submitted, auto-long-submitted, s4
 //     queued-paste), so a paste_token send's entry carries the sent text, not
 //     the token;
+//   - its RENDERED key equals the verified or sent text's rendered key.
+//     Claude renders markdown in history and not in the box (F10, s6), so a
+//     prompt with a backticked path — claudish's launch line — never has
+//     equal raw keys; the rendered form folds '`', '*' and '~' on both sides;
 //   - it begins with the baselined paste token;
 //   - its key is at least historyMatchMin runes and the verified or sent key
-//     starts with it (a history row Claude abbreviated; unseen in 2.1.301).
+//     starts with it (a history row Claude abbreviated; unseen in 2.1.301),
+//     in either form.
 func matches(e promptEntry, b AcceptBaseline) bool {
 	if e.Key == "" {
 		return false
 	}
-	if e.Key == b.VerifiedKey || e.Key == b.SentKey {
+	cd, _ := b.controllerData.(claudeBaseline)
+	if e.Key == b.VerifiedKey || e.Key == b.SentKey ||
+		(e.RenderedKey != "" && (e.RenderedKey == cd.verifiedRendered || e.RenderedKey == cd.sentRendered)) {
 		return true
 	}
 	if b.Paste > 0 && e.Paste == b.Paste {
 		return true
 	}
-	if utf8.RuneCountInString(e.Key) < historyMatchMin {
-		return false
+	prefixOf := func(full, part string) bool {
+		return full != "" && part != "" && utf8.RuneCountInString(part) >= historyMatchMin && strings.HasPrefix(full, part)
 	}
-	return (b.VerifiedKey != "" && strings.HasPrefix(b.VerifiedKey, e.Key)) ||
-		(b.SentKey != "" && strings.HasPrefix(b.SentKey, e.Key))
+	return prefixOf(b.VerifiedKey, e.Key) || prefixOf(b.SentKey, e.Key) ||
+		prefixOf(cd.verifiedRendered, e.RenderedKey) || prefixOf(cd.sentRendered, e.RenderedKey)
 }
 
 func countMatches(es []promptEntry, b AcceptBaseline) int {

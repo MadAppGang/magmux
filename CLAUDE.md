@@ -810,7 +810,13 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   them. `inputKey` is the ONE normaliser (whitespace and wrap removed, bounded
   after removal), so a box that wrapped the prompt over nine rows and the
   unwrapped text that was sent compare equal; a second normaliser would drift
-  the first time Claude rewraps.
+  the first time Claude rewraps. Its one other mode, `renderedKey`, also folds
+  '`', '*' and '~' and is used ONLY to match a HISTORY entry against the
+  verified/sent text, because Claude renders markdown in history but shows it
+  raw in the box (research F10: claudish's backticked launch line was taken 5/5
+  and reported `unconfirmed`) — the box verify, the InBox check and the
+  transcript (raw text) stay on `inputKey`. `TestMarkdownPromptAccepted`,
+  `TestMarkdownFoldDoesNotWidenToOtherWords`, `TestBoxShowsMarkdownRaw`.
   `InputAccepted` checks Taken BEFORE InBox: a screen can show the submitted
   entry and a stale box frame at once, and Taken is the truth. Up to three 2 s
   windows, at most one guarded re-sent Enter (re-verified first).

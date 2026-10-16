@@ -20,6 +20,7 @@ A screen at a label is `raw[0:offset]` replayed through the VT parser into a 100
 | `s3-paste` | a 4-line bracketed paste collapsed to `[Pasted text #1 +3 lines]`; a small paste NOT collapsed; a 955-byte single-line auto send collapsed to `[Pasted text #2]`; history shows both expanded |
 | `s4-midturn` | a running turn (4 frames); a queued mid-turn send with its `ctrl+x ctrl+s to send now` hint and the faint `Press up to edit queued messages` placeholder (3 frames); a queued paste-mode send; after both ran |
 | `s5-insert-plan` | vim on: `-- INSERT --` footer (the status line's ` I ` is the user's own); the ExitPlanMode dialog |
+| `s6-markdown` | research F10: a markdown probe in the box (raw) and in history (rendered: `` ` `` `**` `*` `~~` dropped, `_` `[]()` `<b>` `\*` kept); claudish's backticked launch line in both; after it, Claude's faint (SGR 2) suggested next prompt in the box |
 
 Derived frames (offsets with no mark, named in `claude_screen_test.go`): Claude ends every
 frame with `ESC[?25h`, so a prefix ending there is a complete frame.

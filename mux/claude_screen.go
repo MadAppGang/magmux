@@ -49,10 +49,13 @@ type claudeScreen struct {
 // promptEntry is one user prompt as Claude shows it in the conversation: a `❯`
 // row at column 0 plus its continuation rows.
 type promptEntry struct {
-	Text   string // joined like BoxText
-	Key    string // inputKey(Text)
-	Paste  int    // N when Text begins with `[Pasted text #N`; 0 otherwise
-	Queued bool   // the F9 hint row `ctrl+x ctrl+s to send now` followed it
+	Text string // joined like BoxText
+	Key  string // inputKey(Text)
+	// RenderedKey is renderedKey(Text): Claude renders markdown in history,
+	// so this, not Key, is what acceptance compares (F10).
+	RenderedKey string
+	Paste       int  // N when Text begins with `[Pasted text #N`; 0 otherwise
+	Queued      bool // the F9 hint row `ctrl+x ctrl+s to send now` followed it
 }
 
 const (
@@ -142,11 +145,36 @@ var dismissableWithoutHint = map[string]bool{"plan": true}
 // inputKeyMax bytes plus its total non-space rune count, so a huge paste costs
 // a bounded comparison. The bound is applied AFTER whitespace is removed, so
 // the bounded key is as wrap-independent as the unbounded one.
-func inputKey(s string) string {
+func inputKey(s string) string { return normaliseKey(s, keyRaw) }
+
+// renderedKey is inputKey in its RENDERED mode, for one comparison only: a
+// HISTORY entry against the text a send verified or sent. Claude renders
+// markdown in the history copy of a user prompt and shows the raw text in the
+// box (research F10, testdata s6-markdown): `code` → code, “x“ → x,
+// **b** → b, *i* → i, ~~s~~ → s, while `_u_`, links, tags, `a\*b` and
+// mid-line `#`/`>`/`-`/`1.` are kept as typed. So the three delimiter runes
+// '`', '*' and '~' are removed as well, from BOTH sides. Everything else —
+// the box verify above all, which must stay exact against the raw box, the
+// box-still-holds-it check and the transcript (which stores the raw text) —
+// keeps inputKey.
+func renderedKey(s string) string { return normaliseKey(s, keyRendered) }
+
+// keyMode selects inputKey's two forms; normaliseKey is their one body.
+type keyMode uint8
+
+const (
+	keyRaw      keyMode = iota // whitespace removed
+	keyRendered                // whitespace and the markdown delimiters removed
+)
+
+// isMarkdownDelim: the runes Claude's history rendering drops (F10).
+func isMarkdownDelim(r rune) bool { return r == '`' || r == '*' || r == '~' }
+
+func normaliseKey(s string, mode keyMode) string {
 	var b strings.Builder
 	n, over := 0, false
 	for _, r := range s {
-		if unicode.IsSpace(r) {
+		if unicode.IsSpace(r) || (mode == keyRendered && isMarkdownDelim(r)) {
 			continue
 		}
 		n++
@@ -369,7 +397,7 @@ func parsePromptEntries(region []styledRow) []promptEntry {
 			}
 		}
 		text := joinRows(first, skip, region[i+1:j])
-		e := promptEntry{Text: text, Key: inputKey(text), Queued: queued}
+		e := promptEntry{Text: text, Key: inputKey(text), RenderedKey: renderedKey(text), Queued: queued}
 		if m := pasteTokenRe.FindStringSubmatchIndex(text); m != nil && m[0] == 0 {
 			e.Paste, _ = strconv.Atoi(text[m[2]:m[3]])
 		}

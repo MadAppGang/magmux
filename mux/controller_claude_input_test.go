@@ -339,8 +339,7 @@ func TestCheckBox(t *testing.T) {
 // need a baseline for content that never reached the box).
 func baselineAt(t *testing.T, c *ClaudeCodeController, sc claudeScreen, sent string) AcceptBaseline {
 	t.Helper()
-	k := inputKey(sent)
-	return newAcceptBaseline(sc, k, k, 0, time.Now(), c.transcriptSeq())
+	return newAcceptBaseline(sc, sent, sent, 0, time.Now(), c.transcriptSeq())
 }
 
 func TestInputAccepted(t *testing.T) {
