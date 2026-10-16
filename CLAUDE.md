@@ -850,7 +850,7 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   `TestDismissWaitsForTypingToken`.
 
 - **Acceptance is two steps, and a submit needs both.** (1) No Enter without a
-  VERIFIED box: `CheckBox` after the settle must find `exact` (the `inputKey`
+  VERIFIED box: the settle wait (`settleBox`) must find `exact` (the `inputKey`
   of the box equals what was typed), `paste_token` (a NEW `[Pasted text #N` above
   the post-token `MaxPaste`) or, when the content is unknowable from the
   request, `non_empty`; anything else is `not_accepted` with Enter withheld.
@@ -893,8 +893,15 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   in their order while live output is inserted above it (`queued-c →
   queued-paste`). So the baseline records the ORDERED list of visible entries
   (`entryID`: kind + key), whether the top of the conversation was on screen
-  (`topVisible`: the banner, or a conversation that FITS — content from the
-  region's top and padding above the box or at the screen's bottom), and the
+  (`topVisible`: Claude's welcome banner as the region's first rows, and
+  NOTHING else — r3 review M3 removed a second "the conversation fits"
+  rule, padding above the box or under an inline layout, because it matched
+  none of the 31+ real 2.1.301 capture marks and, where it fired, a shrinking
+  box revealed an older identical entry that then counted as new: a false ok.
+  `TestTopVisibleOnRealCaptures` validates it against every real mark;
+  `TestShrinkingBoxRevealingAnOlderEntryIsNoEvidence` is the counterexample.
+  A synthetic screen that wants history evidence for a first entry must draw
+  the banner, as real short conversations do), and the
   last entry's rows. `newEntriesFrom` places that list in the later screen's:
   the baseline must appear as an aligned run ending where it ended — whole,
   possibly under older entries a shrinking box brought back (refused when the
@@ -924,7 +931,14 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   user entry by its ENQUEUE's (`dequeuedAt`), so an older queued `continue` that
   runs after a new identical send's verify is never that send's (review r3 M2).
   An absorbed prompt never becomes a user entry and is dropped from the queue,
-  so it cannot misdate the next identical send. A record counts when it was
+  so it cannot misdate the next identical send; nor can any OTHER queued
+  prompt that never becomes one (r3 review M4): its `queued_command`
+  attachment consumes the queue entry, and a dequeued entry dates only a user
+  entry written within `dequeueMaxLag` (2 s) of its `remove` — so one restored
+  to the box with Up/Esc, or removed for a reason F11 never measured, expires
+  instead of dating the next identical prompt minutes later as old.
+  `TestRemovedUnsentQueuedPromptDoesNotMisdateTheNextSend`,
+  `TestDequeuedPromptStillDatesItsOwnUserEntry`. A record counts when it was
   read after the verify (sequence), its key matches, and `writtenSince` holds
   (at or after the verify, truncated to Claude's millisecond); no timestamp is
   never fresh. `TestTranscriptOldEntryConsumedLateIsNotEvidence`,
@@ -932,17 +946,66 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   `TestEarlierIdenticalQueuedSendIsNotEvidence`,
   `TestAbsorbedQueuedPromptDoesNotMisdateTheNextSend`.
 
-- **An emptied box is retyped ONCE.** The late startup stdin reset can swallow
-  the typed text whole (the real-Claude smoke: 1 of 5 early sends answered
-  `text_mismatch` over an empty box). When the pre-Enter verify finds the box
-  COMPLETELY empty (`BoxEmpty`: no typed rune, placeholder only) after a send
-  that typed knowable content (`Exact` set) into an empty box, nothing was
-  submitted and nothing partial exists, so retyping cannot duplicate: the
+- **The pre-Enter verify is a SETTLE WAIT, never one read.** Claude Code
+  2.1.301 can take 300–800 ms to DRAW typed text into its box (an Ink frame,
+  worse under load), so a single read after the 150 ms `SendSettle` saw an
+  empty box for text that had arrived (the real-Claude e2e, V1: correct sends
+  refused, and a retype that put the text in the box TWICE — `the box holds 96
+  of 48`). `settleBox` reads the box every `SendVerifyStep` (40 ms), each read
+  a synchronous `CheckBox` (termios sample + fresh screen), until it VERIFIES;
+  or until its content (`BoxCheck.Box`, verdict, detail) has been unchanged
+  for `SendVerifySettle` (1 s) and still mismatches; or until `SendVerifyMax`
+  (3 s) after the first ready read, capped by the readiness deadline. A
+  not-ready read restarts the stability clock. The constants are protocol's
+  and `SendBudget` counts them: the windows sit inside the readiness deadline,
+  and the typing + `SendSettle` + one `SendVerifyStep` overshoot are counted
+  per attempt, twice (the retype). `SendVerifySettle` is above the worst lag
+  measured, with margin, because it is what licenses the retype below.
+  `TestRenderLagVerifiesWithoutRetype`, `TestRenderLagRealController`,
+  `TestRenderLagBeyondWindowIsMismatchNoRetype`,
+  `TestVerifyWindowNeverPassesTheDeadline`,
+  `TestREQ4_RenderLagIsWaitedForNotRetyped`.
+
+- **An emptied box is retyped ONCE, and only on POSITIVE evidence of loss.**
+  The late startup stdin reset can swallow the typed text whole, and that
+  reset is a TERMIOS event. So the retype needs all of: the settle wait ended
+  with the box COMPLETELY empty (`BoxEmpty`: placeholder only) on every ready
+  read for the WHOLE settle interval; the pty's termios fingerprint CHANGED
+  after the attempt's first byte (`BoxExpect.TypedAt` →
+  `BoxCheck.TermiosChanged`, from the ttyWatch history the hot sampler keeps);
+  the send typed knowable content (`Exact`) into an empty box; and nothing was
+  submitted (next bullet). A box that is only slow to draw shows no termios
+  change and is `text_mismatch` ("it stayed empty but the terminal showed no
+  stdin reset"), never a retype — one empty read was V1's double text. The
   delivery goes back through the gate to the SAME deadline, types again, and
-  verifies again. The ok reply carries `retyped:true` (additive). Lost twice
-  is `text_mismatch`; a box holding PARTIAL text is never retyped.
-  `TestEmptiedBoxIsRetypedOnce`, `TestEmptiedBoxTwiceIsTextMismatch`,
-  `TestPartialBoxIsNeverRetyped`, `TestREQ4_LostTextIsRetypedOnceThenConfirmed`.
+  settles again; `retyped:true` (additive) is set only once a retype byte has
+  actually gone in. Lost twice is `text_mismatch`; a box holding PARTIAL text,
+  one still changing when the window closed, or one that EVER held MORE than
+  was typed (`BoxCheck.Excess`, both renders landed) is never retyped — the
+  last is `text_mismatch` saying `the box holds more than was typed`.
+  `TestEmptiedBoxIsRetypedOnce`, `TestTrulyLostTextIsRetypedOnceThenOK`,
+  `TestEmptyWithoutTermiosChangeIsNotRetyped`,
+  `TestRealControllerRetypesOnlyAfterAReset`,
+  `TestCheckBoxReportsTermiosChangeSinceTheFirstByte`,
+  `TestEmptiedBoxTwiceIsTextMismatch`, `TestPartialBoxIsNeverRetyped`,
+  `TestDoubleTextAfterRetypeIsMismatchNoSecondRetype`,
+  `TestExcessSeenOnceForbidsRetype`, `TestEmptyShorterThanSettleIsNotRetyped`,
+  `TestNotReadyReadRestartsTheSettleClock`,
+  `TestREQ4_LostTextIsRetypedOnceThenConfirmed`.
+
+- **An emptied box may have been SUBMITTED by somebody else, so it is asked
+  before any retype.** A human keystroke (`writePTY`), a `noGate` send or a
+  remote `input` op takes no typing token, so its Enter can submit this send's
+  text while it sits in the box (r3 review M2). The gate's post-token read
+  carries `InputReadiness.Pre`, an acceptance baseline for the content about
+  to be typed (`ReadinessQuery.Baseline`), taken from the SAME read that
+  authorised the first byte — no extra read between that check and the byte.
+  Whenever the settle wait ends on an empty box, `InputAccepted(pre)` runs
+  first: a new user entry or fresh transcript record for the text means it
+  was taken, and the send answers ok (`accept:"confirmed"` with that evidence)
+  and is NEVER retyped. No baseline means no retype: the check fails closed.
+  `TestSubmittedByAnotherEnterIsNeverRetyped`,
+  `TestSubmittedByAnotherEnterRealController`.
 
 - **History shows a collapsed paste EXPANDED, so a paste is confirmed by the
   text it SENT.** Claude 2.1.301 never writes a `[Pasted text #N]` history

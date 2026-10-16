@@ -310,15 +310,26 @@ func TestAbsorbedQueuedPromptDoesNotMisdateTheNextSend(t *testing.T) {
 
 // ── 5 (the real-Claude smoke): an emptied box is retyped once ──────────────
 
+// boxEmptyCheck is an empty box with the terminal unchanged since the first
+// byte: text slow to draw, or nothing evidencing a loss. lostBoxCheck is an
+// empty box after a termios change: the stdin reset that swallows text.
 func boxEmptyCheck() BoxCheck { return BoxCheck{Readiness: readyNow(), Verdict: BoxEmpty} }
 
+func lostBoxCheck() BoxCheck {
+	return BoxCheck{Readiness: readyNow(), Verdict: BoxEmpty, TermiosChanged: true}
+}
+
+// The box must stay empty for the whole settle interval (verifySettle) before
+// the retype: ONE empty read is a slow frame, not lost text
+// (TestRenderLagVerifiesWithoutRetype).
 func TestEmptiedBoxIsRetypedOnce(t *testing.T) {
-	g := &fakeGate{checkFn: func(_ BoxExpect, n int) BoxCheck {
-		if n == 0 {
-			return boxEmptyCheck() // the late startup reset swallowed the text
+	g := &fakeGate{}
+	g.checkFn = func(BoxExpect, int) BoxCheck {
+		if strings.Count(g.log.String(), "hello") < 2 {
+			return lostBoxCheck() // the late startup reset swallowed the text
 		}
 		return verifiedBox(verifiedExact)
-	}}
+	}
 	m, _, log := gatedMux(t, g)
 	o := runSend(t, m, sendRequest{text: "hello", enter: true})
 	if o.err != nil {
@@ -338,7 +349,7 @@ func TestEmptiedBoxIsRetypedOnce(t *testing.T) {
 }
 
 func TestEmptiedBoxTwiceIsTextMismatch(t *testing.T) {
-	g := &fakeGate{checkFn: func(BoxExpect, int) BoxCheck { return boxEmptyCheck() }}
+	g := &fakeGate{checkFn: func(BoxExpect, int) BoxCheck { return lostBoxCheck() }}
 	m, _, log := gatedMux(t, g)
 	o := runSend(t, m, sendRequest{text: "hello", enter: true})
 	wantErr(t, o, protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true)

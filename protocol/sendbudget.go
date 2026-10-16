@@ -26,8 +26,22 @@ const (
 	SendTypedChunkGap   = 8 * time.Millisecond
 	// SendKeyGap is the pause before each named key.
 	SendKeyGap = 20 * time.Millisecond
-	// SendSettle is the pause before the box is verified.
+	// SendSettle is the pause before the box is first read.
 	SendSettle = 150 * time.Millisecond
+	// The pre-Enter verify is a bounded SETTLE WAIT, not one read: Claude Code
+	// can take several hundred milliseconds (an Ink frame, longer under load)
+	// to draw typed text into its box, so a single read after SendSettle can
+	// see an empty box for text that is merely not drawn yet. The box is read
+	// every SendVerifyStep until it holds what was typed, or until its content
+	// has been unchanged for SendVerifySettle and still differs, or until
+	// SendVerifyMax after the first ready read. SendVerifySettle exceeds the
+	// worst render lag measured (~800 ms) with margin, because a box that is
+	// EMPTY for the whole settle interval is what licenses the one auto-retype,
+	// and retyping text that was only slow to draw puts it in the box twice.
+	// Every verify is also capped by the readiness deadline.
+	SendVerifyStep   = 40 * time.Millisecond
+	SendVerifySettle = 1000 * time.Millisecond
+	SendVerifyMax    = 3 * time.Second
 	// SendGateCheckCost is the allowance for the readiness check made before
 	// every write after the first.
 	SendGateCheckCost = 2 * time.Millisecond
@@ -62,15 +76,22 @@ func ReadyWait(ms int) time.Duration {
 }
 
 // SendBudget is the upper bound on how long a gated send can take from the
-// moment it starts running. The gate, the typing token and the pre-Enter
-// re-wait share ONE deadline, so the readiness wait is counted once.
+// moment it starts running. The gate, the typing token, the pre-Enter
+// re-wait and the verify's settle wait share ONE deadline, so the readiness
+// wait is counted once and covers every verify window (SendVerifyMax is
+// capped by it). What runs outside that deadline is counted per ATTEMPT: the
+// typing, the SendSettle pause, and the one verify read that may land past
+// the deadline (SendVerifyStep). A send can make two attempts (the one
+// auto-retype of an emptied box), so the attempt is counted twice.
 func SendBudget(s SendShape) time.Duration {
 	b := ReadyWait(s.ReadyTimeoutMs)
+	var attempt time.Duration
 	if s.Typed {
-		b += time.Duration(s.TypedWrites) * (SendTypedChunkGap + SendGateCheckCost)
+		attempt += time.Duration(s.TypedWrites) * (SendTypedChunkGap + SendGateCheckCost)
 	}
-	b += time.Duration(s.Keys) * (SendKeyGap + SendGateCheckCost)
-	b += SendSettle // every gated send verifies the box after the settle
+	attempt += time.Duration(s.Keys) * (SendKeyGap + SendGateCheckCost)
+	attempt += SendSettle + SendVerifyStep // every gated send verifies the box after the settle
+	b += 2 * attempt
 	if s.Submit {
 		b += SendAcceptWindows * SendAcceptWindow
 	}

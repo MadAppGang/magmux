@@ -32,10 +32,11 @@ func TestSendBudgetWorkedValues(t *testing.T) {
 		s    SendShape
 		want int64
 	}{
-		{"short submit", SendShape{Submit: true}, 18150},
-		{"500 keys and a submit", SendShape{Keys: 500, Submit: true}, 18150 + 500*22},
-		{"readyTimeoutMs 60000", SendShape{ReadyTimeoutMs: 60000, Submit: true}, 68150},
-		{"a TYPE", SendShape{Typed: true, TypedWrites: 3}, 10000 + 3*10 + 150 + 2000},
+		// one attempt = typing + SendSettle (150) + SendVerifyStep (40); two attempts.
+		{"short submit", SendShape{Submit: true}, 10000 + 2*190 + 6000 + 2000},
+		{"500 keys and a submit", SendShape{Keys: 500, Submit: true}, 10000 + 2*(500*22+190) + 6000 + 2000},
+		{"readyTimeoutMs 60000", SendShape{ReadyTimeoutMs: 60000, Submit: true}, 60000 + 2*190 + 6000 + 2000},
+		{"a TYPE", SendShape{Typed: true, TypedWrites: 3}, 10000 + 2*(3*10+190) + 2000},
 	} {
 		if got := ms(SendBudget(c.s)); got != c.want {
 			t.Errorf("%s: %dms, want %dms", c.name, got, c.want)

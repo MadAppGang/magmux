@@ -26,8 +26,11 @@
 //	FAKE_NO_HISTORY=1   Enter clears the box but never adds a history entry
 //	FAKE_IGNORE_ENTERS  number of Enter presses ignored before one submits
 //	FAKE_EXIT_MS        exit(0) at this time; -1 never         (default -1)
+//	FAKE_RENDER_DELAY_MS  input is applied at once but the screen is redrawn
+//	                    this long after it (Ink's frame lag under load); 0 = at
+//	                    once                                   (default 0)
 //
-// Screen shape (F7): a `❯ <text>` box row at column 0 between two full-width
+// Screen shape (F7): the 2.1.301 welcome banner at the top, a `❯ <text>` box row at column 0 between two full-width
 // `─` rules, wrapped rows indented two spaces, an empty box shows a FAINT
 // (SGR 2) `Try "…"` placeholder; a submitted prompt moves above the box as a
 // `❯ <text>` history row with markdown delimiters ` * ~ removed (F10).
@@ -134,6 +137,7 @@ var (
 	noHistory  = os.Getenv("FAKE_NO_HISTORY") == "1"
 	loseOnIn   = os.Getenv("FAKE_LOSE_ON_INPUT") == "1"
 	ignoreEnts = envInt("FAKE_IGNORE_ENTERS", 0)
+	renderLag  = time.Duration(envInt("FAKE_RENDER_DELAY_MS", 0)) * time.Millisecond
 	outMu      sync.Mutex
 )
 
@@ -193,7 +197,14 @@ func rule(cols int) string { return strings.Repeat("─", cols) }
 func renderLocked() {
 	rows, cols := size()
 	var lines []string
-	lines = append(lines, "✻ Welcome to the agent", "")
+	// The welcome banner, as 2.1.301 draws it at the top of every
+	// conversation (s1): magmux's proof that the conversation's top is on
+	// screen, so every user-prompt entry under it is accounted for.
+	lines = append(lines,
+		" ▐▛███▛█   Claude Code v2.1.301",
+		"▝▜██████▀  Haiku 5.5 · Claude Max",
+		" ▝▝   ▝▝   ~/fake",
+		"")
 	for _, h := range st.history {
 		lines = append(lines, wrap(h, cols)...)
 		lines = append(lines, "⏺ ack", "")
@@ -414,7 +425,11 @@ func readLoop() {
 			logEv("in", map[string]any{"data": string(chunk), "dropped": dropped})
 			if !dropped {
 				feed(chunk)
-				renderLocked()
+				if renderLag > 0 {
+					time.AfterFunc(renderLag, render)
+				} else {
+					renderLocked()
+				}
 			}
 			st.mu.Unlock()
 			if trigger {

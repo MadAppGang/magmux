@@ -125,11 +125,15 @@ func (f *fakeGate) InputReadiness(q ReadinessQuery) InputReadiness {
 	f.note("ready")
 	fn := f.readyFn
 	f.mu.Unlock()
-	if fn == nil {
-		return readyNow()
+	r := readyNow()
+	if fn != nil {
+		r = fn(q, n)
+		r.Gated = true
 	}
-	r := fn(q, n)
-	r.Gated = true
+	if r.Ready && q.Baseline != "" && r.Pre.At.IsZero() {
+		// A pre-typing baseline, recognisable by InputAccepted's default.
+		r.Pre = AcceptBaseline{At: time.Now(), VerifiedKey: fakePreKey, SentKey: fakePreKey}
+	}
 	return r
 }
 
@@ -155,6 +159,9 @@ func (f *fakeGate) InputAccepted(b AcceptBaseline) AcceptVerdict {
 	fn := f.acceptFn
 	f.mu.Unlock()
 	if fn == nil {
+		if b.SentKey == fakePreKey {
+			return AcceptVerdict{State: AcceptNone} // nothing was submitted before the retype
+		}
 		return AcceptVerdict{State: AcceptTaken, Evidence: evidenceHistory}
 	}
 	return fn(b, n)
@@ -183,6 +190,9 @@ func (f *fakeGate) lastExpect() BoxExpect {
 
 // settleQuick is String without the sleep, for use under fakeGate.mu.
 func (l *byteLog) settleQuick() string { return l.String() }
+
+// fakePreKey marks fakeGate's pre-typing baselines.
+const fakePreKey = "fake:pre"
 
 func readyNow() InputReadiness { return InputReadiness{Gated: true, Ready: true} }
 

@@ -95,7 +95,7 @@ func TestSharedPrefixSecondSendNeedsItsOwnEntry(t *testing.T) {
 	if len(p1) < 48 || p1[:60] != p2[:60] {
 		t.Fatalf("the prompts must share a long prefix")
 	}
-	idle := []string{"⏺ Ready."}
+	idle := cat(claudeBanner, []string{"⏺ Ready."}) // a short conversation: the banner is on screen
 	s0 := claudeLines(synthRows, synthCols, idle, "", idlePlaceholder)
 	box1 := claudeLines(synthRows, synthCols, idle, p1, "")
 	conv1 := cat(idle, []string{""}, entryRows(p1))

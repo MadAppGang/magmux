@@ -173,6 +173,11 @@ type ReadinessQuery struct {
 	Class SendClass
 	Types bool // the delivery puts characters into the box: rule h (box_not_empty) applies
 	Paste bool // the text goes out bracketed: rule i (bracketed paste on) applies
+	// Baseline, when set, is the content this delivery will type into an
+	// empty box; the answer then carries Pre, an acceptance baseline for it
+	// taken from the SAME read. It is what lets a delivery ask, before a
+	// retype, whether somebody else's Enter already submitted its text.
+	Baseline string
 }
 
 // InputReadiness is one readiness answer. Gated is false for a pane nobody
@@ -185,6 +190,9 @@ type InputReadiness struct {
 	Dismissable bool   `json:"dismissable,omitempty"` // a dialog Escape declines is showing
 	BoxHasText  bool   `json:"boxHasText,omitempty"`  // the box holds text
 	MaxPaste    int    `json:"-"`                     // largest [Pasted text #N] on screen
+	// Pre is the acceptance baseline for ReadinessQuery.Baseline, from this
+	// read (zero when no Baseline was asked for, or the gate cannot take one).
+	Pre AcceptBaseline `json:"-"`
 }
 
 // BoxExpect is what the delivery knows it put in the box.
@@ -200,6 +208,10 @@ type BoxExpect struct {
 	// WIDENS what verifies; equality still verifies.
 	Pasted     bool
 	PasteAbove int // MaxPaste at the post-token check; a verifying token must exceed it
+	// TypedAt is the moment of this attempt's first byte: a termios change
+	// after it (BoxCheck.TermiosChanged) is the positive evidence of a reset
+	// that the auto-retype requires.
+	TypedAt time.Time
 }
 
 // BoxVerdict is CheckBox's judgement of the box.
@@ -219,6 +231,18 @@ type BoxCheck struct {
 	Verified  string // "exact" | "paste_token" | "non_empty" (when BoxVerified)
 	Detail    string
 	Baseline  AcceptBaseline // from THIS read (when BoxVerified)
+	// Box is the content the box was judged on (the controller's own key of
+	// it), when Readiness.Ready. The settle wait compares it read to read to
+	// tell a box still being drawn from one that has stopped changing.
+	Box string
+	// Excess: a mismatch where the box holds MORE than the send typed (the
+	// text drawn twice). It forbids the auto-retype.
+	Excess bool
+	// TermiosChanged: the pty's termios fingerprint changed after
+	// BoxExpect.TypedAt (a cooked/reset sample in the watch's history). It
+	// is the evidence that typed text was SWALLOWED by a stdin reset, rather
+	// than merely slow to draw, and the auto-retype requires it.
+	TermiosChanged bool
 }
 
 // Verified values.

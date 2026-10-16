@@ -310,6 +310,34 @@ func TestREQ4_LostTextIsRetypedOnceThenConfirmed(t *testing.T) {
 	}
 }
 
+// TEST-15b (REQ-4, the V1 render-lag defect): the child applies the text at
+// once but draws it 600 ms late, as Claude Code's frame does under load. The
+// box reads empty for a while after the text arrived — a slow frame, not lost
+// text — so magmux must wait for it: ok, verified, NO retype, the text
+// reached the child exactly once, and the child submitted it exactly once.
+func TestREQ4_RenderLagIsWaitedForNotRetyped(t *testing.T) {
+	t.Parallel()
+	m, cn, pane := declared(t, fake{"FAKE_RENDER_DELAY_MS": "600"})
+	text := "slow " + shortID(t)
+
+	r := cn.send(pane, map[string]any{"text": text})
+
+	res := wantGatedOK(t, r)
+	if _, ok := res["retyped"]; ok {
+		t.Errorf("a slow render was retyped; reply: %s", r)
+	}
+	evs := m.events(t)
+	if n := strings.Count(received(evs), text); n != 1 {
+		t.Errorf("the text reached the child %d times, want exactly 1", n)
+	}
+	if n := countEnter(received(evs)); n != 1 {
+		t.Errorf("child received %d Enters, want 1", n)
+	}
+	if got := submits(evs); len(got) != 1 || got[0] != text {
+		t.Errorf("child submitted %q, want exactly [%q]", got, text)
+	}
+}
+
 // TEST-16 (REQ-4, class TYPE): text with enter:false is typed and verified,
 // replies in_box, and nothing is submitted.
 func TestREQ4_TypeWithoutEnterRepliesInBox(t *testing.T) {

@@ -52,9 +52,6 @@ type claudeScreen struct {
 	// where acceptance finds the top of the conversation and a scrolled-off
 	// entry's tail.
 	conv []styledRow
-	// blankTail is how many rows at the very bottom of the screen are blank: a
-	// box that is not at the bottom (an inline layout with room to spare).
-	blankTail int
 }
 
 // promptEntry is one user prompt as Claude shows it in the conversation: a `❯`
@@ -353,9 +350,6 @@ func parseClaudeScreen(rows []styledRow, cols int) claudeScreen {
 		sc.Prompts = parsePromptEntries(rows[:top])
 	} else {
 		sc.Dialog, sc.Dismissable = parseDialog(rows, cols)
-	}
-	for i := len(rows) - 1; i >= 0 && strings.TrimSpace(plain(rows[i])) == ""; i-- {
-		sc.blankTail++
 	}
 	for _, n := range sc.BoxPastes {
 		sc.MaxPaste = max(sc.MaxPaste, n)

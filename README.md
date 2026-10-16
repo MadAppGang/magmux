@@ -723,7 +723,11 @@ add `noGate`.
    Claude queues the prompt.
 2. **Type**, with the same check before every write after the first. A dialog
    that appears partway stops the typing.
-3. **Verify the box** after a 150 ms settle. It must hold exactly what was typed
+3. **Verify the box**, starting 150 ms after the last byte. Claude can take
+   several hundred milliseconds to draw what was typed, so this is a wait, not
+   one look: magmux re-reads the box every 40 ms until it holds what was
+   typed, or until its content has stopped changing for 1 s, for at most 3 s
+   (and never past the `readyTimeoutMs` deadline). It must hold exactly what was typed
    (`verified:"exact"`), or show a new `[Pasted text #N …]` token for a paste
    (`paste_token`). When the content cannot be known from the request, because
    the box was not empty or an editing key ran, it must at least not be empty
@@ -734,16 +738,22 @@ add `noGate`.
    (`transcript`). An emptied box is never evidence, because a lost prompt
    looks exactly like a submitted one. If the text is still in the box, magmux
    verifies it again and presses Enter once more, and the reply then says
-   `accept:"resent_enter"`. If the verify finds the box COMPLETELY empty
-   (the text was swallowed whole, as a late startup terminal reset can do),
-   nothing was submitted and nothing partial is left, so magmux goes back to
-   step 1 and types it ONCE more, within the same deadline; the ok reply then
-   carries `retyped:true`. A box holding part of the text is never retyped.
+   `accept:"resent_enter"`. If the box stays COMPLETELY empty for that whole
+   second AND the terminal went through a reset after the text was typed (a
+   late startup terminal reset swallows the text whole), nothing was
+   submitted and nothing partial is left, so magmux goes back to step 1 and
+   types it ONCE more, within the same deadline; the ok reply then carries
+   `retyped:true`. Before retyping, magmux checks whether the text was in fact
+   submitted by another Enter (a person at the keyboard, say); if it was, the
+   reply is ok with that evidence and nothing is retyped. An empty box with no
+   terminal reset is only slow to draw or not explained, so it is
+   `text_mismatch`, never a retype. A box holding part of the text, or more
+   than was typed, is never retyped.
 
 `readyTimeoutMs` (default 10000, at most 60000) is ONE deadline. Waiting for
-the box, waiting for another delivery to finish typing into the same pane, and
-the pre-Enter re-wait all share it, so it is the most a send ever waits for
-readiness.
+the box, waiting for another delivery to finish typing into the same pane, the
+pre-Enter re-wait and the verify's wait for the text to be drawn all share it,
+so it is the most a send ever waits for readiness.
 
 ```jsonc
 --> {"type":"send","id":9,"pane":2,"text":"run the tests"}
@@ -786,7 +796,7 @@ prescribe a retry.
 | `busy` `dialog:<kind>` | no | a blocking dialog: `permission`, `question`, `plan`, `select`, `trust`, `bypass`, `api_key` or `onboarding`. Only Escapes were written before typing |
 | `busy` `typing_in_progress` | no | another delivery was still typing into the pane at the deadline |
 | `busy` with `typed:true` | no | the text was typed and the Enter withheld, by a dialog or by a terminal that did not come back in time. The box may hold the text, or part of it |
-| `not_accepted` `text_mismatch` | no | the box held something other than what was typed: partial text, or nothing even after the one automatic retype. Nothing was submitted. A retype is refused `box_not_empty` until the box is cleared |
+| `not_accepted` `text_mismatch` | no | the box held something other than what was typed: partial text, more than was typed, a box still changing after 3 s, or nothing (after the one automatic retype, or with no terminal reset to explain the loss — the text may still appear). Nothing was submitted. A retype is refused `box_not_empty` until the box is cleared |
 | `not_accepted` `empty_box` | no | a submit found the box empty, so there was nothing to submit |
 | `not_accepted` `still_in_box` | yes, once or twice | the text is still in the box, unsubmitted. **Do not retype it**: it is there |
 | `not_accepted` `unconfirmed` | yes | no user-prompt entry and no transcript entry that can be attributed to THIS send appeared within the windows. An identical older prompt does not count. A history entry must be a NEW user-prompt entry after the ones the verify saw, and magmux must be able to tell where those end: when the visible prompts are all the same text (a resent `continue`) and the top of the conversation is not on screen, or a command wipes the screen (`/clear`), the history cannot say, and only the transcript can. A transcript record must have been SUBMITTED after the verify: a queued prompt counts from its enqueue, and an older identical queued prompt that runs later is still the older one. The prompt may have been lost, or taken without a visible sign. You decide |

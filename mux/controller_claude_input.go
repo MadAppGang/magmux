@@ -80,16 +80,25 @@ type promptLog struct{ marks []promptMark }
 const promptLogMax = 64
 
 // queuedPrompt is an enqueued prompt not yet dequeued (render goroutine only).
-// A dequeued one keeps its enqueue time in `dequeued` until the user entry it
-// becomes, if any, is written.
+// A dequeued one keeps its enqueue time in `at` until the user entry it
+// becomes, if any, is written — and only for dequeueMaxLag after its remove.
 type queuedPrompt struct {
-	key      string
-	at       time.Time
-	dequeued bool
+	key       string
+	at        time.Time
+	dequeued  bool
+	removedAt time.Time // the remove record's time (when it was read, if it carried none)
 }
 
 // queuedPromptMax bounds the render goroutine's queue list.
 const queuedPromptMax = 64
+
+// dequeueMaxLag bounds how long after its `remove` a dequeued prompt may
+// still date a user entry. Claude writes the user entry a dequeued prompt
+// becomes immediately after the remove (F11, milliseconds); a prompt removed
+// WITHOUT becoming one — restored to the box with Up or Esc, or any reason
+// F11 has not measured — must not date the next identical prompt, possibly
+// minutes later, as old (r3 review M4).
+const dequeueMaxLag = 2 * time.Second
 
 // claudeBaseline is the Claude half of an AcceptBaseline.
 type claudeBaseline struct {
@@ -168,6 +177,9 @@ func (c *ClaudeCodeController) noteQueued(kind string, entry map[string]any) {
 		}
 		if prompt != "" {
 			c.notePrompt(prompt, at)
+			// The queued prompt reached the model as this attachment: it is
+			// consumed, and never becomes a user entry to be dated.
+			c.dropQueued(inputKey(prompt))
 		}
 		return
 	}
@@ -197,6 +209,10 @@ func (c *ClaudeCodeController) noteQueued(kind string, entry map[string]any) {
 					c.queue = slices.Delete(c.queue, i, i+1)
 				} else {
 					c.queue[i].dequeued = true
+					c.queue[i].removedAt = at
+					if at.IsZero() {
+						c.queue[i].removedAt = time.Now()
+					}
 				}
 				break
 			}
@@ -207,8 +223,19 @@ func (c *ClaudeCodeController) noteQueued(kind string, entry map[string]any) {
 // dequeuedAt dates a real user entry: a dequeued enqueue of the same content
 // is this entry, and its submit time is the enqueue's. Otherwise the entry's
 // own timestamp.
+//
+// A dequeued entry dates only a user entry written within dequeueMaxLag of
+// its remove; older dequeued entries are dropped here, of any key, so a
+// prompt removed without becoming a user entry cannot shadow a new one.
 func (c *ClaudeCodeController) dequeuedAt(text string, written time.Time) time.Time {
 	key := inputKey(text)
+	now := written
+	if now.IsZero() {
+		now = time.Now()
+	}
+	c.queue = slices.DeleteFunc(c.queue, func(q queuedPrompt) bool {
+		return q.dequeued && now.Sub(q.removedAt) > dequeueMaxLag
+	})
 	for i, q := range c.queue {
 		if q.dequeued && q.key == key {
 			c.queue = slices.Delete(c.queue, i, i+1)
@@ -216,6 +243,16 @@ func (c *ClaudeCodeController) dequeuedAt(text string, written time.Time) time.T
 		}
 	}
 	return written
+}
+
+// dropQueued removes the oldest queue entry of key, pending or dequeued.
+func (c *ClaudeCodeController) dropQueued(key string) {
+	for i, q := range c.queue {
+		if q.key == key {
+			c.queue = slices.Delete(c.queue, i, i+1)
+			return
+		}
+	}
 }
 
 // startTTYWatch builds and heats the termios watch for a GATED pane. It cannot
@@ -387,8 +424,15 @@ var _ InputGate = (*ClaudeCodeController)(nil)
 
 // InputReadiness implements InputGate.
 func (c *ClaudeCodeController) InputReadiness(q ReadinessQuery) InputReadiness {
-	r, _ := c.readiness(time.Now(), q, true)
+	now := time.Now()
+	r, sc := c.readiness(now, q, true)
 	r.Gated = inputGateOf(c.pane) != nil
+	if q.Baseline != "" && r.Ready {
+		// The pre-typing baseline for the content about to be typed, from
+		// this same read: any user entry or transcript record for it that
+		// appears later was submitted after this moment.
+		r.Pre = newAcceptBaseline(sc, q.Baseline, q.Baseline, 0, now, c.transcriptSeq())
+	}
 	return r
 }
 
@@ -400,11 +444,17 @@ func (c *ClaudeCodeController) CheckBox(want BoxExpect) BoxCheck {
 	r, sc := c.readiness(now, ReadinessQuery{Class: want.Class}, true)
 	r.Gated = inputGateOf(c.pane) != nil
 	out := BoxCheck{Readiness: r}
+	if c.tty != nil && !want.TypedAt.IsZero() {
+		// History, and the read above has just been stored into it.
+		out.TermiosChanged = c.tty.state().ChangedAt.After(want.TypedAt)
+	}
 	if !r.Ready {
 		return out
 	}
 	verdict, verified, paste, detail := judgeBox(sc, want)
 	out.Verdict, out.Verified, out.Detail = verdict, verified, detail
+	out.Box = sc.BoxKey
+	out.Excess = verdict == BoxMismatch && boxHoldsMore(sc, want)
 	if verdict == BoxVerified {
 		out.Baseline = newAcceptBaseline(sc, sc.BoxText, sentOf(sc, want.Exact), paste, now, c.transcriptSeq())
 	}
@@ -481,8 +531,25 @@ func judgeBox(sc claudeScreen, want BoxExpect) (v BoxVerdict, verified string, p
 			return BoxVerified, verifiedPasteToken, paste, ""
 		}
 	}
-	return BoxMismatch, "", 0, fmt.Sprintf("the box holds %d of %d non-space runes",
-		utf8.RuneCountInString(sc.BoxKey), utf8.RuneCountInString(inputKey(exact)))
+	got, typed := utf8.RuneCountInString(sc.BoxKey), utf8.RuneCountInString(inputKey(exact))
+	if got > typed {
+		return BoxMismatch, "", 0, fmt.Sprintf("the box holds more than was typed: %d non-space runes where %d were typed", got, typed)
+	}
+	return BoxMismatch, "", 0, fmt.Sprintf("the box holds %d of %d non-space runes", got, typed)
+}
+
+// boxHoldsMore reports whether the box holds more non-space runes than the
+// send's known content: text drawn twice, never text still being drawn.
+// False when the content is undetermined (no Exact).
+func boxHoldsMore(sc claudeScreen, want BoxExpect) bool {
+	if want.Exact == "" {
+		return false
+	}
+	exact := want.Exact
+	if sc.BoxShell {
+		exact = strings.TrimPrefix(exact, "!")
+	}
+	return utf8.RuneCountInString(sc.BoxKey) > utf8.RuneCountInString(inputKey(exact))
 }
 
 // newAcceptBaseline takes the baseline from the screen the verify read.
@@ -541,18 +608,20 @@ func entryIDs(es []promptEntry) []entryID {
 // bannerRe is Claude's welcome banner row (s1): the top of the document.
 var bannerRe = regexp.MustCompile(`▐▛.*Claude Code v[0-9]`)
 
-// fitBlankRows: a region whose last rows above the box are this many blank
-// rows has room to spare, so the whole conversation is in it.
-const fitBlankRows = 3
-
 // topVisible: the conversation's first row is on screen, so nothing older
-// than the visible entries exists. Either the banner is the region's first
-// non-blank row (within its first three rows), or the conversation FITS:
-// Claude lays a short conversation out from the top and pads under it down to
-// the box (s1), while a conversation taller than the region fills it to the
-// box — so content from the region's top AND fitBlankRows of padding, above
-// the box or (an inline layout, box drawn right after the content) at the
-// bottom of the screen, means nothing was cut off above.
+// than the visible entries exists. The ONE proof is Claude's welcome banner as
+// the region's first non-blank row (within its first three rows): Claude
+// draws it at the top of every conversation.
+//
+// There used to be a second rule — the conversation "fits": content from the
+// region's top plus three blank rows above the box or under the content. It
+// was tuned to a synthetic layout and matched NONE of the real 2.1.301
+// capture marks (every one draws the effort row directly above the rule, so
+// there is never a blank tail), and where it did fire it was unsafe: a box
+// that shrinks reveals an older identical entry, which then counted as new —
+// a false ok (r3 review M3). Without the banner there is no proof, and a
+// screen with no user-prompt entry at the verify gives no history evidence;
+// the transcript still confirms. TestTopVisibleOnRealCaptures pins it.
 func topVisible(sc claudeScreen) bool {
 	blank := func(r styledRow) bool { return strings.TrimSpace(plain(r)) == "" }
 	first := -1
@@ -565,25 +634,7 @@ func topVisible(sc claudeScreen) bool {
 	if first < 0 {
 		return false // a box so tall it leaves no conversation proves nothing
 	}
-	if first < 3 && bannerRe.MatchString(plain(sc.conv[first])) {
-		return true
-	}
-	if first > 1 {
-		return false
-	}
-	if sc.blankTail >= fitBlankRows {
-		return true
-	}
-	n := len(sc.conv)
-	if n < first+1+fitBlankRows {
-		return false
-	}
-	for _, r := range sc.conv[n-fitBlankRows:] {
-		if !blank(r) {
-			return false
-		}
-	}
-	return true
+	return first < 3 && bannerRe.MatchString(plain(sc.conv[first]))
 }
 
 // entryRowsAt is an entry's own rows as drawn (its queued hint excluded),

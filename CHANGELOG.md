@@ -29,11 +29,16 @@ commit subjects and remain on the
   view, or read late from the transcript, is not evidence; where the screen
   cannot say which entries are new (only identical prompts visible and the top
   of the conversation off screen, or a screen-wiping `/clear`) the history
-  gives none, and without the transcript the reply is `unconfirmed`. If the
-  pre-Enter verify finds the box completely empty — the text swallowed whole
-  by a late startup terminal reset — it is typed ONCE more within the same
-  deadline, and the ok reply carries `retyped:true`; a box holding part of the
-  text is never retyped. The ok reply adds `waitedMs` (including any return to
+  gives none, and without the transcript the reply is `unconfirmed`. The
+  pre-Enter verify waits for Claude to draw the text (it re-reads the box
+  until it matches or has stopped changing for a second, for at most 3 s),
+  because Claude can take several hundred milliseconds to draw typed text. If
+  the box stays completely empty for that second AND the terminal reset after
+  the text was typed — the text swallowed whole by a late startup terminal
+  reset — and no other Enter submitted it meanwhile, it is typed ONCE more
+  within the same deadline, and the ok reply carries `retyped:true`; a box
+  that is empty with no reset, holds part of the text, or holds more than was
+  typed is never retyped. The ok reply adds `waitedMs` (including any return to
   the gate),
   `verified` (`exact`, `paste_token` or `non_empty`), `accept` (`confirmed`,
   `resent_enter`, or `in_box` for a send with no Enter) and `evidence`
