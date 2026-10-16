@@ -143,12 +143,14 @@ func (s *Screen) resize(rows, cols int) {
 	if s.sbOff > s.sbLen {
 		s.sbOff = s.sbLen
 	}
-	if s.scrollBot > rows || s.scrollBot == 0 {
-		s.scrollBot = rows
-	}
-	if s.scrollTop >= rows {
-		s.scrollTop = 0
-	}
+	// A resize resets the margins to the full screen, as xterm does. Clamping
+	// them instead only ever LOWERED the bottom: a grow left scrollBot at the
+	// old row count, and CUD/CNL clamp to scrollBot-1, so a child redrawing
+	// with relative moves (Claude Code does, `ESC[44B`, `ESC[1B` per row)
+	// piled every row below the old bottom onto it. A child that wants a
+	// region sets it again after SIGWINCH; it cannot know the old one fits.
+	s.scrollTop = 0
+	s.scrollBot = rows
 	s.curY = min(s.curY, rows-1)
 	s.curX = min(s.curX, cols-1)
 }

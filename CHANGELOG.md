@@ -11,6 +11,18 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+### Fixed
+
+- **A screen that grows in rows lets relative cursor moves reach the new
+  bottom.** A resize used to lower the scroll region's bottom on a shrink and
+  never raise it on a grow, so after any grow (a client's `resize`, a bigger
+  window, the panel hiding) CUD and CNL stopped at the old last row. Claude
+  Code redraws with relative moves after `SIGWINCH`, so its input box, footer
+  and status line collapsed onto that one row and its turns never settled.
+  A resize now resets the margins to the full screen, on both the primary and
+  the alternate screen, as xterm does; a child that wants a region sets it
+  again after `SIGWINCH`.
+
 ## [0.15.0] - 2026-10-16
 
 ### Added
