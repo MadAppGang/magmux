@@ -478,6 +478,7 @@ type event struct {
 	Ev      string   `json:"ev"`
 	Data    string   `json:"data"`
 	Dropped bool     `json:"dropped"`
+	Silent  bool     `json:"silent"` // dropped by FAKE_DROP_SILENT_ONCE: no reset, no redraw
 	Text    string   `json:"text"`
 	Dialog  string   `json:"dialog"`
 	Key     string   `json:"key"`

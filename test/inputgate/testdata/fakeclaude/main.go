@@ -23,6 +23,10 @@
 //	FAKE_LOSE_ON_INPUT=1  the FIRST input chunk triggers a stdin reset and
 //	                    everything received during it is discarded (lost text)
 //	FAKE_LOSE_LEN_MS    length of that reset                   (default 400)
+//	FAKE_DROP_SILENT_ONCE=1  the FIRST input chunk received while the box is
+//	                    up is discarded with NO termios change and NO redraw:
+//	                    the box never shows any of it (the V1 rerun's silent
+//	                    drop, as Claude re-mounts its prompt after startup)
 //	FAKE_NO_HISTORY=1   Enter clears the box but never adds a history entry
 //	FAKE_IGNORE_ENTERS  number of Enter presses ignored before one submits
 //	FAKE_EXIT_MS        exit(0) at this time; -1 never         (default -1)
@@ -119,16 +123,17 @@ func setCooked() {
 // ── state ───────────────────────────────────────────────────────────────────
 
 type state struct {
-	mu        sync.Mutex
-	boxShown  bool
-	dialog    string // "" | permission | question
-	box       []rune
-	history   []string
-	inPaste   bool
-	dropUntil int64 // input received before this time is discarded
-	lostDone  bool
-	enters    int
-	pending   []byte // incomplete UTF-8 / escape sequence
+	mu         sync.Mutex
+	boxShown   bool
+	dialog     string // "" | permission | question
+	box        []rune
+	history    []string
+	inPaste    bool
+	dropUntil  int64 // input received before this time is discarded
+	lostDone   bool
+	silentDone bool // FAKE_DROP_SILENT_ONCE has fired
+	enters     int
+	pending    []byte // incomplete UTF-8 / escape sequence
 }
 
 var (
@@ -136,6 +141,7 @@ var (
 	vim        = os.Getenv("FAKE_VIM") == "1"
 	noHistory  = os.Getenv("FAKE_NO_HISTORY") == "1"
 	loseOnIn   = os.Getenv("FAKE_LOSE_ON_INPUT") == "1"
+	dropSilent = os.Getenv("FAKE_DROP_SILENT_ONCE") == "1"
 	ignoreEnts = envInt("FAKE_IGNORE_ENTERS", 0)
 	renderLag  = time.Duration(envInt("FAKE_RENDER_DELAY_MS", 0)) * time.Millisecond
 	outMu      sync.Mutex
@@ -422,7 +428,12 @@ func readLoop() {
 				trigger = true
 				st.dropUntil = now + int64(loseLen) + 50
 			}
-			logEv("in", map[string]any{"data": string(chunk), "dropped": dropped})
+			silent := false
+			if dropSilent && !st.silentDone && st.boxShown && !dropped {
+				st.silentDone = true
+				dropped, silent = true, true
+			}
+			logEv("in", map[string]any{"data": string(chunk), "dropped": dropped, "silent": silent})
 			if !dropped {
 				feed(chunk)
 				if renderLag > 0 {

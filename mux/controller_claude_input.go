@@ -454,7 +454,7 @@ func (c *ClaudeCodeController) CheckBox(want BoxExpect) BoxCheck {
 	verdict, verified, paste, detail := judgeBox(sc, want)
 	out.Verdict, out.Verified, out.Detail = verdict, verified, detail
 	out.Box = sc.BoxKey
-	out.Excess = verdict == BoxMismatch && boxHoldsMore(sc, want)
+	out.Excess = verdict == BoxMismatch && (boxHoldsMore(sc, want) || newPasteTokens(sc, want) > 1)
 	if verdict == BoxVerified {
 		out.Baseline = newAcceptBaseline(sc, sc.BoxText, sentOf(sc, want.Exact), paste, now, c.transcriptSeq())
 	}
@@ -527,6 +527,11 @@ func judgeBox(sc claudeScreen, want BoxExpect) (v BoxVerdict, verified string, p
 				paste = n
 			}
 		}
+		if fresh := newPasteTokens(sc, want); fresh > 1 {
+			// One send pastes once. Two NEW tokens are a paste drawn late
+			// plus a second copy of it (r4 M1): Enter would submit both.
+			return BoxMismatch, "", 0, fmt.Sprintf("the box holds more than was typed: %d new paste tokens where one was pasted", fresh)
+		}
 		if paste > 0 {
 			return BoxVerified, verifiedPasteToken, paste, ""
 		}
@@ -536,6 +541,21 @@ func judgeBox(sc claudeScreen, want BoxExpect) (v BoxVerdict, verified string, p
 		return BoxMismatch, "", 0, fmt.Sprintf("the box holds more than was typed: %d non-space runes where %d were typed", got, typed)
 	}
 	return BoxMismatch, "", 0, fmt.Sprintf("the box holds %d of %d non-space runes", got, typed)
+}
+
+// newPasteTokens counts the box's `[Pasted text #N]` tokens newer than the
+// baseline (N > PasteAbove), for a send that may have collapsed into one.
+func newPasteTokens(sc claudeScreen, want BoxExpect) int {
+	if !want.Pasted {
+		return 0
+	}
+	n := 0
+	for _, p := range sc.BoxPastes {
+		if p > want.PasteAbove {
+			n++
+		}
+	}
+	return n
 }
 
 // boxHoldsMore reports whether the box holds more non-space runes than the

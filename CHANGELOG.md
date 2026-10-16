@@ -31,17 +31,28 @@ commit subjects and remain on the
   of the conversation off screen, or a screen-wiping `/clear`) the history
   gives none, and without the transcript the reply is `unconfirmed`. The
   pre-Enter verify waits for Claude to draw the text (it re-reads the box
-  until it matches or has stopped changing for a second, for at most 3 s),
-  because Claude can take several hundred milliseconds to draw typed text. If
-  the box stays completely empty for that second AND the terminal reset after
-  the text was typed — the text swallowed whole by a late startup terminal
-  reset — and no other Enter submitted it meanwhile, it is typed ONCE more
-  within the same deadline, and the ok reply carries `retyped:true`; a box
-  that is empty with no reset, holds part of the text, or holds more than was
-  typed is never retyped. The ok reply adds `waitedMs` (including any return to
-  the gate),
+  until it matches or has stopped changing for a second, for at most 3 s, and
+  never less than 1.2 s whatever `readyTimeoutMs` leaves), because Claude can
+  take several hundred milliseconds to draw typed text. If the box never
+  showed any of the text and no other Enter submitted it meanwhile, it is
+  typed ONCE more within the same deadline on either signal of loss: the box
+  stayed completely empty for that second AND the terminal reset after the
+  text was typed (`retypeCause:"terminal_reset"`), or the box was completely
+  empty on every read for the whole 3 s window, with no reset — Claude
+  dropped the text silently (`retypeCause:"never_drawn"`). The ok reply then
+  carries `retyped:true` and `retypeCause`. A box that held part of the text,
+  all of it, or more than was typed is never retyped, and nor is a paste (a
+  late-drawn paste plus its retype would be two `[Pasted text]` tokens, and
+  two new tokens are now a mismatch on every verify). A box that showed the
+  text and then emptied without magmux's Enter is `text_mismatch` saying it
+  is unknown whether another Enter submitted it, never "nothing was
+  submitted". The ok reply adds
+  `waitedMs` (including any return to the gate),
   `verified` (`exact`, `paste_token` or `non_empty`), `accept` (`confirmed`,
-  `resent_enter`, or `in_box` for a send with no Enter) and `evidence`
+  `resent_enter`, `in_box` for a send with no Enter, or `submitted_by_other`
+  when somebody else's Enter submitted the text — `enter` is then false,
+  because on a gated reply `enter` says whether magmux pressed it) and
+  `evidence`
   (`history` or `transcript`). Typing while Claude is working is allowed:
   Claude queues it, and the queued entry is the evidence. A pane is `direct`
   unless it is print mode, `--version`/`--help`, or a subcommand as the FIRST
@@ -127,7 +138,7 @@ commit subjects and remain on the
   only shutdown cancels it. A caller that stops waiting gets `timeout` while the
   text and the Enter still land. When `timeoutMs` is absent, the default wait of
   `call`, REST and the WebSocket is at least the gated send's own bound: about
-  18 s for a short prompt, about 68 s with `readyTimeoutMs:60000`.
+  21 s for a short prompt, about 71 s with `readyTimeoutMs:60000`.
 - **The MCP send tools say why a send failed:**
   `could not send to pane 2: busy (dialog:permission): … (text was typed)`.
   `send_keys`'s own timeout went from 60 s to 3 minutes, so it can hold the

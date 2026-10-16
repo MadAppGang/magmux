@@ -292,6 +292,7 @@ func TestREQ4_LostTextIsRetypedOnceThenConfirmed(t *testing.T) {
 
 	res := wantGatedOK(t, r)
 	wantField(t, res, "retyped", true, r)
+	wantField(t, res, "retypeCause", "terminal_reset", r)
 	evs := m.events(t)
 	var kept []string
 	for _, e := range ofKind(evs, "in") {
@@ -301,6 +302,50 @@ func TestREQ4_LostTextIsRetypedOnceThenConfirmed(t *testing.T) {
 	}
 	if len(kept) != 1 {
 		t.Errorf("the text reached the child undropped %d times, want exactly 1 (the retype)", len(kept))
+	}
+	if n := countEnter(received(evs)); n != 1 {
+		t.Errorf("child received %d Enters, want 1", n)
+	}
+	if got := submits(evs); len(got) != 1 || got[0] != text {
+		t.Errorf("child submitted %q, want exactly [%q]", got, text)
+	}
+}
+
+// TEST-15c (REQ-4, the V1 rerun's silent drop): the child discards the FIRST
+// text it receives once the box is up, with NO termios change and NO redraw —
+// the box never shows a rune of it. A box blank on every read for the whole
+// 3 s verify window is a silent drop, not a slow draw (render lag tops out
+// well under a second), so magmux retypes it ONCE: ok with retyped:true and
+// retypeCause:"never_drawn", the text dropped silently once and kept once,
+// one Enter, and the child submitted exactly the text.
+func TestREQ4_SilentlyDroppedTextIsRetypedOnce(t *testing.T) {
+	t.Parallel()
+	m, cn, pane := declared(t, fake{"FAKE_DROP_SILENT_ONCE": "1"})
+	text := "silent " + shortID(t)
+
+	r := cn.send(pane, map[string]any{"text": text})
+
+	res := wantGatedOK(t, r)
+	wantField(t, res, "retyped", true, r)
+	wantField(t, res, "retypeCause", "never_drawn", r)
+	evs := m.events(t)
+	var kept, silent int
+	for _, e := range ofKind(evs, "in") {
+		if e.Data != text {
+			continue
+		}
+		switch {
+		case e.Silent:
+			silent++
+		case !e.Dropped:
+			kept++
+		}
+	}
+	if silent != 1 || kept != 1 {
+		t.Errorf("the text was silently dropped %d times and kept %d times, want 1 and 1", silent, kept)
+	}
+	if n := len(ofKind(evs, "reset-start")); n > 1 {
+		t.Errorf("%d resets, want only the boot reset: the drop must not be a termios event", n)
 	}
 	if n := countEnter(received(evs)); n != 1 {
 		t.Errorf("child received %d Enters, want 1", n)

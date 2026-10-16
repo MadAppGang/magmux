@@ -38,9 +38,14 @@ const (
 	// worst render lag measured (~800 ms) with margin, because a box that is
 	// EMPTY for the whole settle interval is what licenses the one auto-retype,
 	// and retyping text that was only slow to draw puts it in the box twice.
-	// Every verify is also capped by the readiness deadline.
+	// Every verify is also capped by the readiness deadline, but never below
+	// SendVerifyMin from the verify's start: a send that became ready in the
+	// deadline's last moments, or a small readyTimeoutMs, must still wait out
+	// the measured render lag rather than judge one read. SendVerifyMin covers
+	// the settle interval plus margin, so a settled verdict always fits in it.
 	SendVerifyStep   = 40 * time.Millisecond
 	SendVerifySettle = 1000 * time.Millisecond
+	SendVerifyMin    = 1200 * time.Millisecond
 	SendVerifyMax    = 3 * time.Second
 	// SendGateCheckCost is the allowance for the readiness check made before
 	// every write after the first.
@@ -80,8 +85,9 @@ func ReadyWait(ms int) time.Duration {
 // re-wait and the verify's settle wait share ONE deadline, so the readiness
 // wait is counted once and covers every verify window (SendVerifyMax is
 // capped by it). What runs outside that deadline is counted per ATTEMPT: the
-// typing, the SendSettle pause, and the one verify read that may land past
-// the deadline (SendVerifyStep). A send can make two attempts (the one
+// typing, the SendSettle pause, the verify's own minimum window, which the
+// deadline does not cut (SendVerifyMin), and the one verify read that may
+// land past it (SendVerifyStep). A send can make two attempts (the one
 // auto-retype of an emptied box), so the attempt is counted twice.
 func SendBudget(s SendShape) time.Duration {
 	b := ReadyWait(s.ReadyTimeoutMs)
@@ -90,7 +96,7 @@ func SendBudget(s SendShape) time.Duration {
 		attempt += time.Duration(s.TypedWrites) * (SendTypedChunkGap + SendGateCheckCost)
 	}
 	attempt += time.Duration(s.Keys) * (SendKeyGap + SendGateCheckCost)
-	attempt += SendSettle + SendVerifyStep // every gated send verifies the box after the settle
+	attempt += SendSettle + SendVerifyMin + SendVerifyStep // every gated send verifies the box after the settle
 	b += 2 * attempt
 	if s.Submit {
 		b += SendAcceptWindows * SendAcceptWindow

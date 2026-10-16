@@ -49,6 +49,7 @@ const (
 	verifyStep   = protocol.SendVerifyStep
 	verifySettle = protocol.SendVerifySettle
 	verifyMax    = protocol.SendVerifyMax
+	verifyMin    = protocol.SendVerifyMin
 )
 
 // accept values (the reply's `accept`).
@@ -56,6 +57,24 @@ const (
 	acceptConfirmed = "confirmed"
 	acceptResent    = "resent_enter"
 	acceptInBox     = "in_box"
+	// acceptSubmittedByOther: the text left the box through ANOTHER writer's
+	// Enter (a human keystroke, a noGate send, a remote `input` op), and
+	// evidence attributable to this text appeared. magmux pressed no Enter, so
+	// the reply's `enter` is false.
+	acceptSubmittedByOther = "submitted_by_other"
+)
+
+// retypeCause values (the reply's `retypeCause`, present only with
+// `retyped:true`): which loss signal licensed the one retype.
+const (
+	// retypeTerminalReset: the box stayed empty for the settle interval and
+	// the pty's termios changed after the first typed byte (the late startup
+	// stdin reset).
+	retypeTerminalReset = "terminal_reset"
+	// retypeNeverDrawn: the box was completely empty on every read for the
+	// whole verify window (verifyMax) with no reset — Claude never drew any of
+	// the text. Render lag is well under a second, so that is a silent drop.
+	retypeNeverDrawn = "never_drawn"
 )
 
 // sendClassification is admit's verdict on a send.
@@ -188,7 +207,10 @@ type sendReport struct {
 	// retyped: the box was found completely empty after typing and the text
 	// was typed once more (the auto-retype). Additive in the reply.
 	retyped bool
-	lastEsc time.Time
+	// retypeCause: the loss signal that licensed the retype
+	// (retypeTerminalReset / retypeNeverDrawn). Reported only with retyped.
+	retypeCause string
+	lastEsc     time.Time
 }
 
 // addTo puts the gated reply keys on a send's result (§5.4). An ungated
@@ -214,6 +236,9 @@ func (r sendReport) addTo(result map[string]any) {
 	}
 	if r.retyped {
 		result["retyped"] = true
+		if r.retypeCause != "" {
+			result["retypeCause"] = r.retypeCause
+		}
 	}
 }
 
@@ -227,7 +252,14 @@ func gatedAckText(bytes int, r sendReport, err error) string {
 	}
 	parts = append(parts, deliveryParts(bytes, r.keys, r.enter))
 	if r.retyped {
-		parts = append(parts, "retyped (the box was empty)")
+		switch r.retypeCause {
+		case retypeNeverDrawn:
+			parts = append(parts, "retyped (the box was empty: never drawn)")
+		case retypeTerminalReset:
+			parts = append(parts, "retyped (the box was empty: terminal reset)")
+		default:
+			parts = append(parts, "retyped (the box was empty)")
+		}
 	}
 	if r.verified != "" {
 		parts = append(parts, "verified "+strings.ReplaceAll(r.verified, "_", " "))
@@ -243,6 +275,8 @@ func gatedAckText(bytes int, r sendReport, err error) string {
 		parts = append(parts, "accepted after re-sent Enter ("+r.evidence+")")
 	case acceptInBox:
 		parts = append(parts, "in box, not submitted")
+	case acceptSubmittedByOther:
+		parts = append(parts, "submitted by another writer, not by magmux ("+r.evidence+")")
 	}
 	return strings.Join(parts, " · ")
 }
@@ -588,7 +622,11 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		expect    BoxExpect
 		settle    boxSettle
 		sawExcess string // the detail of a read that held MORE than typed, on any attempt
-		noLoss    bool   // the box stayed empty with no termios change: not retyped
+		noLoss    bool   // the box stayed empty with neither loss signal: not retyped
+		windowCut bool   // ... and the deadline cut the verify window short
+		lostAgain bool   // the box stayed empty after the one retype
+		pasteLost bool   // a paste's box stayed empty: never retyped
+		leftBox   bool   // the box showed the text, then emptied without our Enter
 	)
 	for attempt := 0; ; attempt++ {
 		attemptN = attempt
@@ -719,30 +757,52 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		// else's Enter can have submitted it while it sat in the box (r3
 		// review M2). Evidence against the pre-typing baseline — a new user
 		// entry or a fresh transcript record for this text — is the answer:
-		// the text was taken, so the send is ok and is NEVER retyped.
+		// the text was taken, so the send is ok and is NEVER retyped. The
+		// reply says WHO submitted it (r4 M3): accept:"submitted_by_other",
+		// and `enter` false, because magmux pressed no Enter — for a TYPE send
+		// as much as for a SUBMIT, since the text is no longer in the box.
 		if chk.Verdict == BoxEmpty && typedText && expect.Exact != "" && !pre.At.IsZero() {
 			if v := d.g.InputAccepted(pre); v.State == AcceptTaken {
-				rep.accept, rep.evidence = acceptConfirmed, v.Evidence
+				rep.accept, rep.evidence, rep.enter = acceptSubmittedByOther, v.Evidence, false
 				finish(nil)
 				return
 			}
 		}
 
 		// The auto-retype, ONCE, and only on POSITIVE evidence that the text
-		// was swallowed: the box stayed COMPLETELY empty (the placeholder
-		// only) on every read for the WHOLE settle interval, AND the pty's
-		// termios changed after the attempt's first byte — the late startup
-		// stdin reset IS a termios event (F3), and a box that is merely slow
-		// to draw shows no such change (V1: retyping slow text put it in the
-		// box twice). The pre-typing baseline must exist and show nothing
-		// submitted (above). Nothing was submitted and nothing partial is
-		// left, so typing again cannot duplicate anything. Back through the
-		// gate to the same deadline, then the same typing and the same settle
-		// wait. A box holding PARTIAL text, a box still changing when the
-		// window closed, or one that ever held MORE than typed, is never
-		// retyped.
-		if attempt == 0 && settle.emptyHeld && settle.termiosChanged && sawExcess == "" &&
-			typedText && expect.Exact != "" && !pre.At.IsZero() {
+		// was swallowed. The box stayed COMPLETELY empty (the placeholder
+		// only) on every read for the WHOLE settle interval, and ONE of:
+		//
+		//   terminal_reset  the pty's termios changed after the attempt's
+		//                   first byte — the late startup stdin reset IS a
+		//                   termios event (F3);
+		//   never_drawn     every read of the WHOLE verify window (verifyMax,
+		//                   not cut short by the deadline) was ready and empty
+		//                   — Claude never drew a rune of it (the V1 rerun's
+		//                   silent drop). Render lag tops out well under a
+		//                   second, so a 3 s blank is not a slow draw.
+		//
+		// A box that is merely slow to draw shows neither (V1: retyping slow
+		// text put it in the box twice). The pre-typing baseline must exist
+		// and show nothing submitted (above). Nothing was submitted and
+		// nothing partial is left, so typing again cannot duplicate anything.
+		// Back through the gate to the same deadline, then the same typing and
+		// the same settle wait. A box holding PARTIAL text, a box still
+		// changing when the window closed, or one that ever held MORE than
+		// typed, is never retyped; nor is a box that showed ANY of the text
+		// and then emptied (the text left it, perhaps through somebody
+		// else's Enter, r4 M3c). Nor is a send that may have collapsed into a
+		// `[Pasted text #N]` token (expect.Pasted: paste mode, a bracketed
+		// auto text, an auto text over the collapse threshold): a paste drawn
+		// late plus its retype are two tokens, and Enter would submit both
+		// (r4 M1).
+		lost := settle.termiosChanged || settle.neverDrawn
+		if attempt == 0 && settle.emptyHeld && lost && sawExcess == "" && !settle.sawText &&
+			!expect.Pasted && typedText && expect.Exact != "" && !pre.At.IsZero() {
+			rep.retypeCause = retypeNeverDrawn
+			if settle.termiosChanged {
+				rep.retypeCause = retypeTerminalReset
+			}
 			if r, err = regate(); err != nil {
 				if e, ok := err.(*protocol.Error); ok && e.Code == protocol.CodeBusy {
 					msg := "pane %d: the input box was empty after typing (the text was lost) and the pane was not ready to retype it (%s); Enter was not pressed, nothing was submitted"
@@ -758,8 +818,18 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 			}
 			continue
 		}
-		if chk.Verdict == BoxEmpty && settle.emptyHeld && !settle.termiosChanged && typedText {
-			noLoss = true
+		if chk.Verdict == BoxEmpty && typedText {
+			switch {
+			case settle.sawText:
+				leftBox = true
+			case !settle.emptyHeld:
+			case attempt > 0:
+				lostAgain = true
+			case expect.Pasted:
+				pasteLost = true
+			case !lost:
+				noLoss, windowCut = true, settle.windowCut
+			}
 		}
 		break
 	}
@@ -777,12 +847,29 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		if detail == "" {
 			detail = "it differs from what was sent"
 		}
-		if noLoss {
-			detail += "; it stayed empty but the terminal showed no stdin reset, so the text was not retyped"
+		switch {
+		case noLoss && windowCut:
+			detail += fmt.Sprintf("; it stayed empty but the terminal showed no stdin reset, and the deadline left less than the %s verify window that tells a silent drop from a slow draw, so the text was not retyped", verifyMax)
+		case noLoss:
+			detail += fmt.Sprintf("; it stayed empty but the terminal showed no stdin reset, and the box was not seen empty on every read for the whole %s verify window, so the text was not retyped", verifyMax)
+		case lostAgain:
+			detail += fmt.Sprintf("; the text was already retyped once (%s) and the box stayed empty again, so it was not retyped a second time", strings.ReplaceAll(rep.retypeCause, "_", " "))
+		case pasteLost:
+			detail += "; a paste is never retyped, because a late-drawn paste and its retype would be two tokens and Enter would submit both"
 		}
 		if settle.unsettled > 0 {
 			detail += fmt.Sprintf("; it was still changing when the verify window closed after %s",
 				settle.unsettled.Round(10*time.Millisecond))
+		}
+		if leftBox {
+			// The text was seen in the box and is gone, and magmux pressed no
+			// Enter: another writer may have submitted it with no evidence on
+			// screen or in the transcript yet. "Nothing was submitted" would
+			// invite a retry into a duplicate (r4 M3c).
+			fail(gateErr(protocol.CodeNotAccepted, reason, true,
+				"pane %d: the input box showed the text and then emptied without magmux's Enter (%s); it is unknown whether another Enter submitted it, so check the conversation before sending it again; magmux pressed no Enter and did not retype it",
+				d.idx, detail))
+			return
 		}
 		fail(gateErr(protocol.CodeNotAccepted, reason, true,
 			"pane %d: the input box does not hold what was typed (%s); Enter was not pressed, nothing was submitted, and the box may hold partial text",
@@ -825,7 +912,19 @@ type boxSettle struct {
 	// termiosChanged: some read in the wait saw the termios change after
 	// the attempt's first byte (BoxCheck.TermiosChanged).
 	termiosChanged bool
-	unsettled      time.Duration // >0: the window closed with the box still changing
+	// neverDrawn: every read from the first ready read to the end of the
+	// WHOLE verify window (verifyMax) was ready and COMPLETELY empty, with no
+	// termios change — Claude never drew any of the text. Never true when the
+	// deadline cut the window short (windowCut).
+	neverDrawn bool
+	// windowCut: the wait ended on an empty box with no termios change, and
+	// the deadline fell before the full verify window could pass.
+	windowCut bool
+	// sawText: some ready read showed the box holding something (part of the
+	// text, all of it, or more). A box that then empties is never retyped:
+	// the text LEFT it, perhaps through another writer's Enter.
+	sawText   bool
+	unsettled time.Duration // >0: the window closed with the box still changing
 }
 
 // sameBox reports whether two ready reads saw the same box.
@@ -849,6 +948,16 @@ func sameBox(a, b BoxCheck) bool {
 // stability clock, so a box is "empty for the whole settle interval" only
 // when every read in it was ready and empty. No lock is held across a pause.
 //
+// One exception to "settled ends the wait": a box that has been COMPLETELY
+// empty on every read since the window opened, with no termios change, for
+// typed knowable content, is NOT concluded at the settle interval when the
+// whole verify window fits before the deadline. The wait runs on to
+// verifyMax: text drawn late (inside the window) verifies as usual, and a box
+// still blank at the window's end is neverDrawn — a silent drop, the second
+// retype signal. A termios change during the extension ends it at the next
+// settled read (the reset signal). If the deadline would cut the window
+// short, the wait ends at the settle interval as before, windowCut.
+//
 // fail and cancelled answer the send; ok=false means it has been answered.
 func (d *sendDelivery) settleBox(ctx context.Context, expect BoxExpect, deadline time.Time, typed bool,
 	rep *sendReport, waitedPre *time.Duration, fail func(*protocol.Error), cancelled func()) (out boxSettle, ok bool) {
@@ -857,7 +966,20 @@ func (d *sendDelivery) settleBox(ctx context.Context, expect BoxExpect, deadline
 		last       BoxCheck
 		have       bool // last is the previous read, and it was ready
 		stableFrom time.Time
+		allEmpty   = true // every read since first was ready and BoxEmpty
 	)
+	// The verify's OWN minimum window (r4 M2): the readiness deadline never
+	// cuts it below verifyMin from here, so a send that became ready in the
+	// deadline's last moments, or a caller with a small readyTimeoutMs, still
+	// waits out the measured render lag instead of judging one read 150 ms
+	// after typing (V1). SendBudget counts it per attempt.
+	if floor := time.Now().Add(verifyMin); deadline.Before(floor) {
+		deadline = floor
+	}
+	// Only typed knowable content that is never a paste token can be "never
+	// drawn": anything else has no retype to license, and waiting longer
+	// would only delay the answer.
+	drawable := expect.TypedText && expect.Exact != "" && !expect.Pasted
 	for {
 		if err := d.liveness(typed); err != nil {
 			fail(err)
@@ -870,6 +992,9 @@ func (d *sendDelivery) settleBox(ctx context.Context, expect BoxExpect, deadline
 		}
 		if !chk.Readiness.Ready {
 			have = false
+			if !first.IsZero() {
+				allEmpty = false // a read that did not observe the box
+			}
 			cr := chk.Readiness
 			pressed, err := d.tryDismiss(cr, rep)
 			if err != nil {
@@ -900,15 +1025,27 @@ func (d *sendDelivery) settleBox(ctx context.Context, expect BoxExpect, deadline
 		if first.IsZero() {
 			first = now
 		}
+		if chk.Verdict != BoxEmpty {
+			allEmpty, out.sawText = false, true
+		}
 		if !have || !sameBox(last, chk) {
 			last, have, stableFrom = chk, true, now
 		}
-		if now.Sub(stableFrom) >= verifySettle {
-			out.emptyHeld = chk.Verdict == BoxEmpty
+		full := first.Add(verifyMax)
+		cut := deadline.Before(full) // the deadline falls inside the window
+		// blank: so far this is a box Claude never drew, with no reset.
+		blank := drawable && allEmpty && !out.termiosChanged
+		if blank && !cut && !now.Before(full) {
+			out.emptyHeld, out.neverDrawn = true, true
 			return out, true
 		}
-		end := first.Add(verifyMax)
-		if deadline.Before(end) {
+		if now.Sub(stableFrom) >= verifySettle && (!blank || cut) {
+			out.emptyHeld = chk.Verdict == BoxEmpty
+			out.windowCut = blank && cut
+			return out, true
+		}
+		end := full
+		if cut {
 			end = deadline
 		}
 		if !now.Before(end) {

@@ -16,12 +16,15 @@ import (
 
 // TestEmptyWithoutTermiosChangeIsNotRetyped: the box stays empty for the
 // whole settle interval, but the terminal shows no stdin reset since the
-// first byte. That is not evidence the text was lost (it may still be on its
-// way to the screen): text_mismatch, typed once, no retype.
+// first byte, and the deadline leaves less than the full verify window, so
+// "never drawn" cannot be proven either. That is not evidence the text was
+// lost (it may still be on its way to the screen): text_mismatch, typed once,
+// no retype. With the full window, the same box IS a silent drop
+// (TestNeverDrawnIsRetypedOnceThenOK).
 func TestEmptyWithoutTermiosChangeIsNotRetyped(t *testing.T) {
 	g := &fakeGate{checkFn: func(BoxExpect, int) BoxCheck { return boxEmptyCheck() }}
 	m, _, log := gatedMux(t, g)
-	o := runSend(t, m, sendRequest{text: "hello", enter: true})
+	o := runSend(t, m, sendRequest{text: "hello", enter: true, readyTimeoutMs: 1500})
 	wantErr(t, o, protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true)
 	if !strings.Contains(o.err.Error(), "no stdin reset") {
 		t.Errorf("error %q does not say why it was not retyped", o.err)
@@ -54,13 +57,24 @@ func TestCheckBoxReportsTermiosChangeSinceTheFirstByte(t *testing.T) {
 }
 
 // TestRealControllerRetypesOnlyAfterAReset: through the REAL controller, an
-// empty box is retyped when (and only when) the terminal reset after the
-// first byte.
+// empty box is retyped when the terminal reset after the first byte
+// (terminal_reset, at the settle interval), or when it stayed empty for the
+// whole verify window (never_drawn); with no reset and a deadline that cuts
+// the window short, it is not retyped.
 func TestRealControllerRetypesOnlyAfterAReset(t *testing.T) {
 	const prompt = "Summarise the build log in one line"
 	idle := cat(claudeBanner, []string{"⏺ Ready."}) // a short conversation: the banner is on screen
-	for _, reset := range []bool{true, false} {
-		t.Run(fmt.Sprintf("reset=%v", reset), func(t *testing.T) {
+	for _, tc := range []struct {
+		reset     bool
+		readyMs   int
+		wantCause string // "" = not retyped
+	}{
+		{true, 0, retypeTerminalReset},
+		{false, 0, retypeNeverDrawn},
+		{false, 1500, ""},
+	} {
+		reset := tc.reset
+		t.Run(fmt.Sprintf("reset=%v,readyMs=%d", reset, tc.readyMs), func(t *testing.T) {
 			p := claudeLines(synthRows, synthCols, idle, "", idlePlaceholder)
 			empty := claudeLines(synthRows, synthCols, idle, "", idlePlaceholder)
 			inBox := claudeLines(synthRows, synthCols, idle, prompt, "")
@@ -93,10 +107,13 @@ func TestRealControllerRetypesOnlyAfterAReset(t *testing.T) {
 					setScreen(p, after)
 				}
 			}
-			o := runSend(t, m, sendRequest{text: prompt, enter: true})
-			if reset {
+			o := runSend(t, m, sendRequest{text: prompt, enter: true, readyTimeoutMs: tc.readyMs})
+			if tc.wantCause != "" {
 				if o.err != nil || !o.rep.retyped {
 					t.Fatalf("send: %+v %v, want ok after one retype", o.rep, o.err)
+				}
+				if got := replyOf(o)["retypeCause"]; got != tc.wantCause {
+					t.Errorf("retypeCause %v, want %q", got, tc.wantCause)
 				}
 				if got := log.settle(); got != prompt+prompt+"\r" {
 					t.Errorf("bytes %q, want the text twice and one Enter", got)
@@ -130,8 +147,8 @@ func TestSubmittedByAnotherEnterIsNeverRetyped(t *testing.T) {
 	if o.err != nil {
 		t.Fatalf("send: %v", o.err)
 	}
-	if o.rep.accept != acceptConfirmed || o.rep.evidence != evidenceTranscript {
-		t.Errorf("report %+v, want confirmed by the transcript", o.rep)
+	if o.rep.accept != acceptSubmittedByOther || o.rep.evidence != evidenceTranscript {
+		t.Errorf("report %+v, want submitted_by_other by the transcript", o.rep)
 	}
 	if got := log.settle(); got != "hello" {
 		t.Errorf("bytes %q, want the text once and no Enter of ours", got)
@@ -154,8 +171,8 @@ func TestSubmittedByAnotherEnterRealController(t *testing.T) {
 	if o.err != nil {
 		t.Fatalf("send: %v", o.err)
 	}
-	if o.rep.accept != acceptConfirmed || o.rep.evidence != evidenceHistory {
-		t.Errorf("report %+v, want confirmed by history", o.rep)
+	if o.rep.accept != acceptSubmittedByOther || o.rep.evidence != evidenceHistory {
+		t.Errorf("report %+v, want submitted_by_other by history", o.rep)
 	}
 	if got := log.settle(); got != prompt {
 		t.Errorf("bytes %q, want the text once and no Enter of ours", got)

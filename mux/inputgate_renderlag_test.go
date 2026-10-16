@@ -266,8 +266,9 @@ func TestNotReadyReadRestartsTheSettleClock(t *testing.T) {
 }
 
 // TestVerifyWindowNeverPassesTheDeadline: a short readyTimeoutMs caps the
-// settle wait: a box that never settles is reported by the deadline, not
-// after verifyMax.
+// settle wait, but never below the verify's own minimum window (r4 M2): a
+// box that never settles is reported after ~verifyMin, not after verifyMax,
+// and not after one read either.
 func TestVerifyWindowNeverPassesTheDeadline(t *testing.T) {
 	g := &fakeGate{checkFn: func(_ BoxExpect, n int) BoxCheck {
 		return boxMismatchCheck(fmt.Sprintf("frame%d", n), "partial", false)
@@ -275,8 +276,11 @@ func TestVerifyWindowNeverPassesTheDeadline(t *testing.T) {
 	m, _, _ := gatedMux(t, g)
 	o := runSend(t, m, sendRequest{text: "hello", enter: true, readyTimeoutMs: 400})
 	wantErr(t, o, protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true)
-	if o.elapsed > 400*time.Millisecond+500*time.Millisecond {
-		t.Errorf("took %v, want the verify capped by the 400ms deadline", o.elapsed)
+	if o.elapsed < verifyMin {
+		t.Errorf("took %v, want the verify to run its %v minimum window", o.elapsed, verifyMin)
+	}
+	if o.elapsed > verifyMin+700*time.Millisecond {
+		t.Errorf("took %v, want the verify capped near the %v minimum window", o.elapsed, verifyMin)
 	}
 }
 
