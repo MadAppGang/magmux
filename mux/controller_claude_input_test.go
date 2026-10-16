@@ -381,8 +381,22 @@ func TestInputAccepted(t *testing.T) {
 			step{"s1-box-history", "assistant-prose-same-words"}, AcceptNone, ""},
 		{"the assistant quoting ❯", step{"s1-box-history", "assistant-prose-same-words"}, "not a prompt.",
 			step{"s1-box-history", "assistant-quotes-prompt-glyph-and-dialog"}, AcceptNone, ""},
-		{"a slash command", step{"s1-box-history", "assistant-quotes-prompt-glyph-and-dialog"}, "/clear",
-			step{"s1-box-history", "after-slash-clear"}, AcceptTaken, evidenceHistory},
+		// A second queued entry under the first, while Claude inserted a tool
+		// row ABOVE the queue (`⎿ Running in the background`): the frontier
+		// is above the queue, the old queued entry is counted at the verify,
+		// and only the new one is evidence.
+		{"a second queued entry mid-turn", step{"s4-midturn", "queued-c"}, sentQueued3,
+			step{"s4-midturn", "queued-paste"}, AcceptTaken, evidenceHistory},
+		{"an old queued entry under inserted output", step{"s4-midturn", "queued-c"}, sentQueued,
+			step{"s4-midturn", "queued-paste"}, AcceptNone, ""},
+		{"a slash command", step{"s1-box-history", "after-slash-clear"}, "/compact",
+			step{"s1-box-history", "after-slash-compact"}, AcceptTaken, evidenceHistory},
+		// /clear WIPES the conversation, frontier included: the `❯ /clear`
+		// on the fresh screen cannot be placed after anything the verify saw,
+		// so it is not attributable and the history gives no evidence
+		// (review H3). A gated /clear answers unconfirmed.
+		{"/clear wipes the frontier", step{"s1-box-history", "assistant-quotes-prompt-glyph-and-dialog"}, "/clear",
+			step{"s1-box-history", "after-slash-clear"}, AcceptNone, ""},
 	} {
 		p := claudePaneAt(t, c.before.scenario, c.before.label)
 		g, _ := gatedClaudeOn(p)
@@ -462,7 +476,7 @@ func TestAcceptedByTranscript(t *testing.T) {
 	g, _ := gatedClaudeOn(p)
 	// An EQUAL transcript entry from before the baseline is not evidence: it
 	// is an earlier submission of the same text.
-	g.notePrompt(sentFrance)
+	g.notePrompt(sentFrance, time.Now())
 	chk := g.CheckBox(BoxExpect{Class: ClassSubmit, Exact: sentFrance, TypedText: true})
 	if chk.Verdict != BoxVerified {
 		t.Fatalf("check: %+v", chk)
@@ -472,12 +486,12 @@ func TestAcceptedByTranscript(t *testing.T) {
 		t.Fatalf("a transcript entry older than the baseline counted: %+v", got)
 	}
 
-	g.notePrompt("a different prompt")
+	g.notePrompt("a different prompt", time.Now())
 	if got := g.InputAccepted(chk.Baseline); got.State != AcceptNone {
 		t.Errorf("a transcript entry with a different key counted: %+v", got)
 	}
 	// Claude files the prompt as typed; the key ignores whitespace.
-	g.notePrompt(strings.ReplaceAll(sentFrance, " ", "  "))
+	g.notePrompt(strings.ReplaceAll(sentFrance, " ", "  "), time.Now())
 	if got := g.InputAccepted(chk.Baseline); got.State != AcceptTaken || got.Evidence != evidenceTranscript {
 		t.Errorf("an equal transcript entry after the baseline: %+v", got)
 	}

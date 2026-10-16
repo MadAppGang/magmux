@@ -439,37 +439,42 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 	// AUTHORITY for the first byte [D]. Between it and the first injectPTY
 	// there is only NotifyInput, an atomic flip: no pause, no I/O, no lock wait.
 	q := d.query()
-	var r InputReadiness
-	for {
-		if err := d.waitReady(ctx, q, start, deadline, rep); err != nil {
-			finish(err)
-			return
+	// gate runs steps 1 and 2 until the post-token re-ask is ready, and
+	// returns holding the token. It is entered again, token released, when
+	// the first byte's own re-ask (the keys loop) finds the pane not ready.
+	gate := func() (InputReadiness, error) {
+		for {
+			if err := d.waitReady(ctx, q, start, deadline, rep); err != nil {
+				return InputReadiness{}, err
+			}
+			if err := d.acquireToken(ctx, tok, start, deadline); err != nil {
+				return InputReadiness{}, err
+			}
+			held = true
+			r := d.g.InputReadiness(q)
+			if r.Ready {
+				return r, nil
+			}
+			// Not ready: a due Escape is pressed now, with the token held,
+			// and the token is released before waiting for the box to come
+			// back.
+			if _, err := d.tryDismiss(r, rep); err != nil {
+				return InputReadiness{}, err
+			}
+			<-tok
+			held = false
+			if !time.Now().Before(deadline) {
+				return InputReadiness{}, d.notReadyErr(r, start)
+			}
+			if !pause(ctx, gateStep) {
+				return InputReadiness{}, d.cancelled("nothing")
+			}
 		}
-		if err := d.acquireToken(ctx, tok, start, deadline); err != nil {
-			finish(err)
-			return
-		}
-		held = true
-		r = d.g.InputReadiness(q)
-		if r.Ready {
-			break
-		}
-		// Not ready: a due Escape is pressed now, with the token held, and
-		// the token is released before waiting for the box to come back.
-		if _, err := d.tryDismiss(r, rep); err != nil {
-			fail(err)
-			return
-		}
-		<-tok
-		held = false
-		if !time.Now().Before(deadline) {
-			fail(d.notReadyErr(r, start))
-			return
-		}
-		if !pause(ctx, gateStep) {
-			finish(d.cancelled("nothing"))
-			return
-		}
+	}
+	r, err := gate()
+	if err != nil {
+		finish(err)
+		return
 	}
 	gateWaited = time.Since(start)
 	boxWasEmpty := !r.BoxHasText
@@ -568,6 +573,22 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		if !pause(ctx, keyGap) {
 			finish(cancelledTyped("key " + k))
 			return
+		}
+		if !wrote {
+			// The FIRST byte of the delivery is this key, and the post-token
+			// re-ask is a keyGap old now: a reset or a dialog in that pause
+			// would be missed (review H4). Re-ask with the gate's own query;
+			// not ready sends the delivery back to the gate, nothing written.
+			rr := d.g.InputReadiness(q)
+			if !rr.Ready {
+				<-tok
+				held = false
+				if rr, err = gate(); err != nil {
+					finish(err)
+					return
+				}
+			}
+			boxWasEmpty, pasteAbove = !rr.BoxHasText, rr.MaxPaste
 		}
 		stop, err := between()
 		if err != nil {

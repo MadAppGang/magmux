@@ -1004,12 +1004,14 @@ func (c *ClaudeCodeController) applyLine(line []byte) {
 		if !isPrompt {
 			return
 		}
-		// Acceptance evidence: a transcript user entry, keyed and sequenced.
-		c.notePrompt(content)
+		// Acceptance evidence: a transcript user entry, keyed, sequenced and
+		// stamped with its OWN timestamp (freshness, review H2).
+		written := parseClaudeTimestamp(entry["timestamp"])
+		c.notePrompt(content, written)
 		// New turn starting
 		c.snap.LastUserPrompt = content
 		c.snap.State = CtrlWorking
-		c.snap.StartedAt = parseClaudeTimestamp(entry["timestamp"])
+		c.snap.StartedAt = written
 		c.snap.CompletedAt = time.Time{}
 		c.snap.LastResponse = ""
 		c.snap.LastTool = ""

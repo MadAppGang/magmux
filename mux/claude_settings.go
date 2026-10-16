@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/MadAppGang/magmux/sockdir"
@@ -99,11 +100,20 @@ func readSettingsFile(path string) ([]byte, error) {
 // file at all, and the caller falls back to unparsed.
 //
 // The path is emitted single-quoted into a shell string, so a path holding a
-// quote or whitespace is refused before anything is created.
+// quote or whitespace is refused before anything is created. It is made
+// ABSOLUTE first: a relative --sock-dir gives a relative directory, and the
+// command the path lands in may `cd` before claude runs, or run under another
+// cfg.Dir, so a relative name would resolve somewhere else in the child
+// (review M5).
 func writeSettingsCopy(dir string, merged []byte) (string, error) {
 	if dir == "" {
 		return "", errors.New("no settings directory")
 	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("settings directory %q: %w", dir, err)
+	}
+	dir = abs
 	if strings.ContainsAny(dir, "' \t\n") {
 		return "", fmt.Errorf("settings directory %q cannot be single-quoted safely", dir)
 	}

@@ -689,7 +689,7 @@ func rewriteClaudeLaunch(cfg PaneConfig, launch launchInfo, basis gateBasis, dir
 			word = shellQuoteJSON(merged)
 		}
 	} else {
-		path, why := settingsPath(use, relOK, cfg.Dir)
+		path, why := settingsPath(use, relOK, cfg.Dir, cfg.Env)
 		if why != "" {
 			return unparsed(why)
 		}
@@ -739,8 +739,9 @@ func withLine(args []string, line string) []string {
 
 // settingsPath resolves a --settings value that is not inline JSON to the file
 // it names, or says why it cannot: an expansion, `-`, a relative path that a
-// preceding command could have moved the base of.
-func settingsPath(use settingsUse, relOK bool, base string) (string, string) {
+// preceding command could have moved the base of, a `~/` whose HOME is not
+// knowable. env is cfg.Env, the child's overrides.
+func settingsPath(use settingsUse, relOK bool, base string, env []string) (string, string) {
 	v := use.value
 	switch {
 	case v == "" || v == "-":
@@ -748,9 +749,16 @@ func settingsPath(use settingsUse, relOK bool, base string) (string, string) {
 	case strings.ContainsAny(v, "$`"):
 		return "", "--settings value holds an expansion"
 	case use.tilde:
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", "~/ with no home directory"
+		// The CHILD's shell expands the ~, with the child's HOME (review M5):
+		// cfg.Env's last HOME= when it sets one, else the HOME the child
+		// inherits from magmux. A command before the invocation could change
+		// HOME (`export HOME=…;`), exactly as a `cd` moves a relative base.
+		if !relOK {
+			return "", "~/ --settings path after another command"
+		}
+		home, ok := childHome(env)
+		if !ok {
+			return "", "~/ --settings path with no absolute HOME for the child"
 		}
 		return filepath.Join(home, v[2:]), ""
 	case filepath.IsAbs(v):
@@ -766,6 +774,28 @@ func settingsPath(use settingsUse, relOK bool, base string) (string, string) {
 		base = wd
 	}
 	return filepath.Join(base, v), ""
+}
+
+// childHome is the HOME the pane's child will have: the LAST HOME= in env
+// (cfg.Env goes last in spawnPTY, and os/exec keeps the last occurrence),
+// else magmux's own, which the child inherits. Only an absolute directory is
+// an answer — an empty or relative HOME is not something magmux can expand
+// the way the child's shell would.
+func childHome(env []string) (string, bool) {
+	home, set := "", false
+	for i := len(env) - 1; i >= 0; i-- {
+		if v, ok := strings.CutPrefix(env[i], "HOME="); ok {
+			home, set = v, true
+			break
+		}
+	}
+	if !set {
+		home = os.Getenv("HOME")
+	}
+	if home == "" || !filepath.IsAbs(home) {
+		return "", false
+	}
+	return filepath.Clean(home), true
 }
 
 // shellSettings finds every --settings in a lexed direct invocation, in

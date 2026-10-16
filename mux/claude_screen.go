@@ -47,6 +47,12 @@ type claudeScreen struct {
 	Dismissable bool          // a dialog Escape declines (its `Esc to cancel` row, or a plan dialog)
 	Prompts     []promptEntry // USER-PROMPT entries above the box, top to bottom
 	MaxPaste    int           // largest N of any `[Pasted text #N` token in the box or the entries
+
+	// conv is the conversation region (every row above the box's top rule)
+	// and spinnerRow the first of its rows in the spinner zone (len(conv)
+	// when there is no spinner): what acceptance's frontier is read from.
+	conv       []styledRow
+	spinnerRow int
 }
 
 // promptEntry is one user prompt as Claude shows it in the conversation: a `❯`
@@ -62,6 +68,10 @@ type promptEntry struct {
 	// Shell: a bash-mode entry, `! cmd` (s7). Evidence only for a bash-mode
 	// send, and a `❯` entry never is for one (matches).
 	Shell bool
+	// row/end: the screen rows of its `❯` row and of its last row (the
+	// queued hint, when it has one). Acceptance places it against the
+	// frontier with them.
+	row, end int
 }
 
 const (
@@ -332,9 +342,11 @@ func parseClaudeScreen(rows []styledRow, cols int) claudeScreen {
 				sc.Insert = true
 			}
 		}
+		sc.conv, sc.spinnerRow = rows[:top], top
 		for i := top - 1; i >= 0 && i >= top-3; i-- {
 			if spinnerRe.MatchString(strings.TrimLeft(plain(rows[i]), " ")) {
 				sc.Working = true
+				sc.spinnerRow = i
 			}
 		}
 		sc.Prompts = parsePromptEntries(rows[:top])
@@ -419,7 +431,11 @@ func parsePromptEntries(region []styledRow) []promptEntry {
 			}
 		}
 		text := joinRows(first, skip, region[i+1:j])
-		e := promptEntry{Text: text, Key: inputKey(text), RenderedKey: renderedKey(text), Queued: queued, Shell: shell}
+		e := promptEntry{Text: text, Key: inputKey(text), RenderedKey: renderedKey(text), Queued: queued, Shell: shell,
+			row: i, end: j - 1}
+		if queued {
+			e.end = j // the hint row
+		}
 		if m := pasteTokenRe.FindStringSubmatchIndex(text); m != nil && m[0] == 0 {
 			e.Paste, _ = strconv.Atoi(text[m[2]:m[3]])
 		}

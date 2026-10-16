@@ -843,9 +843,10 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   of the box equals what was typed), `paste_token` (a NEW `[Pasted text #N` above
   the post-token `MaxPaste`) or, when the content is unknowable from the
   request, `non_empty`; anything else is `not_accepted` with Enter withheld.
-  (2) No ok without EVIDENCE attributable to a user prompt: a new `❯` history
-  entry carrying the verified content, or a transcript user entry equal to it
-  and newer than the baseline. An emptied box is NEVER evidence — the measured
+  (2) No ok without EVIDENCE ATTRIBUTABLE TO THIS SEND: a `❯` history entry
+  carrying the verified content BELOW THE FRONTIER, or a transcript user entry
+  equal to it and WRITTEN after the verify. When attribution is ambiguous the
+  answer is `unconfirmed`, never ok. An emptied box is NEVER evidence — the measured
   loss looks exactly like a submit — and neither is the pane going
   working/awaiting (NotifyInput manufactures that transition). The baseline is
   taken from the SAME read that verified the box, so nothing can happen between
@@ -866,6 +867,32 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   `TestSharedPrefixSecondSendNeedsItsOwnEntry`,
   `TestLostIdenticalResendDuringToolCallIsUnconfirmed`, `TestTakenBeatsInBox`,
   `TestPreSubmitMismatchWithholdsEnter`.
+
+- **History evidence is attributed to a FRONTIER, never counted.** A rise in
+  the VISIBLE number of matching entries proves nothing: the conversation
+  region is whatever the box leaves of the viewport, so a long box hides an
+  older identical prompt at the verify and the same entry reappears when the
+  lost text leaves the box (review H3). The baseline records the frontier —
+  the last 3 stable conversation rows (`frontierOf`: no blank rows, no
+  right-aligned chrome such as `◐ medium · /effort` or the token count, no
+  spinner zone, `⏺` folded because it blinks) ABOVE the trailing run of prompt
+  entries, because Claude inserts live output above a queued entry
+  (`queued-c → queued-paste`) — and how many matching entries were already
+  below it. Acceptance re-locates the LOWEST copy of that signature and counts
+  only entries below it; anything a resize or a scroll brings back is above.
+  A frontier that cannot be found (scrolled off, reflowed by a resize, wiped
+  by `/clear`) means nothing visible is attributable: no history evidence, so
+  a gated `/clear` answers `unconfirmed`. `TestHistoryEvidenceIsAttributedToTheFrontier`,
+  `TestNoFrontierIsNoHistoryEvidence`, `TestInputAccepted`.
+
+- **Transcript evidence is fresh by the entry's OWN timestamp.** `notePrompt`
+  stores the timestamp Claude wrote on the entry, not the moment the render
+  goroutine read it: with delayed polling or a late discovery, an identical
+  prompt submitted earlier is read AFTER a new, lost send, and a consumption
+  sequence alone would call it this send's (review H2). `writtenSince` needs a
+  stamp at or after the verify (truncated to Claude's millisecond); an entry
+  with no timestamp is never fresh. The sequence check stays too.
+  `TestTranscriptOldEntryConsumedLateIsNotEvidence`, `TestAcceptedByTranscript`.
 
 - **History shows a collapsed paste EXPANDED, so a paste is confirmed by the
   text it SENT.** Claude 2.1.301 never writes a `[Pasted text #N]` history
@@ -913,8 +940,13 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   acquired holding NOTHING, against the same deadline, and is the head of the
   order `typing token -> treeMu -> p.mu`. After acquiring it the delivery
   re-asks readiness, because the wait may have been long; only that re-ask
-  authorises the first byte. Timeout is `busy`/`typing_in_progress`, nothing
-  typed. `TestTypingTokenSerialisesConnections`, `TestTokenDeadlineIsTypingInProgress`.
+  authorises the first byte — and nothing but `NotifyInput` may stand between
+  it and that byte. A keys-only send pauses `keyGap` before its first key, so
+  it RE-ASKS after that pause, and a not-ready answer sends it back to the gate
+  with nothing written (review H4). Timeout is `busy`/`typing_in_progress`,
+  nothing typed. `TestTypingTokenSerialisesConnections`,
+  `TestTokenDeadlineIsTypingInProgress`, `TestFirstKeyRechecksReadinessAfterItsGap`,
+  `TestFirstKeyNotReadyToDeadlineIsBusy`.
 
 - **`ttyWatch.mu` is a LEAF.** Never held across `read()` (the ioctl), never
   while taking another lock; `heat` may start the goroutine under it because a
@@ -959,7 +991,13 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   `sockdir.ReapSettings` removes a name only when it matches, its pid
   round-trips, is not ours, is a regular file, and `pidIsGone` — evaluated last.
   `TestReapSettings*`, `TestSettingsDirRefusesForeignMode`,
-  `TestSettingsTempFileRemovedOnReap`.
+  `TestSettingsTempFileRemovedOnReap`. Every path resolves in the CHILD's
+  context (review M5): the copy's path is made ABSOLUTE before it is emitted
+  (a relative `--sock-dir` would otherwise land a relative name in a command
+  that may `cd`), and an unquoted `~/` value is expanded with the child's HOME
+  — `cfg.Env`'s last `HOME=`, else the inherited one — or is `unparsed` when
+  that HOME is empty or relative, or when a command before the invocation could
+  have changed it. `TestSettingsCopyPathIsAbsolute`, `TestTildeSettingsUseTheChildsHome`.
 
 - **Nothing may set `msg.sub` on an `opMsg`.** An op that runs `send` already
   OCCUPIES the lane; a `sub` would enqueue the delivery on that same lane

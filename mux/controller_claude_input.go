@@ -11,10 +11,11 @@ package mux
 //     this send put there? The same sample + read, and the acceptance baseline
 //     is taken from that SAME read, so nothing can happen between the verify
 //     and the baseline.
-//   - InputAccepted: after the Enter, is there evidence attributable to a USER
-//     PROMPT — a new `❯` entry carrying the verified content, or a transcript
-//     user entry equal to it? An emptied box is never evidence: the measured
-//     loss (F3) looks exactly like a submit.
+//   - InputAccepted: after the Enter, is there evidence attributable to THIS
+//     SEND — a `❯` entry carrying the verified content below the verify's
+//     conversation frontier, or a transcript user entry equal to it and written
+//     after the verify? An emptied box is never evidence: the measured loss
+//     (F3) looks exactly like a submit.
 //
 // Everything here is safe from any goroutine: the pane's content is read
 // through tailView (p.mu, taken and released inside), the terminal through the
@@ -58,18 +59,27 @@ const (
 // pane, or a pane with no PTY): not raw, so never ready.
 var errNoTTY = errors.New("no termios watch for this pane")
 
-// promptMark is the newest transcript user entry: its key and a sequence
-// number that grows by one per REAL user entry. Written by applyLine on the
-// render goroutine, read lock-free by acceptance.
+// promptMark is the newest transcript user entry: its key, a sequence number
+// that grows by one per REAL user entry, and the entry's OWN timestamp — when
+// Claude wrote it, not when the render goroutine got round to reading it
+// (zero when the entry carried none). Written by applyLine on the render
+// goroutine, read lock-free by acceptance.
 type promptMark struct {
-	key string
-	seq uint64
-	at  time.Time
+	key     string
+	seq     uint64
+	written time.Time
 }
 
 // claudeBaseline is the Claude half of an AcceptBaseline.
 type claudeBaseline struct {
-	matchCount    int    // entries on the CheckBox screen that already match
+	// frontier is the conversation's last stable rows on the CheckBox screen
+	// (frontierOf); below is how many entries under it already matched. An
+	// entry is this send's only if it appears below the frontier's
+	// re-location, so an older identical entry a box resize or a scroll
+	// brings back into view is never counted (review H3). Empty: no
+	// frontier, no history evidence.
+	frontier      []string
+	below         int
 	transcriptSeq uint64 // lastPrompt.seq at the CheckBox read
 	// renderedKey of the verified and of the sent text: what a HISTORY entry
 	// is compared with, because Claude renders markdown there (F10).
@@ -79,13 +89,14 @@ type claudeBaseline struct {
 	shell bool
 }
 
-// notePrompt records a real transcript user entry.
-func (c *ClaudeCodeController) notePrompt(text string) {
+// notePrompt records a real transcript user entry and the timestamp Claude
+// wrote on it.
+func (c *ClaudeCodeController) notePrompt(text string, written time.Time) {
 	seq := uint64(1)
 	if prev := c.lastPrompt.Load(); prev != nil {
 		seq = prev.seq + 1
 	}
-	c.lastPrompt.Store(&promptMark{key: inputKey(text), seq: seq, at: time.Now()})
+	c.lastPrompt.Store(&promptMark{key: inputKey(text), seq: seq, written: written})
 }
 
 func (c *ClaudeCodeController) transcriptSeq() uint64 {
@@ -352,9 +363,144 @@ func newAcceptBaseline(sc claudeScreen, verified, sent string, paste int, at tim
 	b := AcceptBaseline{At: at, VerifiedKey: inputKey(verified), SentKey: inputKey(sent), Paste: paste}
 	cd := claudeBaseline{transcriptSeq: seq, verifiedRendered: renderedKey(verified), sentRendered: renderedKey(sent), shell: sc.BoxShell}
 	b.controllerData = cd // countMatches reads the rendered keys from it
-	cd.matchCount = countMatches(sc.Prompts, b)
+	if row, sig := frontierOf(sc); sig != nil {
+		cd.frontier = sig
+		cd.below = countMatches(entriesBelow(sc.Prompts, row), b)
+	}
 	b.controllerData = cd
 	return b
+}
+
+// ── the history frontier (review H3) ────────────────────────────────────────
+//
+// A VISIBLE count of matching entries is not evidence: the conversation region
+// is whatever the box leaves of the viewport, so a long box hides an older
+// identical entry at the verify and the same entry reappears when the box
+// empties. Evidence is an entry that appears BELOW the conversation's last
+// stable rows as they stood at the verify — the frontier — re-located on the
+// new screen. New output and new entries can only appear below it; anything a
+// resize or a scroll brings back is above it. Where it cannot be re-located
+// (it scrolled off, a resize reflowed it, /clear wiped it) nothing visible is
+// attributable and the history gives no evidence; the transcript still can.
+
+// frontierRows is how many stable rows make the frontier's signature: enough
+// that a repeated reply ("⏺ ok") does not re-locate it somewhere else.
+const frontierRows = 3
+
+// frontierIndentMax: a row indented further than this is right-aligned
+// chrome — `◐ medium · /effort`, the token count — that Claude draws above the
+// box and moves as the conversation grows (s1, s3). Never conversation.
+const frontierIndentMax = 16
+
+// stableRow is one conversation row that can serve as the frontier: its
+// index on the screen and its normalised text (frontierText).
+type stableRow struct {
+	row  int
+	text string
+}
+
+// frontierText normalises a row for the frontier comparison: the `⏺` glyph
+// blinks on a running tool row (s4BlinkOff/On), and NBSPs and the edges carry
+// nothing. "" = not a usable row.
+func frontierText(r styledRow) string {
+	t := strings.ReplaceAll(plain(r), "⏺", " ")
+	indent := len(t) - len(strings.TrimLeft(t, " "))
+	t = strings.TrimSpace(t)
+	if t == "" || indent > frontierIndentMax || allFaint(r) {
+		return ""
+	}
+	return t
+}
+
+// stableRows lists the conversation rows that can serve as a frontier, top to
+// bottom: every non-blank row above the box except right-aligned chrome,
+// faint rows, and the spinner zone (Claude's working row and everything under
+// it, which redraws every frame).
+func stableRows(sc claudeScreen) []stableRow {
+	var out []stableRow
+	for i, r := range sc.conv {
+		if i >= sc.spinnerRow {
+			break
+		}
+		if t := frontierText(r); t != "" {
+			out = append(out, stableRow{row: i, text: t})
+		}
+	}
+	return out
+}
+
+// frontierOf is the verify screen's frontier: the last frontierRows stable
+// rows ABOVE the trailing run of prompt entries — a queued (mid-turn) entry
+// is pinned under the live output, which Claude inserts above it (s4
+// queued-c → queued-paste), so it is not a fixed point. row is the
+// frontier's last screen row; a nil signature means there is none.
+func frontierOf(sc claudeScreen) (row int, sig []string) {
+	rows := stableRows(sc)
+	end := len(rows)
+	for end > 0 && inEntry(sc.Prompts, rows[end-1].row) {
+		end--
+	}
+	if end == 0 {
+		return 0, nil
+	}
+	start := max(0, end-frontierRows)
+	for _, r := range rows[start:end] {
+		sig = append(sig, r.text)
+	}
+	return rows[end-1].row, sig
+}
+
+// inEntry: screen row i belongs to a prompt entry (its rows, and the queued
+// hint under it).
+func inEntry(es []promptEntry, i int) bool {
+	for _, e := range es {
+		if i >= e.row && i <= e.end {
+			return true
+		}
+	}
+	return false
+}
+
+// locateFrontier finds the frontier on a later screen: the LOWEST run of
+// stable rows equal to the signature. The lowest, because the true frontier
+// can only be at or above any copy of it that new output repeated, so every
+// entry below the lowest match is new.
+func locateFrontier(sc claudeScreen, sig []string) (row int, ok bool) {
+	rows := stableRows(sc)
+	for j := len(rows) - 1; j >= len(sig)-1; j-- {
+		match := true
+		for k := range sig {
+			if rows[j-len(sig)+1+k].text != sig[k] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return rows[j].row, true
+		}
+	}
+	return 0, false
+}
+
+// entriesBelow is the entries that start under screen row r.
+func entriesBelow(es []promptEntry, r int) []promptEntry {
+	for i, e := range es {
+		if e.row > r {
+			return es[i:]
+		}
+	}
+	return nil
+}
+
+// newHistoryEntry: the screen shows a matching entry below the re-located
+// frontier that was not there at the verify.
+func newHistoryEntry(sc claudeScreen, b AcceptBaseline) bool {
+	cd, _ := b.controllerData.(claudeBaseline)
+	if len(cd.frontier) == 0 {
+		return false
+	}
+	row, ok := locateFrontier(sc, cd.frontier)
+	return ok && countMatches(entriesBelow(sc.Prompts, row), b) > cd.below
 }
 
 // matches says whether an entry carries the baselined content. The entry's
@@ -408,18 +554,26 @@ func countMatches(es []promptEntry, b AcceptBaseline) int {
 // is checked BEFORE InBox: if a new entry proves the submission AND the box
 // still shows the text, pressing Enter again would submit it twice.
 //
-//	1  more matching entries than at the baseline          Taken / history
-//	2  a transcript user entry after it, with its key      Taken / transcript
+//	1  a new matching entry below the frontier             Taken / history
+//	2  a transcript user entry WRITTEN after it, its key   Taken / transcript
 //	3  the box still holds the verified content            InBox
 //	—  anything else (an empty box above all)              None
+//
+// Both kinds of evidence must be ATTRIBUTABLE to this send. History: below
+// the frontier (newHistoryEntry). Transcript: the entry's own timestamp is at
+// or after the verify — an identical prompt submitted earlier but read late
+// (delayed polling, a late discovery) is that earlier submission, and an
+// entry with no timestamp proves nothing (review H2). The sequence check
+// stays as well: an entry already read at the verify is never new.
 func acceptVerdict(sc claudeScreen, b AcceptBaseline, lp *promptMark) AcceptVerdict {
 	cd, _ := b.controllerData.(claudeBaseline)
 	v := AcceptVerdict{Dialog: sc.Dialog}
-	if countMatches(sc.Prompts, b) > cd.matchCount {
+	if newHistoryEntry(sc, b) {
 		v.State, v.Evidence = AcceptTaken, evidenceHistory
 		return v
 	}
-	if lp != nil && lp.seq > cd.transcriptSeq && lp.key != "" && (lp.key == b.SentKey || lp.key == b.VerifiedKey) {
+	if lp != nil && lp.seq > cd.transcriptSeq && writtenSince(lp.written, b.At) &&
+		lp.key != "" && (lp.key == b.SentKey || lp.key == b.VerifiedKey) {
 		v.State, v.Evidence = AcceptTaken, evidenceTranscript
 		return v
 	}
@@ -428,6 +582,14 @@ func acceptVerdict(sc claudeScreen, b AcceptBaseline, lp *promptMark) AcceptVerd
 		v.State = AcceptInBox
 	}
 	return v
+}
+
+// writtenSince: a transcript entry stamped `written` was written at or after
+// the verify at `at`. Claude stamps to the millisecond, so the verify's
+// instant is truncated to it; a missing stamp is never fresh. Both clocks are
+// this machine's wall clock.
+func writtenSince(written, at time.Time) bool {
+	return !written.IsZero() && !written.Before(at.Truncate(time.Millisecond))
 }
 
 // ── Claude's session registry (corroboration only) ──────────────────────────

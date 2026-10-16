@@ -780,7 +780,7 @@ prescribe a retry.
 | `not_accepted` `text_mismatch` | no | the box held something other than what was typed: partial text, or nothing. Nothing was submitted. A retype is refused `box_not_empty` until the box is cleared |
 | `not_accepted` `empty_box` | no | a submit found the box empty, so there was nothing to submit |
 | `not_accepted` `still_in_box` | yes, once or twice | the text is still in the box, unsubmitted. **Do not retype it**: it is there |
-| `not_accepted` `unconfirmed` | yes | no user-prompt entry and no transcript entry appeared within the windows. The prompt may have been lost, or taken without a visible sign. You decide |
+| `not_accepted` `unconfirmed` | yes | no user-prompt entry and no transcript entry that can be attributed to THIS send appeared within the windows. An identical older prompt does not count: a history entry must appear below the conversation as it stood at the verify, and a transcript entry must be stamped after it. A command that wipes the screen, such as `/clear`, therefore answers this. The prompt may have been lost, or taken without a visible sign. You decide |
 
 **How long to wait for the reply.** Every part of a gated send is paced by a
 constant, so its upper bound is a formula: `readyTimeoutMs`, plus the typing,

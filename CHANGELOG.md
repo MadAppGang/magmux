@@ -19,8 +19,12 @@ commit subjects and remain on the
   `--controller`). A gated send types nothing until the input box is on screen,
   the terminal has been raw and still for a second, no dialog is showing, the
   box is empty and vim mode is off. It presses Enter only once the box holds
-  exactly what was typed, and it answers ok only when a new user-prompt entry or
-  transcript entry carrying that text appears. The ok reply adds `waitedMs`,
+  exactly what was typed, and it answers ok only when evidence attributable to
+  THAT send appears: a user-prompt entry carrying the text below the
+  conversation as it stood at the verify, or a transcript entry stamped after
+  it. An identical older prompt scrolling back into view, or read late from the
+  transcript, is not evidence, so a screen-wiping `/clear` answers
+  `unconfirmed`. The ok reply adds `waitedMs`,
   `verified` (`exact`, `paste_token` or `non_empty`), `accept` (`confirmed`,
   `resent_enter`, or `in_box` for a send with no Enter) and `evidence`
   (`history` or `transcript`). Typing while Claude is working is allowed:
