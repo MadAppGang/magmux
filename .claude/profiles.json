@@ -15,9 +15,10 @@
         "go@magus": "latest",
         "browser-use@magus": "latest",
         "terminal@magus": "latest",
-        "setup@magus": "latest",
         "multimodel@magus": "latest",
-        "dev@magus": "latest"
+        "dev@magus": "latest",
+        "code-search@magus": "latest",
+        "madbench@magus": "latest"
       },
       "createdAt": "2026-08-30T12:47:28.667Z",
       "mcpServers": {
