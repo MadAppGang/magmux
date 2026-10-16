@@ -11,6 +11,8 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-17
+
 ### Added
 
 - **A `send` into a Claude Code pane waits until Claude can take it, and says
@@ -454,6 +456,7 @@ commit subjects and remain on the
   nudges, and the summary "the pilot stopped without calling finish". The
   provider's own error is now reported, and nudging stops once one is seen.
 
+[0.16.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.16.0
 [0.15.1]: https://github.com/MadAppGang/magmux/releases/tag/v0.15.1
 [0.15.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.15.0
 [0.14.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.14.0
