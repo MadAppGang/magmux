@@ -377,6 +377,10 @@ func (m *Magmux) reapChild(p *Pane) bool {
 		return false
 	}
 	err := p.cmd.Wait()
+	// The child is gone, so nothing will read its settings copy again. Here
+	// and not in waitForChild/unwindPane: reapChild is the one place both of
+	// them reach once cmd.Wait has returned. Outside p.mu — it is file I/O.
+	p.removeSettingsFile()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.dead = true

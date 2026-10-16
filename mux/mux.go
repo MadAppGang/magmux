@@ -229,6 +229,13 @@ type Magmux struct {
 	// nothing of magmux's is held while calling into it.
 	hub     *hub.Hub
 	hubOnce sync.Once
+	// typingTokens maps a gated *Pane to its typing token, a cap-1 channel
+	// (inputgate.go). Lazily filled by typingToken, so the zero value works in a
+	// struct literal; entries are never removed, which is the slot table's own
+	// rule (m.allPanes is append-only), so a token can never be swapped under a
+	// delivery holding it. Order: p.typing -> treeMu -> p.mu, and the token is
+	// never acquired under any lock.
+	typingTokens sync.Map
 	// pluginHost is the plugin registry and router (package plugin). Reached
 	// ONLY through m.plugins(), lazily, for the reason the hub is: a
 	// struct-literal Magmux has to work, and every socket line asks the host

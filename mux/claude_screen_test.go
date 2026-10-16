@@ -462,11 +462,12 @@ func TestParseClaudeScreenDialogs(t *testing.T) {
 	// `-- INSERT --` footer token; the user's status line ` I ` is not it.
 	checkScreen(t, "insert-footer-empty", claudeScreenAt(t, "s5-insert-plan", "insert-footer-empty"),
 		screenWant{box: true, insert: true})
-	// The 2.1.301 plan dialog has NO `Esc to cancel` row (Escape still
-	// declines it: after-escape-plan), so by the design's rule it is not
-	// dismissable. Recorded in the phase log for the architect.
+	// The 2.1.301 plan dialog has NO `Esc to cancel` row, and Escape still
+	// declines it: after-escape-plan shows the box back, plan mode kept and
+	// nothing approved. Orchestrator ruling (phase 5): it IS dismissable, so
+	// dismissability is not keyed on that row for `plan`.
 	checkScreen(t, "dialog-plan", claudeScreenAt(t, "s5-insert-plan", "dialog-plan"),
-		screenWant{dialog: "plan"})
+		screenWant{dialog: "plan", dismiss: true})
 	plan := "Plan how to create an empty file named zz-plan.txt, then present the plan with the ExitPlanMode tool. Keep the plan to one line."
 	checkScreen(t, "after-escape-plan", claudeScreenAt(t, "s5-insert-plan", "after-escape-plan"),
 		screenWant{box: true, insert: true, prompts: []string{k(plan)}})

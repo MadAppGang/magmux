@@ -667,6 +667,16 @@ func Main(args []string) int {
 	// and costs nothing in ordering.
 	mux.startPlugins(pluginCmds)
 
+	// The private settings directory's two sweeps (claude_settings.go). The
+	// dead-owner sweep runs synchronously before any pane is built, beside
+	// socketServer's ReapStale and under the same deadline; the exit sweep
+	// takes whatever copy this process still owns. It is a defer of its own,
+	// not part of restore(), because restore() returns early headless — which
+	// is exactly the mode the driven panes that get a copy run in. A hard exit
+	// (second signal, SIGKILL) skips it, and the next start's sweep reaps it.
+	mux.sweepSettings()
+	defer mux.removeOwnSettings()
+
 	if useGrid {
 		if err := mux.buildGrid(commands); err != nil {
 			mux.restore()

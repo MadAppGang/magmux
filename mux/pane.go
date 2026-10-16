@@ -57,6 +57,11 @@ type Pane struct {
 	// settingsDir is where this pane's private settings copy would go
 	// (settingsDir(PaneConfig.SockDir)). Write-once before publication.
 	settingsDir string
+	// settingsFile is the private settings copy this pane OWNS (a merged
+	// `--settings` file, claude_settings.go), or "". Written once in spawnPTY
+	// before publication; removed once cmd.Wait has returned (reapChild), on
+	// the spawn-failure path, and by the exit sweep for anything left over.
+	settingsFile string
 	// Structural fields — guarded by treeMu, NOT by mu. Everything below
 	// screen is content state and stays under mu exactly as before.
 	splitType     SplitType
@@ -291,7 +296,21 @@ func (p *Pane) spawnPTY(cfg PaneConfig) error {
 	// Set initial size
 	pty.SetWinSize(ptmx, p.h, p.w)
 
-	cmd := exec.Command(cfg.Cmd, cfg.Args...)
+	// The editor-mode override (claude_launch.go): a gated, direct claude
+	// invocation is exec'd with editorMode "normal" merged into its one
+	// effective --settings. Only the EXEC sees the rewrite — p.launchLine,
+	// which discovery reads, stays the original. An unparsed launch runs
+	// byte-identical and the gate's vim_mode check covers it.
+	rw := rewriteClaudeLaunch(cfg, claudeLaunchOf(cfg), p.gateBasis, p.settingsDir)
+	if rw.override != overrideNone {
+		p.editorOverride = rw.override
+	}
+	p.settingsFile = rw.file
+	if rw.why != "" && dbgFile != nil {
+		fmt.Fprintf(dbgFile, "[editor] launch left as is (%s): %s\n", rw.why, rw.override)
+	}
+
+	cmd := exec.Command(cfg.Cmd, rw.args...)
 	cmd.Dir = cfg.Dir
 	cmd.Stdin = pts
 	cmd.Stdout = pts
@@ -336,6 +355,7 @@ func (p *Pane) spawnPTY(cfg PaneConfig) error {
 	if err := cmd.Start(); err != nil {
 		pts.Close()
 		ptmx.Close()
+		p.removeSettingsFile()
 		return err
 	}
 	pts.Close() // parent doesn't need slave side

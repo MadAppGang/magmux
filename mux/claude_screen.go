@@ -41,7 +41,7 @@ type claudeScreen struct {
 	// api_key | onboarding. Read only when no box is visible, and only inside
 	// the dialog region.
 	Dialog      string
-	Dismissable bool          // a dialog Escape declines, with its `Esc to cancel` row
+	Dismissable bool          // a dialog Escape declines (its `Esc to cancel` row, or a plan dialog)
 	Prompts     []promptEntry // USER-PROMPT entries above the box, top to bottom
 	MaxPaste    int           // largest N of any `[Pasted text #N` token in the box or the entries
 }
@@ -125,6 +125,14 @@ const (
 // dismissableDialogs are the kinds an Escape DECLINES. Boot dialogs are never
 // among them: Escape on the trust prompt exits Claude.
 var dismissableDialogs = map[string]bool{"permission": true, "question": true, "plan": true, "select": true}
+
+// dismissableWithoutHint are the dismissable kinds whose dialog carries NO
+// `Esc to cancel` row, so the hint cannot be what proves Escape declines them.
+// The 2.1.301 plan dialog (ExitPlanMode, "Would you like to proceed?") is one:
+// measured, Escape closes it, Claude stays in plan mode, nothing is approved,
+// and the input box returns (s5-insert-plan, after-escape-plan). Its marker
+// and its option-row anchor are what identify it instead.
+var dismissableWithoutHint = map[string]bool{"plan": true}
 
 // inputKey is THE normaliser, used on BOTH sides of every comparison: every
 // rune for which unicode.IsSpace holds is removed, and nothing else. Wrap
@@ -414,7 +422,7 @@ func parseDialog(rows []styledRow, cols int) (kind string, dismissable bool) {
 			if !d.marker.MatchString(t) || !anchored(d.anchor, region, i) {
 				continue
 			}
-			return d.kind, dismissableDialogs[d.kind] && escHint
+			return d.kind, dismissableDialogs[d.kind] && (escHint || dismissableWithoutHint[d.kind])
 		}
 	}
 	return "", false

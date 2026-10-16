@@ -1144,6 +1144,95 @@ func (s *Session) Transcript(ctx context.Context, pane, turns int) ([]Transcript
 	return out, nil
 }
 
+// SendOptions is one `send` request, with every field the verb takes. The
+// zero value of each is the verb's own default: Enter nil means true, and the
+// three gate fields mean nothing on a pane magmux does not gate.
+type SendOptions struct {
+	Text  string
+	Keys  []string
+	Enter *bool // nil: magmux's default (true)
+	Typed bool  // type the text as keystrokes; exclusive with Paste
+	Paste bool  // deliver the text as one bracketed paste
+	Label string
+	// DismissDialogs lets a gated pane Escape a dismissable dialog (it never
+	// approves one). ReadyTimeoutMs is the readiness deadline (0 = 10 s,
+	// clamped at 60 s). NoGate skips the gate, the verify and acceptance.
+	DismissDialogs bool
+	ReadyTimeoutMs int
+	NoGate         bool
+}
+
+// submits reports whether the request ends in an Enter: enter (default
+// true), or a trailing enter/return key.
+func (o SendOptions) submits() bool {
+	if o.Enter == nil || *o.Enter {
+		return true
+	}
+	if n := len(o.Keys); n > 0 {
+		k := strings.ToLower(strings.TrimSpace(o.Keys[n-1]))
+		return k == "enter" || k == "return"
+	}
+	return false
+}
+
+// SendBudget is how long a send with these options can take on a GATED pane
+// (protocol.SendBudget): the readiness wait, the paced typing, the box check
+// and the acceptance windows. SendWith waits at least this long, so the
+// client's own timer never cuts short a reply magmux is still entitled to
+// give. A noGate send is never gated and is budgeted as an ordinary one.
+func (o SendOptions) SendBudget() time.Duration {
+	if o.NoGate {
+		return 0
+	}
+	s := protocol.SendShape{ReadyTimeoutMs: o.ReadyTimeoutMs, Keys: len(o.Keys), Submit: o.submits()}
+	if o.Typed {
+		s.Typed, s.TypedWrites = true, protocol.TypedWriteCount(o.Text)
+	}
+	return protocol.SendBudget(s)
+}
+
+// SendWith delivers one `send` and returns magmux's result. On a gated pane
+// the result says how the box was verified and what evidence followed
+// (`verified`, `accept`, `evidence`, `waitedMs`, `dismissed`), and a refusal
+// carries a reason: protocol.ReasonOf and protocol.TypedOf read it from the
+// error. It waits max(SendTimeout, o.SendBudget()); ctx can end the wait
+// sooner, and ending the wait never ends the delivery.
+func (s *Session) SendWith(ctx context.Context, pane int, o SendOptions) (map[string]any, error) {
+	msg := map[string]any{"type": "send", "pane": pane}
+	if o.Enter != nil {
+		msg["enter"] = *o.Enter
+	}
+	if o.Text != "" {
+		msg["text"] = o.Text
+	}
+	if len(o.Keys) > 0 {
+		msg["keys"] = o.Keys
+	}
+	if o.Typed {
+		msg["typed"] = true
+	}
+	if o.Paste {
+		msg["paste"] = true
+	}
+	if o.Label != "" {
+		msg["label"] = o.Label
+	}
+	if o.DismissDialogs {
+		msg["dismissDialogs"] = true
+	}
+	if o.ReadyTimeoutMs != 0 {
+		msg["readyTimeoutMs"] = o.ReadyTimeoutMs
+	}
+	if o.NoGate {
+		msg["noGate"] = true
+	}
+	if s.IsLegacy(ctx) {
+		// No reply to wait for; the broadcasts are the only feedback there is.
+		return nil, s.Fire(msg)
+	}
+	return s.request(ctx, msg, max(SendTimeout, o.SendBudget()))
+}
+
 // SendKeys delivers text and/or named keys to a pane.
 func (s *Session) SendKeys(ctx context.Context, pane int, text string, keys []string, enter bool, label string) error {
 	msg := map[string]any{

@@ -2,6 +2,7 @@ package mux
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -533,4 +534,271 @@ func skipNested(s string, i int, open, close byte) (int, error) {
 		i++
 	}
 	return 0, errUnparsed
+}
+
+// ── the editor-mode rewrite ─────────────────────────────────────────────────
+//
+// A DIRECT invocation is rewritten so Claude starts with editorMode "normal",
+// whatever the user's own settings say: magmux types into the input box, and a
+// box in vim mode eats the first keystrokes as commands. The rewrite is ONE
+// span replaced in the -c string (or one argv element replaced or inserted):
+//
+//   - no --settings: ` --settings=<Q>` is inserted after the claude word;
+//   - an inline JSON --settings: merged, and the flag's whole span (one token,
+//     or two adjacent ones) becomes `--settings=<Q>`;
+//   - a settings FILE: merged into a private 0600 copy (claude_settings.go),
+//     and the span becomes `--settings='<copy>'`.
+//
+// The `=` form always, because extractClaudePrompt skips a flag as one token
+// and would return a two-token flag's value as the prompt. Claude keeps only
+// the LAST --settings (F1), so the last one is the one merged.
+//
+// Every doubt — an expansion in the value, a relative path after a `cd`, a
+// file that will not parse, any shell syntax between `--settings` and its
+// value ([G]) — leaves the command byte-identical and records `unparsed`. The
+// pane still launches, and the gate's vim_mode check is what then refuses to
+// type into it.
+
+const settingsFlag = "--settings"
+
+// launchRewrite is what rewriteClaudeLaunch decided.
+type launchRewrite struct {
+	// args is what to exec the pane's program with: cfg.Args itself when
+	// nothing was rewritten.
+	args []string
+	// override is "" when the pane is not a rewrite candidate at all (not
+	// direct, plugin-owned, ungated), and otherwise the outcome.
+	override editorOverride
+	// file is a private settings copy the pane now OWNS and must remove; "".
+	file string
+	// why says what made it unparsed, for the debug log.
+	why string
+}
+
+// settingsUse is one --settings occurrence in an invocation.
+type settingsUse struct {
+	value string // the value with quoting removed
+	tilde bool   // the value begins with an UNQUOTED ~/ (the shell expands it)
+	// start/end: the flag's span in the -c string (both tokens of a two-token
+	// flag). For an argv launch, start is the index into cfg.Args and end is
+	// one past its value.
+	start, end int
+}
+
+// rewriteClaudeLaunch decides the editor-mode rewrite of cfg. basis is the
+// pane's gateBasis: only a gated, direct pane is ever rewritten (a plugin's
+// direct-claude pane is not gated and is left alone). dir is the pane's
+// private settings directory.
+func rewriteClaudeLaunch(cfg PaneConfig, launch launchInfo, basis gateBasis, dir string) launchRewrite {
+	rw := launchRewrite{args: cfg.Args}
+	if basis == gateNone || !launch.direct {
+		return rw
+	}
+	unparsed := func(why string) launchRewrite {
+		return launchRewrite{args: cfg.Args, override: overrideUnparsed, why: why}
+	}
+
+	var (
+		uses []settingsUse
+		why  string
+		// relOK: a relative settings path resolves against cfg.Dir only when
+		// nothing runs before the invocation; a `cd` would move the base.
+		relOK = true
+	)
+	if launch.line == "" {
+		uses, why = argvSettings(cfg.Args)
+	} else {
+		uses, why = shellSettings(launch)
+		for _, t := range launch.toks[:launch.claude] {
+			if t.kind == tokOp {
+				relOK = false
+				break
+			}
+		}
+	}
+	if why != "" {
+		return unparsed(why)
+	}
+
+	if len(uses) == 0 {
+		q, err := mergeEditorMode([]byte("{}"))
+		if err != nil {
+			return unparsed(err.Error())
+		}
+		rw.override = overrideAdded
+		if launch.line == "" {
+			rw.args = append([]string{settingsFlag + "=" + string(q)}, cfg.Args...)
+			return rw
+		}
+		c := launch.toks[launch.claude]
+		rw.args = withLine(cfg.Args, launch.line[:c.end]+" "+settingsFlag+"="+shellQuoteJSON(q)+launch.line[c.end:])
+		return rw
+	}
+
+	use := uses[len(uses)-1] // Claude keeps the last (F1)
+	var word string          // the replacement's value part
+	if isInlineSettings(use.value) {
+		merged, err := mergeEditorMode([]byte(use.value))
+		if err != nil {
+			return unparsed("inline --settings: " + err.Error())
+		}
+		rw.override = overrideMerged
+		word = string(merged)
+		if launch.line != "" {
+			word = shellQuoteJSON(merged)
+		}
+	} else {
+		path, why := settingsPath(use, relOK, cfg.Dir)
+		if why != "" {
+			return unparsed(why)
+		}
+		b, err := readSettingsFile(path)
+		if err != nil {
+			return unparsed("settings file: " + err.Error())
+		}
+		merged, err := mergeEditorMode(b)
+		if err != nil {
+			return unparsed("settings file " + path + ": " + err.Error())
+		}
+		file, err := writeSettingsCopy(dir, merged)
+		if err != nil {
+			return unparsed("private copy: " + err.Error())
+		}
+		rw.override, rw.file, word = overrideMergedFile, file, file
+		if launch.line != "" {
+			word = "'" + file + "'"
+		}
+	}
+
+	flag := settingsFlag + "=" + word
+	if launch.line == "" {
+		args := make([]string, 0, len(cfg.Args))
+		args = append(args, cfg.Args[:use.start]...)
+		args = append(args, flag)
+		rw.args = append(args, cfg.Args[use.end:]...)
+		return rw
+	}
+	rw.args = withLine(cfg.Args, launch.line[:use.start]+flag+launch.line[use.end:])
+	return rw
+}
+
+// isInlineSettings: the value is JSON text rather than a path — its first byte
+// past JSON's OWN whitespace (space, tab, LF, CR; not strings.TrimSpace's
+// wider set, which would accept a `\v{}` Claude itself cannot parse) is `{`.
+func isInlineSettings(v string) bool {
+	return strings.HasPrefix(strings.TrimLeft(v, " \t\n\r"), "{")
+}
+
+// withLine returns a copy of a `[-l] -c <s>` argv with <s> replaced.
+func withLine(args []string, line string) []string {
+	out := append([]string(nil), args...)
+	out[len(out)-1] = line
+	return out
+}
+
+// settingsPath resolves a --settings value that is not inline JSON to the file
+// it names, or says why it cannot: an expansion, `-`, a relative path that a
+// preceding command could have moved the base of.
+func settingsPath(use settingsUse, relOK bool, base string) (string, string) {
+	v := use.value
+	switch {
+	case v == "" || v == "-":
+		return "", "--settings has no usable value"
+	case strings.ContainsAny(v, "$`"):
+		return "", "--settings value holds an expansion"
+	case use.tilde:
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", "~/ with no home directory"
+		}
+		return filepath.Join(home, v[2:]), ""
+	case filepath.IsAbs(v):
+		return v, ""
+	case !relOK:
+		return "", "relative --settings path after another command"
+	}
+	if base == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", "relative --settings path with no working directory"
+		}
+		base = wd
+	}
+	return filepath.Join(base, v), ""
+}
+
+// shellSettings finds every --settings in a lexed direct invocation, in
+// order, or says why the invocation cannot be rewritten safely. The rules:
+//
+//   - after a bare `--`, nothing is a flag;
+//   - a word that is an expansion and could spell --settings is unparsed;
+//   - `--settings=<w>` is one token; its value must be literal;
+//   - `--settings <w>` is two, and only when the bytes between them are blanks
+//     and nothing else ([G]): a redirection, a comment, a line continuation or
+//     a control operator there is unparsed, and so is a value that is an
+//     assignment, an expansion, empty, or another flag.
+func shellSettings(launch launchInfo) ([]settingsUse, string) {
+	line, toks := launch.line, launch.toks
+	var uses []settingsUse
+	for k := 0; k < len(launch.args); k++ {
+		i := launch.args[k]
+		t := toks[i]
+		if !t.literal {
+			if strings.HasPrefix(t.lit, settingsFlag) {
+				return nil, "--settings spelled with an expansion"
+			}
+			continue
+		}
+		switch {
+		case t.lit == "--":
+			return uses, ""
+		case t.lit == settingsFlag:
+			if i+1 >= len(toks) || toks[i+1].kind != tokWord {
+				return nil, "--settings with no value word after it"
+			}
+			v := toks[i+1]
+			if gap := line[t.end:v.start]; gap == "" || strings.Trim(gap, " \t") != "" {
+				return nil, "shell syntax between --settings and its value"
+			}
+			if v.assign || !v.literal || v.lit == "" || strings.HasPrefix(v.lit, "-") {
+				return nil, "--settings value is not a plain word"
+			}
+			uses = append(uses, settingsUse{
+				value: v.lit, tilde: strings.HasPrefix(v.raw(line), "~/"),
+				start: t.start, end: v.end,
+			})
+			if k+1 < len(launch.args) && launch.args[k+1] == i+1 {
+				k++
+			}
+		case strings.HasPrefix(t.lit, settingsFlag+"="):
+			uses = append(uses, settingsUse{
+				value: t.lit[len(settingsFlag)+1:],
+				tilde: strings.HasPrefix(t.raw(line), settingsFlag+"=~/"),
+				start: t.start, end: t.end,
+			})
+		}
+	}
+	return uses, ""
+}
+
+// argvSettings is shellSettings for an argv launch, where every element is
+// already a literal value and there is no shell syntax to be adjacent to.
+func argvSettings(args []string) ([]settingsUse, string) {
+	var uses []settingsUse
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return uses, ""
+		case a == settingsFlag:
+			if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "-") {
+				return nil, "--settings with no value"
+			}
+			uses = append(uses, settingsUse{value: args[i+1], start: i, end: i + 2})
+			i++
+		case strings.HasPrefix(a, settingsFlag+"="):
+			uses = append(uses, settingsUse{value: a[len(settingsFlag)+1:], start: i, end: i + 1})
+		}
+	}
+	return uses, ""
 }

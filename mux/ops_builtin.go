@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/MadAppGang/magmux/hub"
 	"github.com/MadAppGang/magmux/protocol"
@@ -171,19 +172,7 @@ func (m *Magmux) builtinOps() []hub.Op {
 				"auto": boolProp("Release manual mode and return to the terminal's size. Exclusive with rows/cols."),
 			})),
 
-		m.op("send", protocol.ClassControl,
-			"Deliver an instruction to a session: text, then named keys, then Enter. This is "+
-				"the controller's path — it is recorded in the control panel as an OUT row and "+
-				"tells the pane's controller that a new turn is starting.",
-			objectSchema(map[string]any{
-				"pane":  paneProp,
-				"text":  strProp("The instruction. Sent as a bracketed paste when the pane asked for one."),
-				"keys":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Named keys to press after the text, e.g. [\"tab\",\"down\"]."},
-				"enter": boolProp("Submit after the text. Defaults to true."),
-				"typed": boolProp("Type the text as keystrokes: short paced runs, every newline as ctrl-j, never bracketed. Exclusive with paste."),
-				"paste": boolProp("Deliver the text as one bracketed paste, even a single line or nothing at all (an empty paste is Cmd+V over a clipboard image). Exclusive with typed."),
-				"label": strProp("Short tag for the panel's OUT row, e.g. \"step 2/5\"."),
-			})),
+		m.sendOp(),
 
 		// input is built by hand: it is the one built-in that does not wrap a
 		// socket verb, because there is no `{"type":"input"}` to wrap. See
@@ -209,6 +198,66 @@ func (m *Magmux) builtinOps() []hub.Op {
 				"style": strProp("Banner style, e.g. \"error\"."),
 			})),
 	}
+}
+
+// sendOp is `send` as an op: the verb's spec plus its Budget, the hub-internal
+// hook that makes every transport's DEFAULT wait at least sendBudget for a
+// gated pane (§3.4). An ungated pane's send has no opinion (0), so its default
+// waits are today's.
+func (m *Magmux) sendOp() hub.Op {
+	op := m.op("send", protocol.ClassControl,
+		"Deliver an instruction to a session: text, then named keys, then Enter. This is "+
+			"the controller's path — it is recorded in the control panel as an OUT row and "+
+			"tells the pane's controller that a new turn is starting. On a GATED pane (a Claude "+
+			"Code pane: `list` shows gateBasis) magmux waits until the input box can take input, "+
+			"verifies the box holds exactly what was typed before pressing Enter, and answers ok "+
+			"only once a user-prompt entry or transcript entry shows the prompt was taken; "+
+			"otherwise `busy` or `not_accepted` with a `reason`. There Enter may only be the final "+
+			"key, and keys with no text and \"enter\":false (a menu answer) are not gated.",
+		objectSchema(map[string]any{
+			"pane":  paneProp,
+			"text":  strProp("The instruction. Sent as a bracketed paste when the pane asked for one."),
+			"keys":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Named keys to press after the text, e.g. [\"tab\",\"down\"]. On a gated pane enter/return may only be the last."},
+			"enter": boolProp("Submit after the text. Defaults to true."),
+			"typed": boolProp("Type the text as keystrokes: short paced runs, every newline as ctrl-j, never bracketed. Exclusive with paste."),
+			"paste": boolProp("Deliver the text as one bracketed paste, even a single line or nothing at all (an empty paste is Cmd+V over a clipboard image). Exclusive with typed."),
+			"label": strProp("Short tag for the panel's OUT row, e.g. \"step 2/5\"."),
+			"dismissDialogs": boolProp("Gated pane: press Escape on a dismissable dialog (permission, question, plan, select) " +
+				"before typing and before the Enter. Escape declines; nothing is ever approved."),
+			"readyTimeoutMs": intProp("Gated pane: how long to wait for the input box to be ready, shared by every wait " +
+				"before the Enter. 0 = 10000; above 60000 is clamped."),
+			"noGate": boolProp("Skip the gate, the box verify and acceptance: the ungated behaviour, even into a dialog."),
+		}))
+	op.Budget = m.sendBudgetOf
+	return op
+}
+
+// sendBudgetOf is send's Budget: sendBudget for a gated pane, 0 otherwise. It
+// runs with no hub lock held and takes only treeMu's RLock (paneByID).
+func (m *Magmux) sendBudgetOf(args json.RawMessage) time.Duration {
+	msg, err := opMsg("send", hub.Caller{}, args)
+	if err != nil || msg.NoGate {
+		return 0
+	}
+	idx := m.parsePaneIndex(msg.Pane)
+	if idx == paneUnspecified && m.control != nil {
+		if idx, err = m.control.targetPane(); err != nil {
+			return 0
+		}
+	}
+	if idx < 0 || inputGateOf(m.paneByID(idx)) == nil {
+		return 0
+	}
+	mode, err := sendModeOf(msg.Typed, msg.Paste)
+	if err != nil {
+		return 0
+	}
+	enter := true
+	if msg.Enter != nil {
+		enter = *msg.Enter
+	}
+	return sendBudget(sendRequest{idx: idx, mode: mode, text: msg.Text, keys: msg.Keys, enter: enter,
+		readyTimeoutMs: msg.ReadyTimeoutMs})
 }
 
 // op builds one spec plus the wrapper that runs the verb of the same name.
@@ -277,14 +326,30 @@ func (m *Magmux) dispatchOp(ctx context.Context, msg sockMsg) (map[string]any, e
 	// — so a `send` reached through `call` stops between keystrokes exactly as
 	// the direct verb does, instead of typing on into a session teardown has
 	// already reported on.
+	//
+	// For `send` the work runs under an ExecContext instead: the caller's
+	// values, none of its cancellation, cancelled by Quiesce alone. On a lane
+	// that changes nothing (the item's ctx was already Quiesce-only); on REST
+	// and Firebase, which call the hub with the CALLER's ctx, it is what stops
+	// a client timeout or a dropped connection cutting a delivery between two
+	// writes [E]. The exec is released when the delivery answers, or here if
+	// the verb refused synchronously. Nothing sets msg.sub on an op's message
+	// (opMsg cannot fill it), so the delivery is never enqueued on the lane
+	// this op is itself occupying.
+	release := func() {}
 	msg.runCtx = ctx
+	if msg.Type == "send" {
+		msg.runCtx, release = m.bus().ExecContext(ctx)
+	}
 	result, err := m.dispatchSocketVerbExt(msg, func(r map[string]any, e error) {
+		release()
 		select {
 		case answered <- outcome{r, e}:
 		default:
 		}
 	})
 	if !errors.Is(err, errReplyDeferred) {
+		release()
 		return result, err
 	}
 	select {

@@ -29,6 +29,12 @@ const restTimeout = 30 * time.Second
 // is no connection to announce arriving or going away, so a panel row would
 // name something that had already ended. That is a known limitation, and the
 // remedy is the WebSocket.
+//
+// The wait is restTimeout, or the op's own Budget when that is longer
+// (Hub.DefaultWait): a gated `send` can legitimately take longer than 30 s,
+// and a default nobody chose must not answer it `timeout`. The wait is only
+// the caller's: the hub runs a send's delivery under an ExecContext, so a
+// client that gives up — or disconnects — never cuts a delivery short.
 func (s *Server) callOp(w http.ResponseWriter, r *http.Request, transport, name string, args json.RawMessage, cred credential, envelope bool) {
 	readOnly, err := s.authorizeOp(cred.kind, name)
 	if err != nil {
@@ -50,7 +56,7 @@ func (s *Server) callOp(w http.ResponseWriter, r *http.Request, transport, name 
 		writeErr(w, protocol.Errf(protocol.CodeNotReady, "magmux has no layout yet"))
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), restTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Hub.DefaultWait(name, args, restTimeout))
 	defer cancel()
 	result, err := s.cfg.Hub.Call(ctx, s.caller(r, transport, cred, readOnly), name, args)
 	if err != nil {
