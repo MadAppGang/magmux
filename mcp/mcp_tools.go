@@ -20,6 +20,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -102,6 +103,46 @@ func paneProp() map[string]any {
 func sessionProp() map[string]any {
 	return strProp("Session id from list_sessions. Optional: defaults to the magmux this " +
 		"server is running inside, or to the only one that is reachable.")
+}
+
+// The input gate's three send arguments. They only mean something on a GATED
+// pane (a Claude Code pane magmux owns input readiness for); elsewhere they
+// are ignored.
+func dismissDialogsProp() map[string]any {
+	return boolProp("Gated Claude pane: press Escape on a dismissable dialog (permission, question, " +
+		"plan) before typing and before Enter. Escape declines; nothing is ever approved. Default: false.")
+}
+
+func readyTimeoutProp() map[string]any {
+	return intProp("Gated Claude pane: how long magmux waits for the input box to be ready before " +
+		"refusing with busy. Default: 10000; at most 60000.")
+}
+
+func noGateProp() map[string]any {
+	return boolProp("Gated Claude pane: skip the readiness gate, the box verify and the acceptance " +
+		"check, and type exactly as for any other pane — even into a dialog. Default: false.")
+}
+
+// sendErrText is a send failure as the model reads it: the code, the reason
+// when magmux gave one, the message, and whether text had already been typed,
+// because "busy (dialog:permission)" and "not_accepted (still_in_box)" call
+// for different next steps and a flattened message hides which.
+//
+//	could not send to pane 2: busy (dialog:permission): … (text was typed)
+func sendErrText(what string, pane int, err error) string {
+	var pe *protocol.Error
+	if !errors.As(err, &pe) || pe.Code == "" {
+		return fmt.Sprintf("could not %s pane %d: %v", what, pane, err)
+	}
+	head := pe.Code
+	if pe.Reason != "" {
+		head += " (" + pe.Reason + ")"
+	}
+	s := fmt.Sprintf("could not %s pane %d: %s: %s", what, pane, head, pe.Msg)
+	if pe.Typed {
+		s += " (text was typed)"
+	}
+	return s
 }
 
 // ── the tools ───────────────────────────────────────────────────────────────
@@ -240,11 +281,16 @@ var mcpTools = []mcpTool{
 				"description": "Named keys pressed after the text: enter, tab, escape, up, down, " +
 					"left, right, backspace, ctrl-c, ctrl-d, a single character, …",
 			},
-			"enter":      boolProp("Press Enter after the text and keys. Default: true when text is given."),
-			"wait":       intProp("Milliseconds to wait afterwards before reading the screen back. Default: 0."),
-			"session_id": sessionProp(),
+			"enter":            boolProp("Press Enter after the text and keys. Default: true when text is given."),
+			"wait":             intProp("Milliseconds to wait afterwards before reading the screen back. Default: 0."),
+			"dismiss_dialogs":  dismissDialogsProp(),
+			"ready_timeout_ms": readyTimeoutProp(),
+			"no_gate":          noGateProp(),
+			"session_id":       sessionProp(),
 		}, "pane"),
-		timeout: 60 * time.Second,
+		// Room for the longest gated send (a 60 s readiness wait plus typing
+		// and acceptance) and the `wait`; SendWith bounds the send itself.
+		timeout: 3 * time.Minute,
 		run:     toolSendKeys,
 	},
 	{
@@ -262,6 +308,9 @@ var mcpTools = []mcpTool{
 			"label":            strProp("Short tag shown in magmux's control panel, e.g. \"step 2/5\"."),
 			"start_timeout_ms": intProp("How long to wait for the turn to begin. Default: 45000."),
 			"turn_timeout_ms":  intProp("How long to wait for the turn to finish. Default: 900000."),
+			"dismiss_dialogs":  dismissDialogsProp(),
+			"ready_timeout_ms": readyTimeoutProp(),
+			"no_gate":          noGateProp(),
 			"session_id":       sessionProp(),
 		}, "pane", "instruction"),
 		timeout: 0, // its own two-phase timeouts bound it
@@ -1346,6 +1395,10 @@ func toolSendKeys(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 		Enter     *bool    `json:"enter"`
 		Wait      int      `json:"wait"`
 		SessionID string   `json:"session_id"`
+
+		DismissDialogs bool `json:"dismiss_dialogs"`
+		ReadyTimeoutMs int  `json:"ready_timeout_ms"`
+		NoGate         bool `json:"no_gate"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return nil, invalidParams(err)
@@ -1374,8 +1427,17 @@ func toolSendKeys(ctx context.Context, s *mcpServer, raw json.RawMessage) (map[s
 		enter = *args.Enter
 	}
 
-	if err := sess.SendKeys(ctx, p.Index, args.Text, args.Keys, enter, "send_keys"); err != nil {
-		return toolResultError("could not send to pane %d: %v", p.Index, err), nil
+	if args.ReadyTimeoutMs < 0 {
+		return nil, &rpcError{Code: rpcInvalidParams,
+			Message: "invalid arguments: ready_timeout_ms must not be negative"}
+	}
+	// SendWith, not SendKeys: its wait is the gated send's budget rather than
+	// a fixed SendTimeout, and it carries the gate's arguments.
+	if _, err := sess.SendWith(ctx, p.Index, client.SendOptions{
+		Text: args.Text, Keys: args.Keys, Enter: &enter, Label: "send_keys",
+		DismissDialogs: args.DismissDialogs, ReadyTimeoutMs: args.ReadyTimeoutMs, NoGate: args.NoGate,
+	}); err != nil {
+		return toolResultError("%s", sendErrText("send to", p.Index, err)), nil
 	}
 
 	var b strings.Builder
@@ -1424,6 +1486,9 @@ func toolSendAndWait(ctx context.Context, s *mcpServer, raw json.RawMessage) (ma
 		StartTimeoutMs int    `json:"start_timeout_ms"`
 		TurnTimeoutMs  int    `json:"turn_timeout_ms"`
 		SessionID      string `json:"session_id"`
+		DismissDialogs bool   `json:"dismiss_dialogs"`
+		ReadyTimeoutMs int    `json:"ready_timeout_ms"`
+		NoGate         bool   `json:"no_gate"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return nil, invalidParams(err)
@@ -1468,18 +1533,28 @@ func toolSendAndWait(ctx context.Context, s *mcpServer, raw json.RawMessage) (ma
 		label = "send_and_wait"
 	}
 
+	if args.ReadyTimeoutMs < 0 {
+		return nil, &rpcError{Code: rpcInvalidParams,
+			Message: "invalid arguments: ready_timeout_ms must not be negative"}
+	}
+	enter := true
+	opts := client.SendOptions{Text: args.Instruction, Enter: &enter, Label: label,
+		DismissDialogs: args.DismissDialogs, ReadyTimeoutMs: args.ReadyTimeoutMs, NoGate: args.NoGate}
 	send := func() error {
 		// The send itself gets its own deadline: a session that never
 		// acknowledges the bytes is a different failure from one that never
-		// starts a turn, and they read differently to the driver.
-		sendCtx, cancel := context.WithTimeout(ctx, client.SendTimeout)
+		// starts a turn, and they read differently to the driver. On a gated
+		// pane the send waits for readiness and for evidence the prompt was
+		// taken, so the deadline is that send's budget, not a fixed one.
+		sendCtx, cancel := context.WithTimeout(ctx, max(client.SendTimeout, opts.SendBudget()))
 		defer cancel()
-		return sess.SendKeys(sendCtx, p.Index, args.Instruction, nil, true, label)
+		_, err := sess.SendWith(sendCtx, p.Index, opts)
+		return err
 	}
 
 	res, err := client.RunInstruction(ctx, sess.State(), p.Index, send, startTimeout, turnTimeout)
 	if err != nil {
-		return toolResultError("could not deliver the instruction to pane %d: %v", p.Index, err), nil
+		return toolResultError("%s", sendErrText("deliver the instruction to", p.Index, err)), nil
 	}
 
 	// A turn that settles with nothing to say used to leave the driver

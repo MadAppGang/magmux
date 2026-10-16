@@ -90,6 +90,27 @@ Tool controllers:
 - `mux/controller_claude.go` — observes a Claude Code pane by tailing its JSONL
   transcript under `~/.claude/projects/`.
 
+The input gate (magmux owns input readiness for a Claude Code pane):
+
+- `mux/inputgate.go` — `gateBasis`, `editorOverride`, `gateDecision` and
+  `inputGateOf`, the ONE predicate.
+- `mux/inputgate_send.go` — the gated delivery: `classifySend` (classes and the
+  Enter-position rule), `deliverGated` (gate, token, typing, box check, Enter,
+  acceptance), `sendReport`, `sendBudget`.
+- `mux/controller_claude_input.go` — the Claude controller's `InputGate`:
+  `decideReadiness` (rules a–i), `CheckBox`, `InputAccepted`, the registry.
+- `mux/claude_screen.go` — `parseClaudeScreen`: the box, history entries,
+  dialogs, `-- INSERT --`; `inputKey`, the one normaliser.
+- `mux/ttywatch.go` — the termios history sampler; `pty/termios.go` —
+  `pty.ReadMode`, the slave's termios read through the master.
+- `mux/claude_launch.go` — the POSIX lexer, `claudeLaunchOf` (direct or not)
+  and `rewriteClaudeLaunch`; `mux/claude_settings.go` and
+  `sockdir/settings.go` — the merge, the private settings copy and its sweep.
+- `protocol/reasons.go`, `protocol/sendbudget.go` — the reason strings and THE
+  send budget; `hub/exec.go` — `Hub.ExecContext`.
+- `mux/claude_e2e_test.go` — V1.1–V1.6 against a REAL Claude Code, gated on
+  `MAGMUX_CLAUDE_E2E=1` and never run in CI.
+
 Controlled sessions (an external AI agent steering a pane):
 
 - `mux/pilot.go` — the `send` socket verb and PTY injection. The inbound half.
@@ -250,7 +271,16 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   `Poll` demotes a settled snapshot to working. The demotion is deliberately
   *not* sticky: if the tool ignores the instruction, the idle heuristics
   settle the pane again, so a dropped instruction surfaces as a suspiciously
-  fast empty turn rather than a permanent "working".
+  fast empty turn rather than a permanent "working". Both paths go through
+  one helper, `notifyInput`, and WHEN differs: an ungated send calls it at
+  admit, a gated send only inside its FIRST actual write, after the last
+  readiness check that authorised it — so a gated send that writes nothing
+  (`busy` at the gate or at the first key's re-ask, `bad_request` at admit)
+  never announces a turn (`TestNotifyInputOnlyAfterGatePasses`,
+  `TestFirstKeyNotReadyToDeadlineIsBusy`). A gated send that types and then
+  ends `not_accepted`, or `busy` with `typed:true`, HAS called it. That is the
+  one phantom turn left, it happens only on a failed delivery the reply
+  already reports, and the non-sticky demotion settles it.
 
 ### Dynamic-pane invariants (`treeMu`, pane ids)
 
@@ -275,7 +305,15 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   ```
   treeMu -> p.mu -> hub.mu -> sub.mu
   treeMu -> cp.mu ;  treeMu -> claimedMu
+  typing token -> treeMu -> p.mu        (gated sends only)
+  ttyWatch.mu                           (a LEAF)
   ```
+
+  The typing token (`Magmux.typingTokens`, one cap-1 channel per pane) is
+  acquired holding nothing and is never acquired under any lock; `treeMu`
+  (via `paneByID`) and `p.mu` (via `injectPTY`, `tailView`) may be taken while
+  it is held. `ttyWatch.mu` is never held across the termios ioctl and never
+  while taking another lock.
 
   **`hub.mu` and `sub.mu` (package `hub`) are LEAVES, and that is the whole of
   their rule.** `hub.mu` guards the op registry, the Sub set, the lane set and
@@ -711,6 +749,479 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   nil PTY and nil `cmd`. It also has no child to redraw it on SIGWINCH, so the
   resize path must repaint it explicitly or it comes back blank.
 
+### Input-gate invariants (`mux/inputgate*.go`, `mux/controller_claude_input.go`)
+
+Why the gate exists, in one paragraph: Claude Code draws its box ~1 s after
+spawn and then resets its terminal (cooked→raw, 100–400 ms) once or twice while
+it loads — under a full plugin load ~2.5 s after spawn, sometimes after the box
+is up. A prompt typed into that window was lost, or left unsubmitted, and `send`
+said ok because the bytes reached the PTY. Vim editor mode made it
+unrecoverable: the box boots in INSERT, and the Enter that rescues a stuck box
+in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
+
+- **`inputGateOf` is THE predicate, and a pane is gated only when BOTH halves
+  hold.** Its controller implements `InputGate` AND its write-once `gateBasis`
+  is `declared` (`--controller claude-code`, `open_pane controller:"claude-code"`)
+  or `direct` (the lexer found exactly one command-position `claude` word whose
+  BASENAME is `claude` — a `$TMPDIR` of `/private/tmp/claude-501` makes no pane
+  direct — and the invocation shows an input box: not print mode, not
+  `--version`/`--help`, and not a subcommand as the FIRST argument with no
+  option before it (`claude mcp list`, `claude update`). A subcommand word
+  anywhere later is NOT recognised, on purpose (review r3 H2): Claude's options
+  take zero, one, several (`--add-dir <directories...>`) or an optional value
+  (`--resume [value]`), so `claude --name doctor` is an interactive session
+  NAMED doctor and only an arity table magmux does not own could tell it from
+  `claude --settings x mcp list`. Doubt lands on DIRECT — gated and rewritten —
+  because a send to a pane that really has no box just answers busy, while
+  ungating an interactive session loses the override and the gate.
+  `noInputBox`; a non-direct invocation is not rewritten either.
+  `TestClaudeLaunchOf`, `TestSubcommandOnlyAsFirstArgument`,
+  `TestTmpdirClaudeIsObservedNotGated`). A loose substring match attaches a controller for OBSERVATION and
+  is never gated, because magmux cannot know what such a pane runs; a plugin's
+  pane is never gated. Every gate decision, the `list`/`results` `input` key and
+  `Snapshot.Input.Gated` go through it, so "gated" cannot mean one thing for a
+  send and another for the published view. `gateBasis` and `p.controller` are
+  set before publication (`attachControllers` runs before `markLayoutReady`;
+  `OpenPane` attaches while the pane is private), so no send can reach a gated
+  pane before its gate exists. `TestOnePredicate`, `TestGateDecision`.
+
+- **Three classes, and keys alone never gate.** KEYS (no text, no paste, no
+  submit — printable keys included) is ungated, so `{"keys":["2"],"enter":false}`
+  answers a numbered dialog deliberately; TYPE (text or paste, no submit) and
+  SUBMIT are gated. On a gated pane the **Enter-position rule** runs in
+  `classifySend` before any OUT row: Enter only as the LAST key, never a final
+  Enter key plus `enter:true`, and an unknown key name refused — all
+  `bad_request` with nothing written, because a send that half-ran cannot be
+  verified. A trailing Enter key is then NORMALISED onto `enter`, so it takes
+  exactly the `enter:true` path. **The dialog-Enter rule** follows: a SUBMIT
+  into a dialog is refused `busy`/`dialog:<kind>`, because Enter on a
+  permission dialog is option 1, "Yes". The socket's `enter` defaults to true,
+  so `{"keys":["2"]}` IS a submit on a gated pane, and that is documented, not
+  softened. `noGate` skips all of it. `TestEnterNotFinalIsBadRequest`,
+  `TestTrailingEnterKeyIsTheSubmit`, `TestKeysOnlySendIsNotGated`,
+  `TestSubmitIntoDialogRefused`.
+
+- **The only `\r` a gated send writes is its final, verified Enter.**
+  `classifySend` (`gatedText`) rewrites `\r` and `\r\n` inside `text` to `\n`
+  in EVERY mode, before admit: raw, auto mode wrote `"fix A\rthen B"` in one
+  write, the embedded Return submitted `fix A` unchecked, and the reply then
+  said nothing had been submitted. Normalised, multi-line auto text takes the
+  bracketed path and rule i; typed mode already mapped every spelling to one
+  ctrl-j; inside a bracketed paste a CR was a newline anyway. Every other
+  control rune but tab is `bad_request` (ctrl-c, Escape, DEL are edits the box
+  check cannot account for). The OUT row and event carry the text AS IT
+  ARRIVED; the delivery types the normalised one. Ungated is untouched.
+  `TestGatedCarriageReturnTakesTheNewlinePath`,
+  `TestGatedTextControlRuneIsBadRequest`, `TestUngatedCarriageReturnIsUntouched`.
+
+- **Bash mode: a leading `!` is a MODE SWITCH, not text.** Measured on 2.1.301
+  (`s7-bashmode`): a `!` typed into an empty box is consumed and replaces the
+  `❯` glyph (`!` + NBSP in the box, `! ` in history). `promptRowStart` accepts
+  both glyphs and reports which (`BoxShell`, `promptEntry.Shell`); `judgeBox`
+  compares a shell box with `Exact` minus its leading `!`, and refuses a shell
+  box the send did not switch into (submitting it would run a shell command);
+  `matches` takes a shell entry only for a shell send and a `❯` entry only for
+  any other. The `!` is also dropped from the SENT text every acceptance key is
+  computed from (`sentOf`), so a long bash-mode command that collapses to a
+  paste token is confirmed by its expanded `! cmd` entry (review r3 L1).
+  `TestBashModeSendVerifiedAndAccepted`, `TestBashModeMismatchStillRefused`,
+  `TestShellEntryMatchesOnlyAShellSend`, `TestBashModeCollapsedPasteIsConfirmed`.
+
+- **`send`'s Budget hook is a pure lookup.** It runs before the op on every
+  transport, so a pane-less send resolves its pane with `peekTargetPane` (no
+  refusal note); the op's own `targetPane` files the one refusal.
+  `TestSendBudgetHasNoSideEffect`.
+
+- **Dismissal presses Escape and NOTHING else.** `dismissDialogs` writes `0x1b`
+  only when the controller reports `Dismissable` — permission and question
+  (with their `Esc to cancel` hint) and plan (measured, no hint:
+  `dismissableWithoutHint`) — at most 3 per send, ≥ 400 ms apart, inside the
+  readiness deadline. A boot dialog is never dismissable (Escape on the trust
+  prompt EXITS Claude), and NEITHER is the `select` catch-all: the boot dialogs
+  carry its very footer, so a trust prompt a later Claude rewords falls through
+  to `select`, and only NAMED, measured dialogs may be Escaped. A working turn
+  always shows the box, so Escape can never interrupt one. The Escape is a
+  write, so it is pressed only while the delivery HOLDS the typing token —
+  `waitReady` writes nothing and returns when a dismissal is due, and the
+  post-token re-ask presses it — so it can never land between another
+  delivery's chunks. Approving anything is not a mode magmux has. Escapes do
+  not set `typed`. `TestDismissPressesOnlyEscape`, `TestNoDismissOnBootDialog`,
+  `TestDismissCountIsPerSend`, `TestSelectDialogIsNotDismissable`,
+  `TestDismissWaitsForTypingToken`.
+
+- **Acceptance is two steps, and a submit needs both.** (1) No Enter without a
+  VERIFIED box: the settle wait (`settleBox`) must find `exact` (the `inputKey`
+  of the box equals what was typed), `paste_token` (a NEW `[Pasted text #N` above
+  the post-token `MaxPaste`) or, when the content is unknowable from the
+  request, `non_empty`; anything else is `not_accepted` with Enter withheld.
+  (2) No ok without EVIDENCE ATTRIBUTABLE TO THIS SEND: a NEW `❯` history entry
+  carrying the verified content after the verify's own entries, uniquely
+  placed, or a transcript prompt record equal to it and SUBMITTED after the
+  verify. When attribution is ambiguous the
+  answer is `unconfirmed`, never ok. An emptied box is NEVER evidence — the measured
+  loss looks exactly like a submit — and neither is the pane going
+  working/awaiting (NotifyInput manufactures that transition). The baseline is
+  taken from the SAME read that verified the box, so nothing can happen between
+  them. `inputKey` is the ONE normaliser (whitespace and wrap removed, bounded
+  after removal), so a box that wrapped the prompt over nine rows and the
+  unwrapped text that was sent compare equal; a second normaliser would drift
+  the first time Claude rewraps. Its one other mode, `renderedKey`, also folds
+  '`', '*' and '~' and is used ONLY to match a HISTORY entry against the
+  verified/sent text, because Claude renders markdown in history but shows it
+  raw in the box (research F10: claudish's backticked launch line was taken 5/5
+  and reported `unconfirmed`) — the box verify, the InBox check and the
+  transcript (raw text) stay on `inputKey`. `TestMarkdownPromptAccepted`,
+  `TestMarkdownFoldDoesNotWidenToOtherWords`, `TestBoxShowsMarkdownRaw`.
+  `InputAccepted` checks Taken BEFORE InBox: a screen can show the submitted
+  entry and a stale box frame at once, and Taken is the truth. Up to three 2 s
+  windows, at most one guarded re-sent Enter (re-verified first).
+  `TestAcceptNeverOkWithoutEvidence`, `TestLostMidTurnSendWithMatchingProseIsUnconfirmed`,
+  `TestSharedPrefixSecondSendNeedsItsOwnEntry`,
+  `TestLostIdenticalResendDuringToolCallIsUnconfirmed`, `TestTakenBeatsInBox`,
+  `TestPreSubmitMismatchWithholdsEnter`.
+
+- **History evidence is anchored on USER-PROMPT ENTRIES ONLY, and is placed,
+  never counted.** A rise in the VISIBLE number of matching entries proves
+  nothing: the conversation region is whatever the box leaves of the
+  viewport, so a long box hides an older identical prompt at the verify and
+  the same entry reappears when the lost text leaves the box (review H3). And
+  no assistant, tool or spinner row may be the anchor (review r3 H1/M3): they
+  stream, redraw and repeat, so an anchor taken from them vanishes (a correct
+  queued send goes `unconfirmed`) or re-locates onto an older identical copy
+  (gpt's `S → ❯ retry → S`: the old `❯ retry` counted as new). Entries are
+  immutable once drawn and only ever appended — a queued entry keeps its place
+  in their order while live output is inserted above it (`queued-c →
+  queued-paste`). So the baseline records the ORDERED list of visible entries
+  (`entryID`: kind + key), whether the top of the conversation was on screen
+  (`topVisible`: Claude's welcome banner as the region's first rows, and
+  NOTHING else — r3 review M3 removed a second "the conversation fits"
+  rule, padding above the box or under an inline layout, because it matched
+  none of the 31+ real 2.1.301 capture marks and, where it fired, a shrinking
+  box revealed an older identical entry that then counted as new: a false ok.
+  `TestTopVisibleOnRealCaptures` validates it against every real mark;
+  `TestShrinkingBoxRevealingAnOlderEntryIsNoEvidence` is the counterexample.
+  A synthetic screen that wants history evidence for a first entry must draw
+  the banner, as real short conversations do), and the
+  last entry's rows. `newEntriesFrom` places that list in the later screen's:
+  the baseline must appear as an aligned run ending where it ended — whole,
+  possibly under older entries a shrinking box brought back (refused when the
+  top was seen, since nothing older exists), or as a prefix of the later list
+  when entries scrolled off the top — and only the entries after its end are
+  new. When the last entry itself scrolled off, a visible tail of its rows at
+  the top of the region (`tailAtTop`) proves where it ended. NO candidate, or
+  MORE THAN ONE (a run of identical entries), means nothing visible is
+  attributable: no history evidence, and the transcript may still confirm.
+  So an identical `continue` resent when only `continue`s are visible and the
+  top is not, and a gated `/clear`, answer `unconfirmed` unless the transcript
+  confirms. `TestRepeatedAssistantBlocksAreNoAnchor`,
+  `TestQueuedSendConfirmedWhileLiveOutputChanges`,
+  `TestIdenticalEntriesWithoutTheTopAreAmbiguous`,
+  `TestRepeatedPromptUnderTheBannerIsConfirmed`,
+  `TestHistoryEvidenceIsAttributedToTheFrontier`,
+  `TestNoFrontierIsNoHistoryEvidence`, `TestInputAccepted`.
+
+- **Transcript evidence is fresh by the prompt's SUBMIT time, never by when it
+  was written or read.** Measured (research F11): a queued prompt is recorded
+  AT QUEUE TIME as `{"type":"queue-operation","operation":"enqueue",
+  "timestamp":…,"content":…}`, removed later (`"operation":"remove"`, reason
+  `absorbed_mid_turn`), and its `queued_command` attachment is WRITTEN after the
+  remove but carries the ORIGINAL enqueue timestamp. So the controller keeps a
+  bounded log of prompt records (`promptLog`: real user entries, enqueues,
+  attachments), each dated by the record's own timestamp — a dequeued prompt's
+  user entry by its ENQUEUE's (`dequeuedAt`), so an older queued `continue` that
+  runs after a new identical send's verify is never that send's (review r3 M2).
+  An absorbed prompt never becomes a user entry and is dropped from the queue,
+  so it cannot misdate the next identical send; nor can any OTHER queued
+  prompt that never becomes one (r3 review M4): its `queued_command`
+  attachment consumes the queue entry, and a dequeued entry dates only a user
+  entry written within `dequeueMaxLag` (2 s) of its `remove` — so one restored
+  to the box with Up/Esc, or removed for a reason F11 never measured, expires
+  instead of dating the next identical prompt minutes later as old.
+  `TestRemovedUnsentQueuedPromptDoesNotMisdateTheNextSend`,
+  `TestDequeuedPromptStillDatesItsOwnUserEntry`. A record counts when it was
+  read after the verify (sequence), its key matches, and `writtenSince` holds
+  (at or after the verify, truncated to Claude's millisecond); no timestamp is
+  never fresh. `TestTranscriptOldEntryConsumedLateIsNotEvidence`,
+  `TestAcceptedByTranscript`, `TestQueuedSendConfirmedByEnqueue`,
+  `TestEarlierIdenticalQueuedSendIsNotEvidence`,
+  `TestAbsorbedQueuedPromptDoesNotMisdateTheNextSend`.
+
+- **The pre-Enter verify is a SETTLE WAIT, never one read.** Claude Code
+  2.1.301 can take 300–800 ms to DRAW typed text into its box (an Ink frame,
+  worse under load), so a single read after the 150 ms `SendSettle` saw an
+  empty box for text that had arrived (the real-Claude e2e, V1: correct sends
+  refused, and a retype that put the text in the box TWICE — `the box holds 96
+  of 48`). `settleBox` reads the box every `SendVerifyStep` (40 ms), each read
+  a synchronous `CheckBox` (termios sample + fresh screen), until it VERIFIES;
+  or until its content (`BoxCheck.Box`, verdict, detail) has been unchanged
+  for `SendVerifySettle` (1 s) and still mismatches; or until `SendVerifyMax`
+  (3 s) after the first ready read, capped by the readiness deadline. A
+  not-ready read restarts the stability clock. **The verify has its OWN
+  minimum window, `SendVerifyMin` (1.2 s from the verify's start), which the
+  readiness deadline never cuts** (r4 M2): `settleBox` lifts its local
+  deadline to that floor, so a send that became ready in the deadline's last
+  moment, or a caller with `readyTimeoutMs:400`, still waits out the render
+  lag instead of judging one read — the V1 shape again. The floor is above
+  the settle interval, so a settled verdict always fits in it. The constants
+  are protocol's and `SendBudget` counts them: the windows sit inside the
+  readiness deadline, and the typing + `SendSettle` + `SendVerifyMin` + one
+  `SendVerifyStep` overshoot are counted per attempt, twice (the retype) — a
+  short submit's bound is 20 780 ms. `SendVerifySettle` is above the worst lag
+  measured, with margin, because it is what licenses the retype below.
+  `TestRenderLagVerifiesWithoutRetype`, `TestRenderLagRealController`,
+  `TestRenderLagBeyondWindowIsMismatchNoRetype`,
+  `TestVerifyWindowNeverPassesTheDeadline`,
+  `TestSmallReadyTimeoutStillWaitsForTheDraw`,
+  `TestReadyAtTheDeadlineStillWaitsForTheDraw`,
+  `TestREQ4_RenderLagIsWaitedForNotRetyped`.
+
+- **An emptied box is retyped ONCE, and only on POSITIVE evidence of loss.
+  There are exactly two loss signals, and the reply names the one that fired
+  (`retypeCause`, additive, only with `retyped:true`).** Both need the settle
+  wait to end with the box COMPLETELY empty (`BoxEmpty`: placeholder only) on
+  every ready read for the WHOLE settle interval, the send to have typed
+  knowable content (`Exact`) into an empty box, and nothing submitted (next
+  bullet). Then:
+  (a) **`terminal_reset`** — the pty's termios fingerprint CHANGED after the
+  attempt's first byte (`BoxExpect.TypedAt` → `BoxCheck.TermiosChanged`, from
+  the ttyWatch history the hot sampler keeps): the late startup stdin reset
+  is a TERMIOS event. It fires at the settle interval.
+  (b) **`never_drawn`** — EVERY read of the WHOLE verify window
+  (`SendVerifyMax`, 3 s from the first ready read) was ready and empty, with
+  no termios change (`boxSettle.neverDrawn`). The V1 rerun found Claude
+  dropping input right after the gate opened with no termios change at all
+  (2/10 early sends; the mechanism is unproven, probably the prompt
+  re-mounting as startup hooks finish). Render lag tops out well under a
+  second, so a 3 s blank is a silent drop, not a slow draw. To observe it,
+  `settleBox` does NOT conclude a blank box at the settle interval when the
+  full window fits before the (floored) deadline; it runs on to 3 s, so text
+  drawn late inside the window still verifies (`TestDrawnLateAt2500msIsNotRetyped`).
+  A not-ready read in the window, any non-empty read, or a deadline that
+  falls inside the window (`windowCut`) voids (b); the last ends the wait at
+  the settle interval as before. So does any ready read whose
+  `BoxCheck.ConvChanged` is set (`boxSettle.convChanged`, sticky; r5 M1):
+  another writer's Enter inside the ~150 ms before the first verify read
+  submits the text before it is drawn and leaves exactly (b)'s empty box,
+  and the acceptance evidence can be blind (history blind spot + a transcript
+  lagging or unfound). A submit always adds an entry or starts a turn, so
+  `convChange` compares against the PRE-TYPING baseline (`BoxExpect.Pre`):
+  `convKey` (the region above the top rule minus the parser's own spinner
+  rows and faint runes — the same rows that set `Working`, no second
+  classification; the row under the spinner is content), a spinner APPEARING,
+  and the registry going `busy`. Any change is `text_mismatch` "another writer
+  may have submitted it", never "nothing was submitted". (a) does not take
+  the check: a reset is a terminal event, not a submit. A conversation that
+  streams during the window (a turn already running) voids (b) too; that is
+  the fail-safe direction.
+  A box with neither signal is `text_mismatch` whose detail says which was
+  missing ("no stdin reset, and the deadline left less than the 3s verify
+  window", or "...was not seen empty on every read"), never a retype — one
+  empty read was V1's double text. The delivery goes back through the gate to
+  the SAME deadline, types again, and settles again under the same verify
+  (the 3 s extension included); `retyped:true` is set only once a retype byte
+  has actually gone in. Lost twice is `text_mismatch` saying it was "already
+  retyped once". NEVER retyped: a box that showed ANY of the text on any read
+  of the attempt (`boxSettle.sawText` — partial, whole, or more; the text left
+  the box, see the foreign-Enter bullet), one still changing when the window
+  closed, one that EVER held MORE than was typed (`BoxCheck.Excess`, both
+  renders landed: `the box holds more than was typed`), and **any send that
+  may collapse into a `[Pasted text #N]` token** (`BoxExpect.Pasted`: paste
+  mode, a bracketed multi-line auto send, an auto send over
+  `pasteCollapseRunes`). A paste drawn late plus its retype are TWO tokens,
+  the paste-token rule would verify that box, and Enter would submit both
+  (r4 M1). Independently of the retype, `judgeBox` refuses a box holding more
+  than one paste token newer than `PasteAbove` on EVERY verify, and
+  `CheckBox` flags it `Excess` (`newPasteTokens`).
+  `TestEmptiedBoxIsRetypedOnce`, `TestTrulyLostTextIsRetypedOnceThenOK`,
+  `TestNeverDrawnIsRetypedOnceThenOK`, `TestTerminalResetRetypeNamesItsCause`,
+  `TestDrawnPartiallyIsNotRetyped`,
+  `TestDeadlineShorterThanWindowIsNotRetypedNeverDrawn`,
+  `TestNeverDrawnTwiceIsTextMismatch`,
+  `TestNeverDrawnInterruptedByANotReadyReadIsNotADrop`,
+  `TestEmptyWithoutTermiosChangeIsNotRetyped`,
+  `TestRealControllerRetypesOnlyAfterAReset`,
+  `TestCheckBoxReportsTermiosChangeSinceTheFirstByte`,
+  `TestEmptiedBoxTwiceIsTextMismatch`, `TestPartialBoxIsNeverRetyped`,
+  `TestDoubleTextAfterRetypeIsMismatchNoSecondRetype`,
+  `TestExcessSeenOnceForbidsRetype`, `TestEmptyShorterThanSettleIsNotRetyped`,
+  `TestNotReadyReadRestartsTheSettleClock`, `TestPasteIsNeverRetyped`,
+  `TestTwoNewPasteTokensAreAMismatch`,
+  `TestREQ4_LostTextIsRetypedOnceThenConfirmed` (`terminal_reset`),
+  `TestREQ4_SilentlyDroppedTextIsRetypedOnce` (fakeclaude
+  `FAKE_DROP_SILENT_ONCE=1`, `never_drawn`).
+
+- **An emptied box may have been SUBMITTED by somebody else, so it is asked
+  before any retype, and the reply never claims magmux's Enter.** A human
+  keystroke (`writePTY`), a `noGate` send or a remote `input` op takes no
+  typing token, so its Enter can submit this send's text while it sits in the
+  box (r3 review M2). The gate's post-token read carries `InputReadiness.Pre`,
+  an acceptance baseline for the content about to be typed
+  (`ReadinessQuery.Baseline`), taken from the SAME read that authorised the
+  first byte — no extra read between that check and the byte. Whenever the
+  settle wait ends on an empty box, `InputAccepted(pre)` runs first: a new
+  user entry or fresh transcript record for the text means it was taken, and
+  the send answers ok with **`accept:"submitted_by_other"`**, that evidence,
+  and **`enter:false`** — on a gated reply `enter` says whether MAGMUX pressed
+  Enter, and here it pressed none (r4 M3a/b). That holds for a TYPE send too:
+  its text is no longer in the box, so `in_box` would be false and
+  `confirmed` would claim a submit magmux did not make. It is NEVER retyped.
+  No baseline means no retype: the check fails closed. When there is no
+  evidence YET (the history blind spot, a lagging transcript) and the box
+  showed the text before it emptied (`sawText`), the error never says
+  "nothing was submitted": it says the box emptied without magmux's Enter and
+  that it is unknown whether another Enter submitted it, because a caller
+  that believed "nothing" would retry into a duplicate (r4 M3c).
+  `TestSubmittedByAnotherEnterIsNeverRetyped`,
+  `TestSubmittedByAnotherEnterRealController`,
+  `TestForeignSubmitIsReportedAsSuch`,
+  `TestTextThatLeftTheBoxIsNotNothingSubmitted`.
+
+- **History shows a collapsed paste EXPANDED, so a paste is confirmed by the
+  text it SENT.** Claude 2.1.301 never writes a `[Pasted text #N]` history
+  entry; `matches` therefore also accepts `e.Key == b.SentKey`, and a paste
+  send sets `Exact` whenever the box was empty and no editing key ran.
+  `TestMatchesShortPasteBySentKey`, `TestLongAutoSendVerifiedByToken`.
+
+- **`bootDone` is "a boot reset was seen, OR `bootFloor` (3.5 s) has passed
+  since the FIRST RAW SAMPLE" — and it gates only the FIRST ready.** The
+  reset can come after the box is drawn, so "box visible + raw + 1 s still" is
+  not enough on its own. The floor is measured from the first raw sample, not
+  from the fork, because for a wrapper (claudish) the fork starts the wrapper,
+  and the first raw sample is the first moment Claude itself owns the terminal.
+  Once a pane has been ready, the same not-ready conditions report
+  `terminal_not_ready` / `no_input_box` instead of `starting`, because they are
+  a regression, not a boot. `TestReadinessF3Timelines` walks every measured
+  timeline; `TestReadinessPrecedence` pins rules a–i in order.
+
+- **The sampler is HISTORY; the synchronous sample is the AUTHORITY.** The
+  `ttyWatch` goroutine (20 ms while hot: 20 s after spawn, 5 s after any change,
+  2 s after a demand; no goroutine at all when cold) only keeps `FirstRawAt`,
+  `ChangedAt` and `SawReset` for the boot and settle rules. Every DECISION —
+  the readiness demand, the post-token re-ask immediately before the first
+  byte, the between-writes check, the pre-Enter `CheckBox` — takes its own
+  `sampleNow` and a fresh screen read. A 20 ms-old sample is exactly the size of
+  the window the reset lives in. `TestEveryDecisionSamplesSynchronously` counts
+  the reads; `TestSampleNowIsTheAuthority`.
+
+- **Deadlines are VALUES; execution is Quiesce-only.** `readyTimeoutMs`
+  (0 → 10 s, clamped at 60 s, < 0 `bad_request`) becomes ONE `time.Time`
+  computed when the delivery starts, shared by the gate, the token wait and the
+  pre-Enter re-wait; it is never a context deadline. The ctx a delivery pauses
+  on is the lane item's or a `Hub.ExecContext`, which only Quiesce cancels, so a
+  caller's timeout ends the caller's wait and never truncates a delivery
+  half-typed. `sendBudget` (`protocol.SendBudget`) is the ONE upper bound —
+  the client's wait, `Op.Budget` and every transport default use it — and
+  `TestSendBudgetBoundsLongKeysList` / `…LongTypedText` hold the real delivery
+  under it. No `treeMu` and no `p.mu` across any wait (`TestGateWaitHoldsNoTreeMu`).
+
+- **The typing token serialises DELIVERIES, not connections, and has an
+  order.** Two connections' lanes for one pane are independent, so without it
+  their gated sends would type into each other. The token is a cap-1 channel per
+  pane in `Magmux.typingTokens` (created lazily, never removed — the slot
+  table's own rule, so a delivery's token cannot be swapped while held). It is
+  acquired holding NOTHING, against the same deadline, and is the head of the
+  order `typing token -> treeMu -> p.mu`. After acquiring it the delivery
+  re-asks readiness, because the wait may have been long; only that re-ask
+  authorises the first byte — and nothing but `NotifyInput` may stand between
+  it and that byte. A keys-only send pauses `keyGap` before its first key, so
+  it RE-ASKS after that pause, and a not-ready answer sends it back to the gate
+  with nothing written (review H4); the time spent back in the gate counts in
+  `waitedMs`. `NotifyInput` itself fires exactly ONCE, inside the first actual
+  delivery write (or before the Enter of a submit that typed nothing), after
+  the last readiness check that authorised it — never for a send that wrote
+  zero bytes, and not again for a retype (review r3 M1/M3). Timeout is
+  `busy`/`typing_in_progress`, nothing typed.
+  `TestTypingTokenSerialisesConnections`, `TestTokenDeadlineIsTypingInProgress`,
+  `TestFirstKeyRechecksReadinessAfterItsGap`, `TestFirstKeyNotReadyToDeadlineIsBusy`,
+  `TestResumedFirstKeyNotifiesOnce`, `TestWaitedCountsTheReenteredGate`.
+
+- **`ttyWatch.mu` is a LEAF.** Never held across `read()` (the ioctl), never
+  while taking another lock; `heat` may start the goroutine under it because a
+  `go` statement is not blocking I/O. History never steps backwards: a sample
+  older than the newest stored one is dropped, though `sampleNow` still returns
+  its own read.
+
+- **Termios is read through `SyscallConn().Control`, never `Fd()`.** Control
+  holds a reference on the descriptor, so a master closed by another goroutine
+  fails cleanly ("use of closed file") instead of the ioctl landing on whatever
+  file the kernel has since given that number; `Fd()` would also switch the
+  master to blocking mode under the read loop. On a master the kernel reports
+  the SLAVE's termios on both darwin and linux. `TestMasterReportsSlaveTermios`
+  (proven on both), `TestReadModeAfterCloseErrs`.
+
+- **The override is written `--settings=<Q>`, the flag and its value must be
+  ADJACENT, and discovery reads `launchLine`.** Claude reads only the LAST
+  `--settings`, so magmux merges into the caller's last one (a
+  `map[string]json.RawMessage` merge: every other key survives byte for byte)
+  instead of appending a competitor. The `=` form is one token because
+  `extractClaudePrompt` skips a flag as one token and would otherwise return the
+  JSON as the prompt. Q has no space and no `'` (both rewritten as JSON `\u`
+  escapes inside strings), so it is ONE shell word in single quotes — which is
+  also why only POSIX shells are rewritten. The two-token `--settings <w>` is
+  merged only when the bytes between them are blanks: a redirection, comment,
+  continuation or assignment-shaped word there makes the launch `unparsed` and
+  byte-identical, because the rewrite replaces one contiguous span and would
+  otherwise eat it. `p.launchLine` keeps the PRE-rewrite `-c` string, and
+  `extractClaudePrompt`/`extractClaudeCwd` read it, so discovery sees exactly
+  what it saw before. `TestRewriteClaudeLaunch` (every row also checks that
+  every skipped unit survives in order), `FuzzRewriteClaudeLaunch`,
+  `TestExtractReadsLaunchLine`, `TestDirectPaneRunsRewritten`.
+
+- **A settings FILE is merged into a private copy, and the sweep proves an
+  owner dead before it deletes.** `<sockdir>/magmux-settings-<euid>` is created
+  0700 and re-verified (a directory, not a symlink, ours, exactly 0700) before
+  every use — the token-file rule applied to a directory; a dir that fails is
+  `unparsed`, never chmod'ed into shape. Copies are
+  `magmux-<pid>-settings-*.json` at 0600, removed by `reapChild` (so both
+  `waitForChild` and `unwindPane`), on spawn failure, and by `Main`'s deferred
+  `removeOwnSettings` (a defer, not `restore()`, which returns early headless).
+  `sockdir.ReapSettings` removes a name only when it matches, its pid
+  round-trips, is not ours, is a regular file, and `pidIsGone` — evaluated last.
+  `TestReapSettings*`, `TestSettingsDirRefusesForeignMode`,
+  `TestSettingsTempFileRemovedOnReap`. Every path resolves in the CHILD's
+  context (review M5): the copy's path is made ABSOLUTE before it is emitted
+  (a relative `--sock-dir` would otherwise land a relative name in a command
+  that may `cd`), and an unquoted `~/` value is expanded with the child's HOME
+  — `cfg.Env`'s last `HOME=`, else the inherited one — or is `unparsed` when
+  that HOME is empty or relative, or when a command before the invocation could
+  have changed it. "Could" is an ALLOWLIST (`homeKept`, `homeSafeCommands`):
+  a preceding command keeps HOME only if it is `cd`/`pushd`/`popd` or a few
+  inert builtins with every word literal and no assignment, so
+  `cd /x && claude --settings ~/s.json` resolves, while an assignment, `export`,
+  `env`, `eval`, `source`/`.`, a function definition, an expansion
+  (`${HOME:=x}` assigns) or any unknown command leaves it `unparsed`.
+  `TestSettingsCopyPathIsAbsolute`, `TestTildeSettingsUseTheChildsHome`,
+  `TestTildeSettingsAfterPlainCd`.
+
+- **Nothing may set `msg.sub` on an `opMsg`.** An op that runs `send` already
+  OCCUPIES the lane; a `sub` would enqueue the delivery on that same lane
+  behind itself — a self-deadlock. `TestOpSendHasNoSub`.
+
+- **Readiness changes do not emit.** `Snapshot.Input` is a 4 Hz VIEW published
+  by `Poll`; it is deliberately left out of `snapshotChanged`, so a pane
+  flickering between `starting` and ready neither floods subscribers nor files
+  an IN row (`observed` stays `recordObserved`'s). It is advisory: a send
+  decides on its own synchronous reads. `TestInputChangeDoesNotRecordObserved`.
+
+- **Every site that SERIALISES an error carries `reason` (and `typed`) beside
+  `code`.** The rule, to re-check whenever an emit site is added:
+
+  ```
+  $ grep -rn 'protocol\.Error{\|\["code"\] *=' --include='*.go' . | grep -v _test.go
+  ```
+
+  Every hit must set `reason`, and `typed` where it serialises a
+  `protocol.Error`. The one hit that is not an error is `plugin_exited`'s
+  process exit code in `plugin/host.go`. `typed` is set on every error a gated delivery returns after
+  its first byte, never on an ungated send, and a plugin's own errors never carry
+  it. Every `busy` on the wire carries a reason (`queue_full` / `in_flight` for
+  the hub's own). `TestReplyCarriesReasonAndTyped` covers the socket, HTTP, WS
+  and SSE; `TestCommandResultCarriesReasonAndTyped` Firebase.
+
+- **R6: an ungated send is byte-identical to before — bytes, reply and ack.**
+  `sendReport.addTo` adds nothing when `Gated` is false, and a `noGate` send is
+  ungated. `TestUngatedSendIsByteIdentical` pins the golden PTY bytes for both.
+
 ### Panel-as-wire-tap invariants (routing, replies)
 
 - **The panel is a wire tap on ONE exchange, and is not a participant in it.**
@@ -833,6 +1344,15 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   behind the first one's pacing. On close a lane accepts nothing new and DRAINS
   what it holds. Dropping the queue instead loses an instruction silently, on
   exactly the client shape most likely to hit it (`TestOneShotSendSurvivesClose`).
+  The READ side has the same rule, one step earlier: such a client has often
+  hung up before the aggregate is written, so that write fails with EPIPE while
+  its lines sit unread in the receive buffer. `sockSink` therefore only
+  `CloseWrite`s on EPIPE while the reader is still running, and whichever of
+  the two finishes LAST closes the fd (`readerFinished`). Every other failure
+  is still a full Close. When `TestOneShotSendSurvivesClose` failed about one
+  run in two hundred, the cause was this bug, not machine load.
+  `TestOneShotSendSurvivesAggregateWriteFailure` forces the order through the
+  `m.sockBeforeRead` seam.
 
 - **`Quiesce` is the only thing that discards a queued item unrun, and it says
   so.** It calls `Discard` rather than dropping the item, because the panel has
@@ -840,6 +1360,31 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   the panel and the pane is the one thing the panel exists to make impossible.
   The item's `ctx` is cancelled by `Quiesce` and by nothing else: a caller's own
   timeout ends that CALLER'S WAIT and never reorders or truncates a lane.
+
+- **`ExecContext` extends the same rule to the paths that have no lane.** REST
+  and Firebase call `Hub.Call` with the CALLER'S ctx, so before it a REST
+  timeout or a client disconnect cancelled a send between chunks and left half a
+  prompt in the box. `Hub.ExecContext(ctx)` returns `ctx`'s values with none of
+  its cancellation — `context.WithoutCancel`, wrapped in a cancel registered in
+  `h.calls` and counted in `h.inflight` in the same critical section as the
+  `closing` check — so Quiesce, and only Quiesce, cancels it, and Quiesce's
+  grace waits for it like an op in flight. `dispatchOp` runs `send` under it
+  on EVERY path, so there is one rule rather than one per transport; the
+  delivery calls `release` when it finishes. A caller giving up gets `timeout`
+  and the text and the Enter still land. `TestExecContextCancelledOnlyByQuiesce`,
+  `TestCallerTimeoutNeverCancelsDelivery` (socket `call` and REST) and
+  `TestRESTSendTimeoutDoesNotTruncate` pin it.
+
+- **`Op.Budget` is how an op's DEFAULT wait learns how long the op can take.**
+  It is hub-internal (not on the wire `OpSpec`): `send` registers
+  `sendBudgetOf`, which is `sendBudget` for a gated pane and 0 otherwise, and
+  `Hub.DefaultWait(op, args, base)` is `max(base, Budget(args))`. Every
+  transport's default goes through it — `call` with no `timeoutMs`, REST, the
+  WebSocket — so no default constant can be shorter than the send it waits
+  for: 500 keys come to ~29 s, past every fixed default there was. An EXPLICIT
+  `timeoutMs` is honoured as given. `Budget` runs with no hub lock held and may
+  take `treeMu.RLock` (it resolves the pane). `TestDefaultWaitIsMaxOfBaseAndBudget`
+  and `TestDefaultWaitUsesBudget` pin it.
 
 - **The torn-write rule is why `Sink.Write` returns an `n` at all.** `n > 0`
   means bytes may have left the process, so the stream is mid-line and NOTHING
@@ -1018,9 +1563,9 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   magmux's vocabulary and has no opinion about HTTP; the socket has no statuses
   at all. A second mapping in a second adapter means the same failure answered
   409 on one transport and 400 on another. The body always carries BOTH the code
-  and the message, because 409 covers five codes and a client branching on the
+  and the message, because 409 covers six codes and a client branching on the
   status alone could not tell "the pane is dead" from "the pane is the control
-  panel".
+  panel", or either from "the input box did not take what was typed".
 
 - **`http.Server.ErrorLog` must never reach stderr.** A TLS handshake against a
   plain port, or a client that wrote garbage, becomes a log line — and magmux may

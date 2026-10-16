@@ -67,6 +67,17 @@ type Snapshot struct {
 	// Error captures a tool-side error if the agent reported one
 	// (auth failure, rate limit, etc). Nil for normal operation.
 	Error error
+
+	// Input is the controller's published view of whether the tool would
+	// receive input right now (InputGate). It is carried BY VALUE, so nothing
+	// is shared after publication, and it is set only for a gated pane
+	// (Input.Gated); every other pane leaves it zero.
+	//
+	// It is a VIEW, refreshed each Poll from history: a send decides on its own
+	// synchronous reads, never on this. And it is deliberately NOT part of
+	// snapshotChanged: a readiness flip is not a turn, and emitting on one
+	// would make the control panel count an IN row that never happened.
+	Input InputReadiness
 }
 
 // ControllerState is the lifecycle stage of an interactive tool.
@@ -118,6 +129,173 @@ func (s ControllerState) String() string {
 type InputNotifier interface {
 	NotifyInput()
 }
+
+// InputGate is an optional interface a ToolController implements when it can
+// tell whether the tool will RECEIVE input right now, verify what reached its
+// input box, and see whether a submitted prompt was taken. A pane is gated only
+// when its controller implements this AND its gateBasis is declared or direct
+// (inputGateOf); otherwise `send` behaves byte for byte as it always has.
+//
+// It is checked by type assertion, like InputNotifier and TranscriptReader.
+//
+// All methods are called from a lane (or op) goroutine, never the render
+// goroutine, with NO magmux lock held. They may take p.mu (via the capture
+// helpers) and their own leaf locks, and may do small file reads and one
+// ioctl; they must not block on the child, the socket, or treeMu.
+type InputGate interface {
+	// InputReadiness reports whether a delivery described by q would land now.
+	// It is a DEMAND: one synchronous termios sample and one fresh screen read.
+	InputReadiness(q ReadinessQuery) InputReadiness
+	// CheckBox is the pre-submit verify. One synchronous termios sample and
+	// ONE fresh screen read, judged twice: readiness (with Types:false) and the
+	// box against want. When the verdict is BoxVerified, the returned Baseline
+	// was taken from that same read.
+	CheckBox(want BoxExpect) BoxCheck
+	// InputAccepted reports what the controller can see of the submission
+	// baselined in b. Called repeatedly during the acceptance windows. It
+	// decides no write, so it takes no termios sample.
+	InputAccepted(b AcceptBaseline) AcceptVerdict
+}
+
+// SendClass is what a `send` does to the box: KEYS (no text, no submit),
+// TYPE (text or paste, no submit) or SUBMIT (a final Enter).
+type SendClass int
+
+const (
+	ClassKeys SendClass = iota
+	ClassType
+	ClassSubmit
+)
+
+// ReadinessQuery says what a delivery will do, so the rules that depend on it
+// can be applied.
+type ReadinessQuery struct {
+	Class SendClass
+	Types bool // the delivery puts characters into the box: rule h (box_not_empty) applies
+	Paste bool // the text goes out bracketed: rule i (bracketed paste on) applies
+	// Baseline, when set, is the content this delivery will type into an
+	// empty box; the answer then carries Pre, an acceptance baseline for it
+	// taken from the SAME read. It is what lets a delivery ask, before a
+	// retype, whether somebody else's Enter already submitted its text.
+	Baseline string
+}
+
+// InputReadiness is one readiness answer. Gated is false for a pane nobody
+// gates, and then nothing else is meaningful and the key is omitted.
+type InputReadiness struct {
+	Gated       bool   `json:"-"`
+	Ready       bool   `json:"ready"`
+	Reason      string `json:"reason,omitempty"`      // a protocol.Reason* value; "" when Ready
+	Detail      string `json:"detail,omitempty"`      // human text, e.g. "termios changed 340ms ago"
+	Dismissable bool   `json:"dismissable,omitempty"` // a dialog Escape declines is showing
+	BoxHasText  bool   `json:"boxHasText,omitempty"`  // the box holds text
+	MaxPaste    int    `json:"-"`                     // largest [Pasted text #N] on screen
+	// Pre is the acceptance baseline for ReadinessQuery.Baseline, from this
+	// read (zero when no Baseline was asked for, or the gate cannot take one).
+	Pre AcceptBaseline `json:"-"`
+}
+
+// BoxExpect is what the delivery knows it put in the box.
+type BoxExpect struct {
+	Class SendClass // ClassType (no submit follows) or ClassSubmit
+	// Exact is the full content, when the box was EMPTY at the post-token
+	// check and every pre-Enter key was printable: text (typed newlines as
+	// "\n") plus those keys' runes. "" = undetermined: only non-empty can be
+	// checked.
+	Exact     string
+	TypedText bool // the delivery wrote text or printable keys (text_mismatch vs empty_box)
+	// Pasted: Claude may show this send as a `[Pasted text #N` token. It only
+	// WIDENS what verifies; equality still verifies.
+	Pasted     bool
+	PasteAbove int // MaxPaste at the post-token check; a verifying token must exceed it
+	// TypedAt is the moment of this attempt's first byte: a termios change
+	// after it (BoxCheck.TermiosChanged) is the positive evidence of a reset
+	// that the auto-retype requires.
+	TypedAt time.Time
+	// Pre is the attempt's pre-typing acceptance baseline (InputReadiness.Pre),
+	// when it has one: what BoxCheck.ConvChanged compares the conversation
+	// against.
+	Pre AcceptBaseline
+}
+
+// BoxVerdict is CheckBox's judgement of the box.
+type BoxVerdict int
+
+const (
+	BoxVerified BoxVerdict = iota
+	BoxMismatch
+	BoxEmpty
+)
+
+// BoxCheck is CheckBox's answer. Verdict is meaningful only when
+// Readiness.Ready.
+type BoxCheck struct {
+	Readiness InputReadiness
+	Verdict   BoxVerdict
+	Verified  string // "exact" | "paste_token" | "non_empty" (when BoxVerified)
+	Detail    string
+	Baseline  AcceptBaseline // from THIS read (when BoxVerified)
+	// Box is the content the box was judged on (the controller's own key of
+	// it), when Readiness.Ready. The settle wait compares it read to read to
+	// tell a box still being drawn from one that has stopped changing.
+	Box string
+	// Excess: a mismatch where the box holds MORE than the send typed (the
+	// text drawn twice). It forbids the auto-retype.
+	Excess bool
+	// TermiosChanged: the pty's termios fingerprint changed after
+	// BoxExpect.TypedAt (a cooked/reset sample in the watch's history). It
+	// is the evidence that typed text was SWALLOWED by a stdin reset, rather
+	// than merely slow to draw, and the auto-retype requires it.
+	TermiosChanged bool
+	// ConvChanged, when BoxExpect.Pre is set and Readiness.Ready: what changed
+	// since that pre-typing baseline that a SUBMIT would have changed — the
+	// conversation above the box, or a turn starting. "" = nothing. A submit
+	// by another writer before the text was ever drawn leaves an empty box
+	// that looks exactly like a silent drop; this is how the two are told
+	// apart, and a change forbids the never_drawn retype (r5 M1).
+	ConvChanged string
+}
+
+// Verified values.
+const (
+	verifiedExact      = "exact"
+	verifiedPasteToken = "paste_token"
+	verifiedNonEmpty   = "non_empty"
+)
+
+// AcceptBaseline is opaque to mux; the controller fills it from the CheckBox
+// read, immediately before the Enter.
+type AcceptBaseline struct {
+	At          time.Time // the CheckBox read
+	VerifiedKey string    // inputKey of the box content that was verified
+	SentKey     string    // inputKey(Exact) when determined, else VerifiedKey
+	Paste       int       // the verifying token's N (paste_token), else 0
+	// controllerData is the controller's own baseline (Claude: the matching
+	// entry count and the transcript seq).
+	controllerData any
+}
+
+// AcceptState is what InputAccepted saw.
+type AcceptState int
+
+const (
+	AcceptNone  AcceptState = iota // no attributable evidence yet
+	AcceptTaken                    // a new matching user-prompt entry, or a matching transcript entry
+	AcceptInBox                    // the box is visible and still holds the verified content
+)
+
+// AcceptVerdict is InputAccepted's answer.
+type AcceptVerdict struct {
+	State    AcceptState
+	Evidence string // "history" | "transcript" | ""
+	Dialog   string // a dialog that appeared (informational; never evidence)
+}
+
+// Evidence values.
+const (
+	evidenceHistory    = "history"
+	evidenceTranscript = "transcript"
+)
 
 // ── turn history ────────────────────────────────────────────────────────────
 

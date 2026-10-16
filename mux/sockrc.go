@@ -57,7 +57,7 @@ func (m *Magmux) sockCall(msg sockMsg) (map[string]any, error) {
 	if name == "" {
 		return nil, sockErrf(sockCodeBadRequest, `call needs an op: {"type":"call","op":"list","id":1}`)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout(msg.TimeoutMs))
+	ctx, cancel := context.WithTimeout(context.Background(), m.callWait(name, msg.Args, msg.TimeoutMs))
 	defer cancel()
 	return m.bus().Call(ctx, msg.caller, name, msg.Args)
 }
@@ -74,6 +74,18 @@ func callTimeout(ms int) time.Duration {
 		return callTimeoutMax
 	}
 	return time.Duration(ms) * time.Millisecond
+}
+
+// callWait is a `call`'s wait for its answer. An EXPLICIT timeoutMs is
+// honoured as given (clamped to the ceiling); with none, the default is
+// stretched to the op's own Budget (Hub.DefaultWait), so a gated send that is
+// known to need longer than callTimeoutDefault is never answered `timeout` by
+// a default nobody chose.
+func (m *Magmux) callWait(op string, args json.RawMessage, ms int) time.Duration {
+	if ms > 0 {
+		return callTimeout(ms)
+	}
+	return min(m.bus().DefaultWait(op, args, callTimeoutDefault), callTimeoutMax)
 }
 
 // callIsDriving reports whether a `call` makes its connection a CONTROLLER —
@@ -173,14 +185,14 @@ func (m *Magmux) subCall(msg sockMsg, sub *hub.Sub) {
 		// No connection behind this message (a unit test, an in-process
 		// caller): run it on the hub directly, which is what the Sub would have
 		// done minus the ordering.
-		ctx, cancel := context.WithTimeout(context.Background(), callTimeout(msg.TimeoutMs))
+		ctx, cancel := context.WithTimeout(context.Background(), m.callWait(op, args, msg.TimeoutMs))
 		defer cancel()
 		result, err := m.bus().Call(ctx, msg.caller, op, args)
 		m.replyTo(sub, msg.ID, result, err)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout(msg.TimeoutMs))
+	ctx, cancel := context.WithTimeout(context.Background(), m.callWait(op, args, msg.TimeoutMs))
 	id := msg.ID
 	sub.Call(ctx, op, args, func(result map[string]any, err error) []byte {
 		// The reply is what ends this request, so it is also what releases the

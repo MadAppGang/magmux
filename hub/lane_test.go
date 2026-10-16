@@ -208,6 +208,12 @@ func TestLaneOverflowIsBusyAndLocal(t *testing.T) {
 	if protocol.CodeOf(lastErr) != protocol.CodeBusy {
 		t.Fatalf("a full lane refused with %v (code %q), want busy", lastErr, protocol.CodeOf(lastErr))
 	}
+	// Every busy on the wire says WHICH busy: a full lane is the hub's queue,
+	// not a pane that cannot take input, and a caller retries the two
+	// differently.
+	if r := protocol.ReasonOf(lastErr); r != protocol.ReasonQueueFull {
+		t.Errorf("a full lane's busy carries reason %q, want %q", r, protocol.ReasonQueueFull)
+	}
 	if queued < laneMaxItems-1 {
 		t.Errorf("the lane refused after only %d items, want about %d", queued, laneMaxItems)
 	}

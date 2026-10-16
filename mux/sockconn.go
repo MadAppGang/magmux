@@ -17,10 +17,12 @@ package mux
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/MadAppGang/magmux/hub"
@@ -33,15 +35,39 @@ import (
 // net.Conn either put bytes on the wire or it did not, and that distinction is
 // what lets the finals follow a refused write but never a torn one. A buffered
 // or TLS sink cannot make that claim and reports every failure as torn.
+//
+// The fd belongs to TWO goroutines, the hub's writer and handleSocketConn's
+// reader, and the writer must not take it away from the reader when the reason
+// it stopped is that the PEER hung up. A one-shot client (README's `nc -U`)
+// writes its lines and closes at once, so the connect-time aggregate meets a
+// closed peer and fails with EPIPE — while every line the client sent is still
+// sitting unread in this end's receive buffer. Closing the fd then discards
+// them, and an instruction magmux was sent is lost before it was ever admitted
+// to a lane. So on EPIPE the writer only shuts its own half (CloseWrite); the
+// reader drains to EOF and the LAST of the two to finish closes the fd. Every
+// other failure — a deadline, a torn write, slow_consumer, Finalize's cut — is
+// still a full Close, because that is what ends a peer that is alive and not
+// reading, and what unblocks a writer stuck inside Write.
 type sockSink struct {
-	conn net.Conn
-	once sync.Once
+	conn     net.Conn
+	once     sync.Once
+	peerGone atomic.Bool // a Write saw EPIPE: the peer closed, its bytes may be unread
+
+	mu         sync.Mutex // orders the writer's Close against the reader's end
+	halfClosed bool       // Close shut only the write side; the reader owes the fd a Close
+	readerDone bool       // the reader has stopped; nothing will ever Read again
 }
 
 // Write puts one whole message on the wire. net.Conn.Write returns the bytes
 // actually written, including on a deadline error, so the torn/clean
 // distinction the hub needs arrives here for free.
-func (s *sockSink) Write(b []byte) (int, error) { return s.conn.Write(b) }
+func (s *sockSink) Write(b []byte) (int, error) {
+	n, err := s.conn.Write(b)
+	if errors.Is(err, syscall.EPIPE) {
+		s.peerGone.Store(true)
+	}
+	return n, err
+}
 
 // SetWriteDeadline also interrupts a Write that is ALREADY blocked, which is
 // the net.Conn rule Finalize's cut depends on.
@@ -50,13 +76,38 @@ func (s *sockSink) SetWriteDeadline(t time.Time) error { return s.conn.SetWriteD
 // Close ends the connection, which is this transport's EOF. The reason is not
 // on the wire — a raw socket has nowhere to put it — and is kept for the debug
 // log alone. Closing also unblocks a writer sitting inside Write.
+//
+// After EPIPE, and while the reader is still reading, it shuts the write side
+// only and leaves the fd to readerFinished (see sockSink).
 func (s *sockSink) Close(reason string) {
 	s.once.Do(func() {
 		if dbgFile != nil {
 			fmt.Fprintf(dbgFile, "socket subscriber closed: %s\n", reason)
 		}
+		s.mu.Lock()
+		cw, canHalf := s.conn.(interface{ CloseWrite() error })
+		if canHalf && s.peerGone.Load() && !s.readerDone {
+			s.halfClosed = true
+			s.mu.Unlock()
+			_ = cw.CloseWrite()
+			return
+		}
+		s.mu.Unlock()
 		_ = s.conn.Close()
 	})
+}
+
+// readerFinished is the reader's half of the handshake: it closes the fd if the
+// writer already half-closed it, and otherwise tells a later Close that nobody
+// is reading any more, so that Close is a full one.
+func (s *sockSink) readerFinished() {
+	s.mu.Lock()
+	s.readerDone = true
+	owed := s.halfClosed
+	s.mu.Unlock()
+	if owed {
+		_ = s.conn.Close()
+	}
 }
 
 // sockConnSeq numbers socket connections for Caller.Conn ("sock#12"). It is
@@ -98,7 +149,8 @@ func (m *Magmux) handleSocketConn(conn net.Conn) {
 
 	// Step 1: register, BUFFERING. From this moment every Publish is queued for
 	// this connection, and nothing is written yet.
-	sub := m.bus().Session(hub.Caller{Transport: "socket", Conn: connID}, &sockSink{conn: conn}, pc.Plugin)
+	sink := &sockSink{conn: conn}
+	sub := m.bus().Session(hub.Caller{Transport: "socket", Conn: connID}, sink, pc.Plugin)
 	// The host writes to a plugin through the SAME Sub as everything else: one
 	// writer per connection is what stops an `invoke` interleaving mid-line with
 	// a broadcast, and Sub.Send never blocks, so a wedged plugin fills its own
@@ -146,11 +198,17 @@ func (m *Magmux) handleSocketConn(conn net.Conn) {
 		// still written (and lost at the socket, which is the peer's business),
 		// and whatever is already queued on its LANES is still delivered.
 		sub.Close("client disconnected")
+		// After the Close, so a writer still draining the queue keeps its fd;
+		// this only releases one the writer half-closed when the peer hung up.
+		sink.readerFinished()
 		if driving {
 			m.control.noteController(false)
 		}
 	}()
 
+	if m.sockBeforeRead != nil {
+		m.sockBeforeRead(conn)
+	}
 	scanner := bufio.NewScanner(conn)
 	// Raise the token limit off the 64KB default. An oversized line is not
 	// skipped: Scan returns false and this loop ends, so one long message

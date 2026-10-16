@@ -1,0 +1,23 @@
+[
+  {
+    "label": "bash-mode-empty",
+    "offset": 3182,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                ◐ medium · /effort\n────────────────────────────────────────────────────────────────────────────────────────────────────\n! Try \"edit <filepath> to...\"\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  ! for shell mode"
+  },
+  {
+    "label": "bash-mode-typed",
+    "offset": 3241,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                ◐ medium · /effort\n────────────────────────────────────────────────────────────────────────────────────────────────────\n! echo BASHMODE-OK\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  ! for shell mode"
+  },
+  {
+    "label": "bash-mode-submitted",
+    "offset": 5853,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n! echo BASHMODE-OK\n  ⎿  BASHMODE-OK\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n✻ Perambulating… (running Stop hooks… 0/2 · 3s · ↓ 2 tokens)\n                                                                                      31916 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 9s | 󰍛 464M | ░░░░░░ 0% | █---- 5h:30% ↻1h34m 7d:28% ↻6d6h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 4 agents"
+  }
+]

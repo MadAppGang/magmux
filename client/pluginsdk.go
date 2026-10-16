@@ -388,6 +388,11 @@ func (p *Plugin) answer(call string, result map[string]any, err error) {
 	if err != nil {
 		msg["code"] = protocol.CodeOf(err)
 		msg["error"] = err.Error()
+		// The reason travels; typed does not. typed is magmux's claim about
+		// its own PTY writes, and invoke_result has no field for it.
+		if r := protocol.ReasonOf(err); r != "" {
+			msg["reason"] = r
+		}
 	} else if result != nil {
 		msg["result"] = result
 	}

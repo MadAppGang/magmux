@@ -311,6 +311,12 @@ func (a *Adapter) writeResult(pushId string, result map[string]any, err error) {
 	if err != nil {
 		rec["error"] = err.Error()
 		rec["code"] = protocol.CodeOf(err)
+		if r := protocol.ReasonOf(err); r != "" {
+			rec["reason"] = r
+		}
+		if protocol.TypedOf(err) {
+			rec["typed"] = true
+		}
 	} else if result != nil {
 		rec["result"] = jsonString(result)
 	}

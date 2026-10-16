@@ -405,12 +405,7 @@ func (cp *ControlPanel) targetPane() (int, error) {
 		return 0, nil
 	}
 	cp.mu.Lock()
-	switch len(cp.routeOrder) {
-	case 0:
-		cp.mu.Unlock()
-		return 0, nil
-	case 1:
-		pane := cp.routeOrder[0]
+	if pane, ok := cp.soleRouteLocked(); ok {
 		cp.mu.Unlock()
 		return pane, nil
 	}
@@ -423,6 +418,32 @@ func (cp *ControlPanel) targetPane() (int, error) {
 	cp.mu.Unlock()
 	return -1, sockErrf(sockCodeBadRequest,
 		"send needs a pane: this controller is driving %s", open)
+}
+
+// peekTargetPane is targetPane's answer with none of its side effects: it
+// files no refusal note. It is for callers that only PLAN around the target —
+// send's Budget hook runs before the op on every transport, and the op's own
+// targetPane is the one that records the refusal (review M2).
+func (cp *ControlPanel) peekTargetPane() (int, bool) {
+	if cp == nil {
+		return 0, true
+	}
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	return cp.soleRouteLocked()
+}
+
+// soleRouteLocked is the default target: pane 0 with no route, the route when
+// there is exactly one, and no answer when there are several. Caller holds
+// cp.mu.
+func (cp *ControlPanel) soleRouteLocked() (int, bool) {
+	switch len(cp.routeOrder) {
+	case 0:
+		return 0, true
+	case 1:
+		return cp.routeOrder[0], true
+	}
+	return -1, false
 }
 
 // scrollBy moves the exchange view. Positive scrolls back through history,

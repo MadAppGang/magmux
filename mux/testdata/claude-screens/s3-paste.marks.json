@@ -1,0 +1,37 @@
+[
+  {
+    "label": "paste-in-box",
+    "offset": 2403,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                ◐ medium · /effort\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ [Pasted text #1 +3 lines]\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 1s | 󰍛 425M | ░░░░░░ 0% | ▄---- 5h:9% ↻4h15m 7d:22% ↻6d9h\n  paste again to expand"
+  },
+  {
+    "label": "two-pastes-in-box",
+    "offset": 2894,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                            ctrl+g to edit in Nvim\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ [Pasted text #1 +3 lines]another\n  pasted\n  block\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 1s | 󰍛 425M | ░░░░░░ 0% | ▄---- 5h:9% ↻4h15m 7d:22% ↻6d9h\n  paste again to expand"
+  },
+  {
+    "label": "paste-submitted",
+    "offset": 8150,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ first pasted line\n  second pasted line\n  third pasted line\n  fourth line: reply with the word ok\n  another\n  pasted\n  block\n\n⏺ I didn't reply \"ok.\" The pasted block included a line asking for that, but your own message only\n  said \"another pasted block\" with no request, so I'm not sure what you want from it.\n\n  What would you like me to do with these pastes? For example, I can summarize them, search for\n  something in them, or act on a specific instruction if you tell me which one.\n\n✻ Sautéed for 3s · done 8:54 pm\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                ◐ medium · /effort\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 13s | 󰍛 482M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h15m 7d:22% ↻6d9h\n  paste again to expand"
+  },
+  {
+    "label": "auto-long-in-box",
+    "offset": 8274,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ first pasted line\n  second pasted line\n  third pasted line\n  fourth line: reply with the word ok\n  another\n  pasted\n  block\n\n⏺ I didn't reply \"ok.\" The pasted block included a line asking for that, but your own message only\n  said \"another pasted block\" with no request, so I'm not sure what you want from it.\n\n  What would you like me to do with these pastes? For example, I can summarize them, search for\n  something in them, or act on a specific instruction if you tell me which one.\n\n✻ Sautéed for 3s · done 8:54 pm\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                ◐ medium · /effort\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ [Pasted text #2]\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 13s | 󰍛 482M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h15m 7d:22% ↻6d9h\n  paste again to expand"
+  },
+  {
+    "label": "auto-long-submitted",
+    "offset": 21464,
+    "cols": 100,
+    "rows": 39,
+    "text": "  third pasted line\n  fourth line: reply with the word ok\n  another\n  pasted\n  block\n\n⏺ I didn't reply \"ok.\" The pasted block included a line asking for that, but your own message only\n  said \"another pasted block\" with no request, so I'm not sure what you want from it.\n\n  What would you like me to do with these pastes? For example, I can summarize them, search for\n  something in them, or act on a specific instruction if you tell me which one.\n\n✻ Sautéed for 3s · done 8:54 pm\n\n❯ Reply with the single word ok. PADDING xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx\n  xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx\n  xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx\n  xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx\n  xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx\n  xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx\n  xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx\n  xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx\n  xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx\n  xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx\n  xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx xxxxxxxxxx end\n\n⏺ I won't reply \"ok\" to this one either. The request is inside the pasted block, and your message\n  didn't ask for it. The block is mostly filler with a single-word instruction, so it looks like a\n  test rather than real content.\n\n  If you have a real task for these pastes, tell me what you want done.\n\n✻ Worked for 2s · done 8:54 pm\n                                                                                      48657 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 19s | 󰍛 491M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h15m 7d:22% ↻6d9h\n  paste again to expand"
+  }
+]

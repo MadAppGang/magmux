@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/MadAppGang/magmux/hub"
+	"github.com/MadAppGang/magmux/protocol"
 )
 
 // pilotSendDelay is the pause between writing an instruction's text and
@@ -35,7 +36,13 @@ import (
 // them) debounce and re-render their input box; submitting in the same write
 // as the text can land the Return before the box has taken the text, which
 // silently drops the instruction.
-const pilotSendDelay = 150 * time.Millisecond
+//
+// The value is protocol's, because a gated send's budget (protocol.SendBudget)
+// counts it and a client computes that budget too.
+const pilotSendDelay = protocol.SendSettle
+
+// keyGap is the pause before each named key.
+const keyGap = protocol.SendKeyGap
 
 // namedKeys maps the key names accepted by `send` to the bytes a terminal
 // would produce. Cursor keys use the normal (non-application) CSI forms —
@@ -156,11 +163,23 @@ func sendModeOf(typed, paste bool) (sendMode, error) {
 // typedChunkRunes is the most text one typed write carries, and typedChunkGap
 // the pause between two writes. Small and spaced so the far end reads them as
 // keystrokes: back-to-back writes can be read as one chunk, and even twenty
-// chunks read together stay under the 800-character paste threshold above.
+// chunks read together stay under the pasteCollapseRunes threshold below.
+//
+// Both values are protocol's: a gated send's budget counts every typed write,
+// and protocol.TypedWriteCount is pinned to agree with typedWrites.
 const (
-	typedChunkRunes = 32
-	typedChunkGap   = 8 * time.Millisecond
+	typedChunkRunes = protocol.SendTypedChunkRunes
+	typedChunkGap   = protocol.SendTypedChunkGap
 )
+
+// pasteCollapseRunes is Claude Code's paste threshold, measured on 2.1.286
+// (sendTyped above): any single read longer than this — by runes or by bytes —
+// is taken as a paste even without the markers, and shown in the box as a
+// `[Pasted text #N` token. A gated auto send whose one write is longer is
+// therefore EXPECTED to collapse (BoxExpect.Pasted), so a correct collapsed
+// box is verified by its token and never refused as text_mismatch. Typed
+// writes stay far below it by construction.
+const pasteCollapseRunes = 800
 
 // typedNewline is the byte a typed newline becomes: ctrl-j, the line feed a
 // terminal sends for a newline that is not Return. Return (CR) is what submits,
@@ -205,13 +224,20 @@ func typedWrites(text string) [][]byte {
 // has requested that mode. Without this, the first newline of a multi-line
 // instruction submits a half-written prompt.
 func (p *Pane) pasteWrap(text string) []byte {
+	b, _ := p.pasteWrapped(text)
+	return b
+}
+
+// pasteWrapped is pasteWrap that also says whether it bracketed, which is
+// what a gated send needs to know about what Claude will show (BoxExpect.Pasted).
+func (p *Pane) pasteWrapped(text string) ([]byte, bool) {
 	p.mu.Lock()
 	bracketed := p.bracketPaste
 	p.mu.Unlock()
 	if bracketed && strings.Contains(text, "\n") {
-		return []byte("\x1b[200~" + text + "\x1b[201~")
+		return []byte("\x1b[200~" + text + "\x1b[201~"), true
 	}
-	return []byte(text)
+	return []byte(text), false
 }
 
 // sendToPane delivers a driver instruction: optional text, then optional named
@@ -256,25 +282,53 @@ func (m *Magmux) sendToPane(idx int, text string, keys []string, enter bool, lab
 // when there is one, so Quiesce can stop a send between keystrokes. Nil means
 // nothing can cancel it, which is the right answer for an in-process caller.
 func (m *Magmux) sendToPaneVia(ctx context.Context, sub *hub.Sub, idx int, mode sendMode, text string, keys []string, enter bool, label string, done func(error)) error {
+	var cb func(sendReport, error)
+	if done != nil {
+		cb = func(_ sendReport, err error) { done(err) }
+	}
+	return m.sendRequestVia(ctx, sub, sendRequest{idx: idx, mode: mode, text: text, keys: keys, enter: enter, label: label}, cb)
+}
+
+// sendRequest is one `send` as the transport decoded it. The first six fields
+// are the request every pane has always taken; the last three only mean
+// anything on a gated pane (inputgate.go), and their zero values are today's.
+type sendRequest struct {
+	idx   int
+	mode  sendMode
+	text  string
+	keys  []string
+	enter bool
+	label string
+
+	dismiss        bool // dismissDialogs: Escape a dismissable dialog (R5)
+	readyTimeoutMs int  // the readiness deadline; 0 = the default (validated by the transport)
+	noGate         bool // skip the gate, the verify and acceptance: today's path
+}
+
+// sendRequestVia is sendToPaneVia with the whole request, and a done that also
+// receives what a gated delivery observed (sendReport.Gated is false for every
+// other send, and then the report says nothing).
+func (m *Magmux) sendRequestVia(ctx context.Context, sub *hub.Sub, r sendRequest, done func(sendReport, error)) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	d, err := m.admitSend(idx, mode, text, keys, enter, label)
+	d, err := m.admitSend(r)
 	if err != nil {
 		return err
 	}
 	if sub == nil {
 		// No connection to order against: today's one-goroutine-per-send shape,
-		// now carrying whatever ctx the caller had.
+		// now carrying whatever ctx the caller had. On the op path that ctx is
+		// an ExecContext (dispatchOp), which only Quiesce cancels.
 		go d.deliver(ctx, done)
 		return nil
 	}
-	err = sub.Deliver(idx, hub.LaneItem{
+	err = sub.Deliver(r.idx, hub.LaneItem{
 		Run:     func(ctx context.Context) { d.deliver(ctx, done) },
 		Discard: func() { d.discard(done) },
 		// The text is what makes one item big; the rest is a handful of key
 		// names. The cap this counts against is per (connection, pane).
-		Size: len(text) + 64,
+		Size: len(r.text) + 64,
 	})
 	if err != nil {
 		// The OUT row is already on the panel — admit wrote it — so a send that
@@ -297,12 +351,24 @@ type sendDelivery struct {
 	text  string
 	keys  []string
 	enter bool
+
+	// The gate's half (inputgate.go). gated is decided once, at admit, by
+	// classifySend; when it is false nothing below is read and the delivery
+	// is today's, byte for byte.
+	gated     bool
+	g         InputGate
+	class     SendClass
+	dismiss   bool
+	readyWait time.Duration
 }
 
 // admitSend resolves the target and files the request, with no I/O and no
 // waiting. Everything it does is what the panel and the pane's controller have
-// always been told the moment a send arrived.
-func (m *Magmux) admitSend(idx int, mode sendMode, text string, keys []string, enter bool, label string) (*sendDelivery, error) {
+// always been told the moment a send arrived — except, on a gated pane, the
+// Enter-position rule, which refuses before anything is filed, and the
+// NotifyInput, which waits until the gate has passed (D9).
+func (m *Magmux) admitSend(r sendRequest) (*sendDelivery, error) {
+	idx, mode, text, keys, enter, label := r.idx, r.mode, r.text, r.keys, r.enter, r.label
 	// Resolved through the identity table, never by raw index: after a
 	// close_pane the ids are sparse, and a bounds check alone would happily
 	// type an instruction into a pane that is no longer on screen.
@@ -314,7 +380,14 @@ func (m *Magmux) admitSend(idx int, mode sendMode, text string, keys []string, e
 		// the panel is not a session; nothing to type into
 		return nil, sockErrf(sockCodePaneIsControl, "pane %d is the control panel and has no session to type into", idx)
 	}
-	if mode == sendPaste {
+	cls, err := classifySend(p, r)
+	if err != nil {
+		// Refused before a byte, an OUT row or an event: on a gated pane a
+		// request that would half-run cannot be verified (§3.2).
+		return nil, err
+	}
+	keys, enter = cls.keys, cls.enter
+	if mode == sendPaste && !cls.gated {
 		// Without the mode the markers would arrive as literal keystrokes, and a
 		// paste the program cannot see as one is not a paste.
 		p.mu.Lock()
@@ -339,8 +412,10 @@ func (m *Magmux) admitSend(idx int, mode sendMode, text string, keys []string, e
 		"text":  text,
 		"at":    time.Now().UTC().Format(time.RFC3339),
 	}
-	if len(keys) > 0 {
-		ev["keys"] = keys // omitted rather than null when unused
+	if len(r.keys) > 0 {
+		// The request AS IT ARRIVED, before a gated send's trailing Enter key
+		// was normalised onto the submit: that is what OUT means.
+		ev["keys"] = r.keys // omitted rather than null when unused
 	}
 	m.broadcastEvent(ev)
 
@@ -348,10 +423,25 @@ func (m *Magmux) admitSend(idx int, mode sendMode, text string, keys []string, e
 	// controller whose transcript is missing or lagging stays settled on the
 	// previous turn's awaiting_input, and a pilot waiting for the turn to
 	// begin waits forever. See InputNotifier.
+	//
+	// A gated send says it later, in deliverGated, once the gate and the
+	// typing token are passed: a send refused `busy` never announces a turn.
+	if !cls.gated {
+		notifyInput(p)
+	}
+	// The OUT row and the event above carry the text AS IT ARRIVED; the
+	// delivery types the classified text (a gated send's CRs are newlines).
+	return &sendDelivery{m: m, p: p, idx: idx, seq: seq, mode: mode, text: cls.text, keys: keys, enter: enter,
+		gated: cls.gated, g: cls.g, class: cls.class, dismiss: r.dismiss,
+		readyWait: protocol.ReadyWait(r.readyTimeoutMs)}, nil
+}
+
+// notifyInput is the ONE way a send tells a pane's controller a turn is
+// starting, from admit (ungated) or from deliverGated (gated).
+func notifyInput(p *Pane) {
 	if n, ok := p.controller.(InputNotifier); ok && p.controller != nil {
 		n.NotifyInput()
 	}
-	return &sendDelivery{m: m, p: p, idx: idx, seq: seq, mode: mode, text: text, keys: keys, enter: enter}, nil
 }
 
 // deliver types the instruction. It is the body that used to be the `go func()`
@@ -361,7 +451,14 @@ func (m *Magmux) admitSend(idx int, mode sendMode, text string, keys []string, e
 //
 // ctx is cancelled by Hub.Quiesce and by nothing else. A caller's own timeout
 // ends that caller's WAIT; it never truncates an instruction half-typed.
-func (d *sendDelivery) deliver(ctx context.Context, done func(error)) {
+func (d *sendDelivery) deliver(ctx context.Context, done func(sendReport, error)) {
+	if d.gated {
+		// A gated pane: wait for readiness, type, verify the box, Enter, and
+		// look for evidence (inputgate.go). Everything below is the ungated
+		// path, unchanged.
+		d.deliverGated(ctx, done)
+		return
+	}
 	var firstErr error
 	// A rejected write means the pane cannot take input at all — its child
 	// exited or its PTY is closed — so the instruction is gone and there is
@@ -376,9 +473,9 @@ func (d *sendDelivery) deliver(ctx context.Context, done func(error)) {
 		// The panel learns the outcome whether or not anyone asked for a
 		// reply: a fire-and-forget send that never reached the PTY is
 		// exactly the failure an operator needs to see.
-		d.m.control.recordAck(d.seq, err == nil, verbErrCode(err), ackText(d.text, d.keys, d.enter, err))
+		d.m.control.recordAck(d.seq, err == nil, verbErrCode(err), ackText(d.text, d.keys, d.enter, nil, err))
 		if done != nil {
-			done(err)
+			done(sendReport{}, err)
 		}
 	}
 
@@ -423,7 +520,7 @@ func (d *sendDelivery) deliver(ctx context.Context, done func(error)) {
 			}
 			continue
 		}
-		if !pause(ctx, 20*time.Millisecond) {
+		if !pause(ctx, keyGap) {
 			finish(d.cancelled("key " + k))
 			return
 		}
@@ -446,12 +543,12 @@ func (d *sendDelivery) deliver(ctx context.Context, done func(error)) {
 
 // discard answers for an instruction Quiesce dropped before it ran. The OUT row
 // exists — admit wrote it — so the only wrong answer here is silence.
-func (d *sendDelivery) discard(done func(error)) {
+func (d *sendDelivery) discard(done func(sendReport, error)) {
 	err := sockErrf(sockCodeNotReady,
 		"pane %d: the instruction was discarded unsent; magmux is shutting down", d.idx)
 	d.m.control.recordAck(d.seq, false, verbErrCode(err), err.Error())
 	if done != nil {
-		done(err)
+		done(sendReport{}, err)
 	}
 }
 
@@ -489,16 +586,29 @@ func pause(ctx context.Context, d time.Duration) bool {
 // ackText summarises what magmux did with a send, for the ⇦ continuation on
 // the panel's OUT row. It describes the delivery, not the session's reaction:
 // "the bytes reached the PTY" is all an ack can honestly claim.
-func ackText(text string, keys []string, enter bool, err error) string {
+//
+// A gated send's ack (rep.Gated) adds what the gate saw — the wait, the
+// dialogs it declined, how the box was verified, what evidence followed —
+// still as a continuation of the OUT row, never a row of its own. With no
+// report, or an ungated one, the string is exactly today's.
+func ackText(text string, keys []string, enter bool, rep *sendReport, err error) string {
+	if rep != nil && rep.Gated {
+		return gatedAckText(len(text), *rep, err)
+	}
 	if err != nil {
 		return err.Error()
 	}
+	return deliveryParts(len(text), len(keys), enter)
+}
+
+// deliveryParts is the "118 bytes + 2 keys + enter" summary both acks share.
+func deliveryParts(bytes, keys int, enter bool) string {
 	var parts []string
-	if n := len(text); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d bytes", n))
+	if bytes > 0 {
+		parts = append(parts, fmt.Sprintf("%d bytes", bytes))
 	}
-	if n := len(keys); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d keys", n))
+	if keys > 0 {
+		parts = append(parts, fmt.Sprintf("%d keys", keys))
 	}
 	if enter {
 		parts = append(parts, "enter")

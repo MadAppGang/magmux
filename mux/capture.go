@@ -93,12 +93,16 @@ func rowWalk(row []Cell, x0, x1 int, st *rowStyle) string {
 		}
 		if !cell.Cont {
 			line.WriteRune(ch)
-			if st != nil && cell.Wide {
+			switch {
+			case st == nil:
+			case st.dimOnly:
+				st.dim = append(st.dim, cell.Attr&AttrDim != 0)
+			case cell.Wide:
 				st.wide = append(st.wide, n)
 			}
 			n++
 		}
-		if st != nil {
+		if st != nil && !st.dimOnly {
 			st.add(c-x0, cell)
 		}
 	}
@@ -106,7 +110,13 @@ func rowWalk(row []Cell, x0, x1 int, st *rowStyle) string {
 	// filled status bar, a cleared line with a background — is real screen
 	// content with no character in it, and a run that extends past the text is
 	// how it survives the trim.
-	return strings.TrimRight(line.String(), " ")
+	text := strings.TrimRight(line.String(), " ")
+	if st != nil && st.dimOnly {
+		// The flags are trimmed in the same step as the text: every trimmed byte
+		// is one ASCII space, i.e. one rune and one flag.
+		st.dim = st.dim[:len(st.dim)-(line.Len()-len(text))]
+	}
+	return text
 }
 
 // viewText renders the screenful that is `off` rows above the live bottom: off
@@ -220,5 +230,67 @@ func (p *Pane) captureAt(offset, lastN int, stripBlankTail bool) PaneCapture {
 		out.Truncated = true
 	}
 	out.Text = strings.Join(lines, "\n")
+	return out
+}
+
+// styledRow is one LIVE viewport row: its text and, PER RUNE, whether that
+// rune is FAINT (SGR 2). The Claude screen reader needs the second half
+// because Claude draws its input-box placeholders (`Try "…"`, `Press up to
+// edit queued messages`) and its queued-message hint in faint text, and a
+// placeholder read as typed text is a box that never looks empty.
+//
+// len(Faint) == utf8.RuneCountInString(Text), by construction: the flags are
+// recorded inside rowWalk, one per emitted rune, and right-trimmed together
+// with the text. There is no column → rune mapping anywhere, so none can
+// overrun on a wide character.
+type styledRow struct {
+	Text  string
+	Faint []bool
+}
+
+// tailView is what one locked read of a pane hands a screen reader: the rows,
+// the geometry they were laid out at, and the bracketed-paste mode read in the
+// same critical section (readiness rule i must not combine a screen from one
+// moment with a mode from another).
+type tailView struct {
+	Rows         []styledRow
+	Cols         int
+	BracketPaste bool
+}
+
+// tailRows copies the LIVE screen's last n rows (n <= 0: every row). Offset 0,
+// never scrollback, whatever the human scrolled to — like the stream, it
+// reports what the child drew, not what somebody is looking at.
+//
+// Takes p.mu itself; caller must NOT hold it. The rows are copied to strings
+// under the lock and every byte of parsing happens after release.
+func (p *Pane) tailRows(n int) []styledRow { return p.tailView(n).Rows }
+
+// tailView is tailRows plus the facts read in the same critical section.
+// Caller must NOT hold p.mu.
+func (p *Pane) tailView(n int) tailView {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := tailView{BracketPaste: p.bracketPaste}
+	s := p.screen
+	if s == nil {
+		return out
+	}
+	out.Cols = s.cols
+	start := 0
+	if n > 0 && n < s.rows {
+		start = s.rows - n
+	}
+	out.Rows = make([]styledRow, 0, s.rows-start)
+	for i := start; i < s.rows; i++ {
+		row := s.viewRow(0, i)
+		if row == nil {
+			out.Rows = append(out.Rows, styledRow{})
+			continue
+		}
+		st := rowStyle{dimOnly: true}
+		text := rowWalk(row, 0, s.cols-1, &st)
+		out.Rows = append(out.Rows, styledRow{Text: text, Faint: st.dim})
+	}
 	return out
 }

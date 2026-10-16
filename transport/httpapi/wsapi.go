@@ -292,7 +292,13 @@ func (s *wsSession) dispatch(msg []byte) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), wsTimeout(req.TimeoutMs))
+	// An explicit timeoutMs is the caller's; with none, the default stretches
+	// to the op's own Budget (a gated send), so it is never cut by a default.
+	wait := wsTimeout(req.TimeoutMs)
+	if req.TimeoutMs <= 0 {
+		wait = min(s.srv.cfg.Hub.DefaultWait(req.Op, req.Args, wsCallTimeout), wsCallMax)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	id := req.ID
 
 	if s.kind.ReadOnly() && !readOnly {
@@ -370,6 +376,12 @@ func replyBytes(id json.RawMessage, result map[string]any, err error) []byte {
 	case err != nil:
 		reply["code"] = protocol.CodeOf(err)
 		reply["error"] = err.Error()
+		if r := protocol.ReasonOf(err); r != "" {
+			reply["reason"] = r
+		}
+		if protocol.TypedOf(err) {
+			reply["typed"] = true
+		}
 	case result != nil:
 		reply["result"] = result
 	}

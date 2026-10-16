@@ -42,6 +42,12 @@ type OpFunc func(ctx context.Context, c Caller, args json.RawMessage) (map[strin
 type Op struct {
 	Spec protocol.OpSpec
 	Fn   OpFunc
+	// Budget, when set, is the op's own upper bound on how long one call
+	// with these args can take. It is hub-internal and never on the wire: it
+	// is what DefaultWait reads, so a transport's default wait cannot cut an
+	// op short that is known to need longer. It is called with no hub lock
+	// held and must not block. Zero means "no opinion".
+	Budget func(args json.RawMessage) time.Duration
 }
 
 // emptyObjectSchema is what an op that takes no arguments advertises. A nil
@@ -209,6 +215,26 @@ func (h *Hub) Spec(name string) (protocol.OpSpec, bool) {
 	defer h.mu.RUnlock()
 	op, ok := h.ops[name]
 	return op.Spec, ok
+}
+
+// DefaultWait is how long a transport waits for one call's answer when the
+// caller named no timeout: base (the transport's own default), or the op's
+// Budget for these args when that is longer. An unknown op, an op without a
+// Budget and a Budget of zero all get base unchanged.
+//
+// It bounds only the caller's WAIT. An explicit caller timeout is honoured as
+// given and does not come through here.
+//
+// The hook is copied out under RLock and called after the release: hub.mu is a
+// leaf and is never held across a call-out.
+func (h *Hub) DefaultWait(name string, args json.RawMessage, base time.Duration) time.Duration {
+	h.mu.RLock()
+	budget := h.ops[name].Budget
+	h.mu.RUnlock()
+	if budget == nil {
+		return base
+	}
+	return max(base, budget(args))
 }
 
 // Call runs one op and returns its result.

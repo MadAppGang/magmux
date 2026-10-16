@@ -58,6 +58,15 @@ func Main(args []string) int {
 			fmt.Println("            `list`, `results` and live `snapshot` events, so a client can")
 			fmt.Println("            address panes by name instead of by index. Ignored with a")
 			fmt.Println("            message if no -e precedes it, and dropped by -g.")
+			fmt.Println("  --controller NAME  Declare every -e and -g pane a NAME pane, whatever its")
+			fmt.Println("            command is (never the control panel). The one NAME is claude-code:")
+			fmt.Println("            the pane gets the Claude controller and its input is gated, which")
+			fmt.Println("            is how a wrapper that runs claude itself (claudish) is driven")
+			fmt.Println("            safely. Anywhere on the line; the last one wins. A grid that")
+			fmt.Println("            mixes shells with Claude panes gates the shells too: declare per")
+			fmt.Println("            pane with open_pane {\"controller\":\"claude-code\"} instead.")
+			fmt.Println("            Claude panes run in normal editor mode; a declared wrapper must")
+			fmt.Println("            force that itself (see Controlled Sessions below).")
 			fmt.Println("  -w        Auto-exit when all panes are done (dead or idle)")
 			fmt.Println("            Needs at least one -e/-g pane. `magmux -w` with no command runs")
 			fmt.Println("            the default shell layout and never auto-exits, and so does")
@@ -186,6 +195,18 @@ func Main(args []string) int {
 			fmt.Println("  TUI never mistakes it for a paste; \"paste\":true sends it as one")
 			fmt.Println("  bracketed paste, even a single line or an empty one.")
 			fmt.Println()
+			fmt.Println("  Claude Code panes (`claude ...` panes, and panes declared with")
+			fmt.Println("  --controller claude-code) are GATED: `send` waits until the input box")
+			fmt.Println("  can take text, presses Enter only once the box holds exactly what was")
+			fmt.Println("  typed, and answers ok only when the prompt shows up as taken. Otherwise")
+			fmt.Println("  it answers busy or not_accepted with a reason. Enter may only be the")
+			fmt.Println("  last key, and a dialog never gets one: \"dismissDialogs\":true presses")
+			fmt.Println("  Escape (it never approves), \"noGate\":true sends as for any other pane.")
+			fmt.Println("  Claude panes run in normal editor mode: magmux adds or merges")
+			fmt.Println("  --settings='{\"editorMode\":\"normal\"}', because vim mode reads typed")
+			fmt.Println("  text as commands. A wrapper must do that itself (editorOverride")
+			fmt.Println("  \"delegated\"); if -- INSERT -- shows, sends are refused busy/vim_mode.")
+			fmt.Println()
 			fmt.Println("Pane lifecycle (a message with an \"id\" gets one `reply` back):")
 			fmt.Println("  {\"type\":\"open_pane\",\"id\":1,\"cmd\":\"claude\",\"cwd\":\"/proj\",\"split\":\"vertical\"}")
 			fmt.Println("  {\"type\":\"close_pane\",\"id\":2,\"pane\":1,\"force\":false}")
@@ -259,8 +280,23 @@ func Main(args []string) int {
 	var remoteOpts remoteOptions
 	var pluginCmds []string
 	var firebaseArg string
+	var controllerArg string
+	controllerSet := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--controller":
+			// Recorded only, and position-independent like -w: claudish puts
+			// it before -e, and it applies to every -e/-g pane whichever side
+			// of them it sits. Validated after the loop, so a repeated flag is
+			// judged on the value that wins. A trailing flag with no value is
+			// recorded as "" and refused as an unknown controller, rather than
+			// silently doing nothing like a valueless -e does.
+			controllerSet = true
+			controllerArg = ""
+			if i+1 < len(args) {
+				i++
+				controllerArg = args[i]
+			}
 		case "--firebase":
 			if i+1 < len(args) {
 				i++
@@ -505,6 +541,16 @@ func Main(args []string) int {
 		}
 	}
 
+	// --controller, decided here: after the commands exist and before
+	// anything has been written, bound or spawned, so a refusal is a plain
+	// line on a normal terminal and an exit with nothing to clean up.
+	if controllerSet {
+		if err := applyControllerFlag(commands, controllerArg, gridFile != "" || len(customCmds) > 0); err != nil {
+			fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	// The control panel is the last pane, so session panes keep the indices a
 	// pilot would naturally use (pane 0 is the first -e command).
 	//
@@ -635,22 +681,29 @@ func Main(args []string) int {
 	// and costs nothing in ordering.
 	mux.startPlugins(pluginCmds)
 
+	// The private settings directory's two sweeps (claude_settings.go). The
+	// dead-owner sweep runs synchronously before any pane is built, beside
+	// socketServer's ReapStale and under the same deadline; the exit sweep
+	// takes whatever copy this process still owns. It is a defer of its own,
+	// not part of restore(), because restore() returns early headless — which
+	// is exactly the mode the driven panes that get a copy run in. A hard exit
+	// (second signal, SIGKILL) skips it, and the next start's sweep reaps it.
+	mux.sweepSettings()
+	defer mux.removeOwnSettings()
+
+	build := mux.buildLayout
 	if useGrid {
-		if err := mux.buildGrid(commands); err != nil {
-			mux.restore()
-			// os.Exit runs no defer, so the listener and the generated token go
-			// here by hand, exactly as they do on the init() path.
-			rem.cleanup()
-			fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
-			os.Exit(1)
-		}
-	} else {
-		if err := mux.buildLayout(commands); err != nil {
-			mux.restore()
-			rem.cleanup()
-			fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
-			os.Exit(1)
-		}
+		build = mux.buildGrid
+	}
+	if err := build(commands); err != nil {
+		mux.restore()
+		// os.Exit runs no defer, so the listener, the generated token and any
+		// settings copy an earlier pane of this layout was given go here by
+		// hand, exactly as they do on the init() path.
+		rem.cleanup()
+		mux.removeOwnSettings()
+		fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Every session gets a panel, whether or not -c was passed; without -c it
@@ -770,6 +823,30 @@ func Main(args []string) int {
 
 	mux.cleanup()
 	return 0
+}
+
+// applyControllerFlag carries a --controller value onto every -e/-g pane's
+// PaneConfig.Controller, which every builder copies through newPaneFor. It is
+// called only when the flag was given. The control panel is never declared:
+// it has no process, let alone a Claude one.
+//
+// Two refusals, both fatal: a value that is not a known controller, and a
+// flag with no -e/-g pane to apply to (`magmux --controller claude-code`, or
+// with only -c) — a flag that silently does nothing is the failure this repo
+// keeps refusing.
+func applyControllerFlag(commands []PaneConfig, name string, haveSessions bool) error {
+	if name != claudeCodeName {
+		return fmt.Errorf("unknown controller %q (known: %s)", name, knownControllers)
+	}
+	if !haveSessions {
+		return fmt.Errorf("--controller applies to -e/-g panes and there are none")
+	}
+	for i := range commands {
+		if !commands[i].Control {
+			commands[i].Controller = name
+		}
+	}
+	return nil
 }
 
 // Suppress unused import warning

@@ -752,3 +752,40 @@ func TestPushIdThatIsNotAKeyIsNotAnswered(t *testing.T) {
 		}
 	}
 }
+
+// TestCommandResultCarriesReasonAndTyped: a failed command's result record is
+// the Firebase reply, so it carries reason and typed beside code, and neither
+// key when the error has neither.
+func TestCommandResultCarriesReasonAndTyped(t *testing.T) {
+	c := newCmdFixture(t, "magmux-1780000020", nil)
+	if err := c.h.Register("ticket", hub.Op{
+		Spec: protocol.OpSpec{Name: "ticket.fail", Class: protocol.ClassRead},
+		Fn: func(ctx context.Context, _ hub.Caller, args json.RawMessage) (map[string]any, error) {
+			var a struct {
+				Reason string `json:"reason"`
+			}
+			_ = json.Unmarshal(args, &a)
+			if a.Reason == "" {
+				return nil, protocol.Errf(protocol.CodePaneDead, "plain")
+			}
+			return nil, &protocol.Error{Code: protocol.CodeNotAccepted, Msg: "lost",
+				Reason: a.Reason, Typed: true}
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c.deliver("-Nreason01", c.signed("ticket.fail", `{"reason":"unconfirmed"}`))
+	res := c.waitForResult("-Nreason01")
+	if res["code"] != protocol.CodeNotAccepted || res["reason"] != protocol.ReasonUnconfirmed || res["typed"] != true {
+		t.Errorf("result = %v, want code, reason and typed", res)
+	}
+
+	c.deliver("-Nreason02", c.signed("ticket.fail", `{}`))
+	res = c.waitForResult("-Nreason02")
+	for _, k := range []string{"reason", "typed"} {
+		if _, ok := res[k]; ok {
+			t.Errorf("a result with no %s carries the key: %v", k, res)
+		}
+	}
+}

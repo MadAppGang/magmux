@@ -42,6 +42,26 @@ type Pane struct {
 	// label is the short name open_pane was given, for clients that address
 	// panes by name. Immutable after publication.
 	label string
+	// gateBasis says why this pane's input is gated ("" = never; inputgate.go)
+	// and editorOverride what magmux did about Claude's editorMode. Both are
+	// write-once before publication and read lock-free, like id and label.
+	gateBasis      gateBasis
+	editorOverride editorOverride
+	// launchLine is the ORIGINAL `-c` string of a shell launch, recorded
+	// before any rewrite; "" for an argv launch and for every struct-literal
+	// test pane. The Claude controller's prompt and cwd extraction read it
+	// when it is set and cmd.Args when it is not, so discovery sees what it
+	// saw before the editor-mode rewrite existed. Write-once before
+	// publication.
+	launchLine string
+	// settingsDir is where this pane's private settings copy would go
+	// (settingsDir(PaneConfig.SockDir)). Write-once before publication.
+	settingsDir string
+	// settingsFile is the private settings copy this pane OWNS (a merged
+	// `--settings` file, claude_settings.go), or "". Written once in spawnPTY
+	// before publication; removed once cmd.Wait has returned (reapChild), on
+	// the spawn-failure path, and by the exit sweep for anything left over.
+	settingsFile string
 	// Structural fields — guarded by treeMu, NOT by mu. Everything below
 	// screen is content state and stays under mu exactly as before.
 	splitType     SplitType
@@ -159,6 +179,19 @@ type Pane struct {
 }
 
 func newPane(y, x, h, w int, cfg PaneConfig) (*Pane, error) {
+	p := preparePane(y, x, h, w, cfg)
+	if err := p.spawnPTY(cfg); err != nil {
+		return nil, fmt.Errorf("spawn PTY: %w", err)
+	}
+	return p, nil
+}
+
+// preparePane is newPane up to the fork: the pane, its screen, and every
+// write-once decision that must be made from the launch BEFORE the child
+// exists — the launch line, gateBasis and editorOverride, settingsDir. It is
+// separate so the decision can be tested over a command table without
+// spawning one process per row.
+func preparePane(y, x, h, w int, cfg PaneConfig) *Pane {
 	p := &Pane{
 		y:         y,
 		x:         x,
@@ -173,10 +206,11 @@ func newPane(y, x, h, w int, cfg PaneConfig) (*Pane, error) {
 	p.primaryScreen = p.screen
 	p.vt.node = p
 
-	if err := p.spawnPTY(cfg); err != nil {
-		return nil, fmt.Errorf("spawn PTY: %w", err)
-	}
-	return p, nil
+	launch := claudeLaunchOf(cfg)
+	p.launchLine = launch.line
+	p.gateBasis, p.editorOverride = gateDecision(cfg.Controller, launch)
+	p.settingsDir = settingsDir(cfg.SockDir)
+	return p
 }
 
 // newControlPane builds a pane with no PTY and no child. It still gets a
@@ -262,7 +296,21 @@ func (p *Pane) spawnPTY(cfg PaneConfig) error {
 	// Set initial size
 	pty.SetWinSize(ptmx, p.h, p.w)
 
-	cmd := exec.Command(cfg.Cmd, cfg.Args...)
+	// The editor-mode override (claude_launch.go): a gated, direct claude
+	// invocation is exec'd with editorMode "normal" merged into its one
+	// effective --settings. Only the EXEC sees the rewrite — p.launchLine,
+	// which discovery reads, stays the original. An unparsed launch runs
+	// byte-identical and the gate's vim_mode check covers it.
+	rw := rewriteClaudeLaunch(cfg, claudeLaunchOf(cfg), p.gateBasis, p.settingsDir)
+	if rw.override != overrideNone {
+		p.editorOverride = rw.override
+	}
+	p.settingsFile = rw.file
+	if rw.why != "" && dbgFile != nil {
+		fmt.Fprintf(dbgFile, "[editor] launch left as is (%s): %s\n", rw.why, rw.override)
+	}
+
+	cmd := exec.Command(cfg.Cmd, rw.args...)
 	cmd.Dir = cfg.Dir
 	cmd.Stdin = pts
 	cmd.Stdout = pts
@@ -307,6 +355,7 @@ func (p *Pane) spawnPTY(cfg PaneConfig) error {
 	if err := cmd.Start(); err != nil {
 		pts.Close()
 		ptmx.Close()
+		p.removeSettingsFile()
 		return err
 	}
 	pts.Close() // parent doesn't need slave side
@@ -661,4 +710,20 @@ type PaneConfig struct {
 	// Control makes this a control-panel pane instead of a child process:
 	// magmux paints it itself and Cmd/Args are ignored.
 	Control bool
+	// Controller is the pane's controller DECLARATION, and the only place one
+	// lives: "" (the factories decide, as they always did), "claude-code"
+	// (--controller claude-code, or open_pane controller:"claude-code"), or
+	// "plugin:<name>" (open_pane controller:"self" from a registered plugin).
+	//
+	// It is a RESOLVED name and never a caller's claim — sockOpenPane fills it
+	// from resolveOpenPaneController, which turns "self" into the
+	// connection's own registration — because p.controller is write-once and
+	// attaching the wrong observer to a pane is not undoable. newPane decides
+	// gateBasis and editorOverride from it before spawn; OpenPane's private
+	// section and attachController attach from it.
+	Controller string
+	// SockDir is the socket directory of the magmux that owns this pane, the
+	// base of settingsDir. buildGrid, buildLayout and OpenPane fill it from
+	// m.socketDir(); empty falls back to the package default.
+	SockDir string
 }

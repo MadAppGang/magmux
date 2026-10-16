@@ -65,11 +65,20 @@ type rowStyle struct {
 	open         bool
 	fg, bg, attr int
 	lastCol      int
+
+	// dimOnly switches the accumulator to the ONE other thing a reader needs
+	// from the walk: one FAINT flag per emitted rune (tailRows, for the Claude
+	// screen reader, whose placeholders are SGR 2). With it set, runs and wide
+	// are not recorded at all, and dim is right-trimmed with the text, so
+	// len(dim) == utf8.RuneCountInString(text) holds by construction.
+	dimOnly bool
+	dim     []bool
 }
 
 func (st *rowStyle) reset() {
 	st.runs = st.runs[:0]
 	st.wide = st.wide[:0]
+	st.dim = st.dim[:0]
 	st.open = false
 }
 

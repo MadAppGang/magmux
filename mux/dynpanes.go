@@ -1,8 +1,6 @@
 package mux
 
 import (
-	"fmt"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -38,14 +36,11 @@ type OpenPaneRequest struct {
 	Split  SplitType // SplitNone = auto (split the longer axis)
 	Ratio  float64   // 0 => 0.5
 	Focus  bool
-	// Controller names a plugin that will observe this pane, as
-	// `plugin:<name>`. Empty means the ordinary path: the registered factories
-	// decide, which today means Claude Code or nothing.
-	//
-	// It is a RESOLVED name and never a caller's claim — sockOpenPane fills it
-	// from the connection's own registration — because p.controller is
-	// write-once and attaching the wrong observer to a pane is not undoable.
-	Controller string
+	// There is deliberately no Controller field here. The declaration lives
+	// on the embedded PaneConfig.Controller ONLY: a second field shadowed it,
+	// so newPane — which receives req.PaneConfig — never saw what
+	// sockOpenPane had resolved. req.Controller still reads, by promotion,
+	// the one field.
 }
 
 // OpenPane splits an existing leaf and spawns a child in the new half.
@@ -111,6 +106,9 @@ func (m *Magmux) OpenPane(req OpenPaneRequest) (int, error) {
 	}
 
 	// 3. The slow part, outside every lock.
+	if req.SockDir == "" {
+		req.SockDir = m.socketDir()
+	}
 	np, err := newPaneFor(ny, nx, nh, nw, req.PaneConfig)
 	if err != nil {
 		return -1, sockErrf(sockCodeInternal, "could not start %q: %v", req.Cmd, err)
@@ -122,21 +120,9 @@ func (m *Magmux) OpenPane(req OpenPaneRequest) (int, error) {
 	// treeMu). Missing gridMode here would give the pane different writePTY
 	// suppression and no DONE overlay compared with its siblings.
 	np.gridMode = gridMode
-	// A plugin that claimed this pane IS its controller, and the factories are
-	// not consulted: the plugin asked to observe this session, and letting a
-	// factory win the race would silently give the pane a second opinion that
-	// the plugin's own snapshots could never override (p.controller is
-	// write-once). Still here, while the pane is private, for the same reason
-	// the factory path is.
-	if name, ok := strings.CutPrefix(req.Controller, pluginControllerPrefix); ok && name != "" {
-		np.mux = m
-		np.controller = newPluginController(name, np)
-		if dbgFile != nil {
-			fmt.Fprintf(dbgFile, "[ctrl] attached %s to a new pane\n", np.controller.Name())
-		}
-	} else {
-		m.attachController(np)
-	}
+	// The attach order — a plugin's claim, then a declared or direct Claude
+	// pane, then the factories — still here, while the pane is private.
+	m.attachPaneController(np, req.Controller)
 
 	// 5. Publish.
 	m.treeMu.Lock()
@@ -291,6 +277,9 @@ func (m *Magmux) ClosePane(id int, force bool) error {
 	// otherwise cleaned, and a stranded entry leaves the next pane in the same
 	// project stuck in `starting` silently and forever.
 	m.releaseSessions(p)
+	// Before the reap, so a Claude pane's termios watch ends before the
+	// master closes under it rather than by tripping over the closed fd.
+	m.stopController(p)
 	m.reapPane(p, force)
 
 	// Streaming stops BEFORE the news, in three steps that each close a
@@ -526,6 +515,9 @@ func (m *Magmux) removeLeafLocked(t *Pane) {
 // added to the WaitGroup, and adding it here would race the wg.Wait that the
 // m.closing unwind path exists to keep clear of.
 func (m *Magmux) unwindPane(p *Pane) {
+	// The controller was attached while the pane was private; nothing else
+	// will ever stop it.
+	m.stopController(p)
 	m.reapPane(p, false)
 	if p != nil && p.cmd != nil {
 		go m.reapChild(p)

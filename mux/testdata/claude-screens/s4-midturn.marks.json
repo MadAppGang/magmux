@@ -1,0 +1,65 @@
+[
+  {
+    "label": "turn-running-a",
+    "offset": 5917,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Run the Bash command: sleep 25 && echo DONE-ONE\n\n⏺ Bash(sleep 25 && echo DONE-ONE)\n  ⎿  Error: Blocked: sleep 25 followed by: echo DONE-ONE. To wait for a condition, use Monitor with\n     an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use\n     run_in_background: true. Do not chain shorter sleeps to work around this block.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n✳ Boondoggling… (3s · ↓ 94 tokens)\n                                                                                      47360 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 12s | 󰍛 425M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h14m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "turn-running-b",
+    "offset": 6270,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Run the Bash command: sleep 25 && echo DONE-ONE\n\n⏺ Bash(sleep 25 && echo DONE-ONE)\n  ⎿  Error: Blocked: sleep 25 followed by: echo DONE-ONE. To wait for a condition, use Monitor with\n     an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use\n     run_in_background: true. Do not chain shorter sleeps to work around this block.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n✻ Boondoggling… (3s · ↓ 98 tokens · thinking)\n                                                                                      47360 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 12s | 󰍛 425M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h14m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "turn-running-c",
+    "offset": 6452,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Run the Bash command: sleep 25 && echo DONE-ONE\n\n⏺ Bash(sleep 25 && echo DONE-ONE)\n  ⎿  Error: Blocked: sleep 25 followed by: echo DONE-ONE. To wait for a condition, use Monitor with\n     an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use\n     run_in_background: true. Do not chain shorter sleeps to work around this block.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n✽ Boondoggling… (4s · ↓ 102 tokens · thinking)\n                                                                                      47360 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 12s | 󰍛 425M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h14m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "turn-running-d",
+    "offset": 6700,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Run the Bash command: sleep 25 && echo DONE-ONE\n\n⏺ Bash(sleep 25 && echo DONE-ONE)\n  ⎿  Error: Blocked: sleep 25 followed by: echo DONE-ONE. To wait for a condition, use Monitor with\n     an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use\n     run_in_background: true. Do not chain shorter sleeps to work around this block.\n\n⏺\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n✻ Boondoggling… (4s · ↓ 127 tokens · thinking)\n                                                                                      47518 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 12s | 󰍛 425M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h14m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "queued-a",
+    "offset": 9508,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Run the Bash command: sleep 25 && echo DONE-ONE\n\n⏺ Bash(sleep 25 && echo DONE-ONE)\n  ⎿  Error: Blocked: sleep 25 followed by: echo DONE-ONE. To wait for a condition, use Monitor with\n     an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use\n     run_in_background: true. Do not chain shorter sleeps to work around this block.\n\n⏺ The harness blocked the foreground sleep. I'll run the same command in the background, which the\n  tool's guidance recommends for this.\n\n⏺ Bash(sleep 25 && echo DONE-ONE)\n\n❯ QUEUED-SECOND say hi\n  ctrl+x ctrl+s to send now\n\n\n\n\n\n\n\n\n\n\n\n\n✢ Boondoggling… (5s · ↓ 377 tokens · thinking)\n                                                                                      47518 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ Press up to edit queued messages\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 14s | 󰍛 461M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h14m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "queued-b",
+    "offset": 9890,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Run the Bash command: sleep 25 && echo DONE-ONE\n\n⏺ Bash(sleep 25 && echo DONE-ONE)\n  ⎿  Error: Blocked: sleep 25 followed by: echo DONE-ONE. To wait for a condition, use Monitor with\n     an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use\n     run_in_background: true. Do not chain shorter sleeps to work around this block.\n\n⏺ The harness blocked the foreground sleep. I'll run the same command in the background, which the\n  tool's guidance recommends for this.\n\n⏺ Bash(sleep 25 && echo DONE-ONE)\n\n❯ QUEUED-SECOND say hi\n  ctrl+x ctrl+s to send now\n\n\n\n\n\n\n\n\n\n\n\n\n✻ Boondoggling… (5s · ↓ 430 tokens · thought for 1s)\n                                                                                      47860 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ Press up to edit queued messages\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 14s | 󰍛 461M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h14m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "queued-c",
+    "offset": 10082,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Run the Bash command: sleep 25 && echo DONE-ONE\n\n⏺ Bash(sleep 25 && echo DONE-ONE)\n  ⎿  Error: Blocked: sleep 25 followed by: echo DONE-ONE. To wait for a condition, use Monitor with\n     an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use\n     run_in_background: true. Do not chain shorter sleeps to work around this block.\n\n⏺ The harness blocked the foreground sleep. I'll run the same command in the background, which the\n  tool's guidance recommends for this.\n\n⏺ Bash(sleep 25 && echo DONE-ONE)\n\n❯ QUEUED-SECOND say hi\n  ctrl+x ctrl+s to send now\n\n\n\n\n\n\n\n\n\n\n\n\n✽ Boondoggling… (6s · ↓ 438 tokens · thought for 1s)\n                                                                                      47860 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ Press up to edit queued messages\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 14s | 󰍛 461M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h14m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "queued-paste",
+    "offset": 13598,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Run the Bash command: sleep 25 && echo DONE-ONE\n\n⏺ Bash(sleep 25 && echo DONE-ONE)\n  ⎿  Error: Blocked: sleep 25 followed by: echo DONE-ONE. To wait for a condition, use Monitor with\n     an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use\n     run_in_background: true. Do not chain shorter sleeps to work around this block.\n\n⏺ The harness blocked the foreground sleep. I'll run the same command in the background, which the\n  tool's guidance recommends for this.\n\n⏺ Bash(sleep 25 && echo DONE-ONE)\n  ⎿  Running in the background (↓ to manage)\n\n❯ QUEUED-SECOND say hi\n\n❯ QUEUED-THIRD long queued pasted\n  block line two\n  line three\n\n\n\n\n\n\n\n\n· Boondoggling… (7s · ↓ 452 tokens · thought for 1s)\n                                                                                      47860 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 15s | 󰍛 467M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h14m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on · 1 shell · ← 5 agents"
+  },
+  {
+    "label": "after-turns",
+    "offset": 34728,
+    "cols": 100,
+    "rows": 39,
+    "text": "  ⎿  Error: Blocked: sleep 25 followed by: echo DONE-ONE. To wait for a condition, use Monitor with\n     an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use\n     run_in_background: true. Do not chain shorter sleeps to work around this block.\n\n⏺ The harness blocked the foreground sleep. I'll run the same command in the background, which the\n  tool's guidance recommends for this.\n\n⏺ Bash(sleep 25 && echo DONE-ONE)\n  ⎿  Running in the background (↓ to manage)\n\n❯ QUEUED-SECOND say hi\n\n❯ QUEUED-THIRD long queued pasted\n  block line two\n  line three\n\n⏺ Hi.\n\n  The sleep 25 command is still running in the background (ID bjrniq2ek). The foreground version was\n  blocked, so I started it in the background instead. I'll report its output when it finishes.\n\n  On your third message: I received the pasted block (three lines, \"long queued pasted / block line\n  two / line three\"). It doesn't ask for anything, so I haven't acted on it. Tell me if you wanted\n  something done with it.\n\n✻ Sautéed for 10s · done 8:55 pm\n\n⏺ Background command \"Sleep 25 seconds then echo DONE-ONE\" completed (exit code 0)\n\n⏺ The background command finished with exit code 0. I didn't open its output file, so I haven't seen\n  the DONE-ONE line itself, but the exit status confirms the command completed.\n\n✻ Brewed for 2s · done 8:55 pm\n                                                                                      49165 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.01 | 43s | 󰍛 509M | ░░░░░░ 5% | ▄---- 5h:9% ↻4h14m 7d:22% ↻6d9h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  }
+]

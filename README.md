@@ -351,7 +351,7 @@ types and unknown fields should be ignored for forward compatibility.
 | `control` | `dir` (`out`\|`note`), `pane`, `label`, `text`, `keys`, `at`, or `event`/`goal`/`summary` for notes | when a controlled session is driven (see below) |
 | `pane_opened` | `pane` (int), `cmd`, and `cwd` / `label` when they were given | when `open_pane` adds a pane |
 | `pane_closed` | `pane` (int) | when `close_pane` removes one |
-| `reply` | `id`, `ok`, plus `result` or `code`+`error` | answer to *your* message, if it carried an `id` (see below) |
+| `reply` | `id`, `ok`, plus `result`, or `code`+`error` and sometimes `reason`/`typed` | answer to *your* message, if it carried an `id` (see below) |
 
 `reply` is the one event that is **not** broadcast: it goes only to the
 connection that asked for it. `pane_opened`/`pane_closed` are broadcasts like
@@ -377,7 +377,7 @@ carries a **`panes`** array; the per-pane live event carries a singular **`pane`
 | `closed` | bool | present and true on a tombstone (see below) |
 | `control` | bool | present and true on the control panel pane, which has no process |
 | `hidden` | bool | control panel only: true when it is not currently on screen (`Ctrl-G p`). Its `state` is `panel` either way — hidden is a fact about magmux's chrome, not about a session |
-| `controller` | string | controller name, if any (e.g. `claude`) |
+| `controller` | string | controller name, if any (e.g. `claude-code`) |
 | `model` | string | model name, if detected (omitted when empty) |
 | `project` | string | project name, if detected (omitted when empty) |
 | `prompt` | string | last user prompt, if any (omitted when empty) |
@@ -393,8 +393,11 @@ carries a **`panes`** array; the per-pane live event carries a singular **`pane`
 | `cwd` | string | the pane's working directory, if known (omitted otherwise) |
 | `pid` | int | the pane process's pid, if running (omitted otherwise) |
 | `inputSignal` | string | which heuristic called the pane idle — `osc`, `2004`, `title`, `idle`, `ctrl`, `perm` (omitted when none) |
+| `gateBasis` | string | why the pane's input is gated: `direct` (a `claude …` launch) or `declared` (`--controller`, `open_pane controller:"claude-code"`). Omitted when the pane is not gated. See [The input gate](#claude-code-panes-the-input-gate) |
+| `editorOverride` | string | what magmux did about Claude's editor mode: `added` \| `merged` \| `merged_file` \| `unparsed` \| `delegated` (omitted when nothing was attempted) |
+| `input` | object | gated panes only: `{"ready":false,"reason":"starting","detail":"…"}`, the gate's published view, refreshed four times a second. A send decides on its own fresh reads, so this is advisory |
 
-The last nine are additive; the forward-compat clause above already covers
+The last twelve are additive; the forward-compat clause above already covers
 them, and every one is omitted rather than reported as a zero when it cannot be
 sourced.
 
@@ -446,26 +449,36 @@ stay silently ignored.
 The `id` round-trips **verbatim**: send `7` and you get `7`, send `"7"` and you
 get `"7"`. `ok:true` carries `result`; `ok:false` carries `code` and `error`.
 Branch on `code` — the `error` string beside it is for a human and may be
-reworded at any time.
+reworded at any time. A failure can also carry `reason`, a machine-readable
+sub-code that says which failure of that kind it was, and `"typed":true`,
+which says bytes of this request reached the pane before it failed. Both are
+omitted when they do not apply, so a failure without them is the line it
+always was.
 
 | `code` | Meaning |
 |---|---|
-| `bad_request` | the message is malformed, or a field is not what the verb needs |
+| `bad_request` | the message is malformed, or a field is not what the verb needs. On a [gated](#claude-code-panes-the-input-gate) pane also: Enter not in the last position, two Enters, an unknown key name, or a negative `readyTimeoutMs`. Nothing is written |
 | `no_such_pane` | no pane with that index (it may have been closed) |
 | `pane_is_control` | that pane is the control panel, which has no process |
-| `pane_dead` | the pane's process is gone, so the bytes had nowhere to go |
+| `pane_dead` | the pane's process is gone, so the bytes had nowhere to go (`typed` if it died partway through a send) |
 | `unknown_verb` | this magmux does not know that `type` |
 | `unsupported` | known verb, not available in this mode |
-| `busy` | the pane already has a request of this kind in flight |
-| `timeout` | the verb's budget expired |
+| `busy` | the pane cannot take this now. `reason` says why: `queue_full` (this connection's queue for the pane is full), `in_flight` (a cap on concurrent requests), or, on a gated pane, `starting`, `terminal_not_ready`, `no_input_box`, `box_not_empty`, `vim_mode`, `dialog:<kind>` or `typing_in_progress`. Without `typed` nothing was written; with `typed` the text was typed and Enter was withheld |
+| `not_accepted` | gated pane only: the input box did not take what was typed. `reason` is `text_mismatch` or `empty_box` (Enter was **not** pressed), or `still_in_box` or `unconfirmed` (it was) |
+| `timeout` | the verb's budget expired. For `send`, only the caller's wait expired: the delivery carries on |
 | `too_small` | `open_pane`: no room to split without going below the minimum pane size |
 | `internal` | magmux's own fault |
 
 `reply` is never replayed to a late connection, so it cannot land after
 `results`; the `results` → `shutdown` → EOF ordering is unaffected.
 
-For `send`, `ok:true` means the bytes reached the PTY — not that the TUI
-accepted them. An app that was not ready for a paste can still drop it.
+For `send` to an ordinary pane, `ok:true` means the bytes reached the PTY, not
+that the program accepted them: an app that was not ready for a paste can
+still drop it. On a gated pane, `ok:true` after a submit means more. The box
+was verified to hold exactly what was typed before Enter was pressed, and a new
+user-prompt entry or transcript entry carrying it has appeared since. The
+reply's `evidence` says which of the two it was.
+
 
 ### Read verbs
 
@@ -628,6 +641,234 @@ magmux -c \
   -e 'bun pilot/pilot.ts --pane 0 --goal "get the test suite green"'
 ```
 
+### Claude Code panes: the input gate
+
+Typing into a TUI is a race against the TUI. Claude Code draws its input box
+about a second after it starts, then resets its terminal once or twice while it
+loads, sometimes after the box is already on screen. Text that arrives inside
+that window vanishes, or sits in the box with nobody to press Enter. Under vim
+editor mode it is worse: the box starts in INSERT, and the Enter that would have
+rescued it does nothing. A plain `send` cannot tell any of this from success,
+because the bytes did reach the PTY.
+
+So on a Claude Code pane magmux owns input readiness. Such a pane is **gated**,
+and `list`/`results` say so with `gateBasis`:
+
+- **`direct`**: the pane's command is a `claude` invocation magmux can see,
+  such as `-e 'claude --model opus'` or `-e 'cd /x && claude'`. A loose match
+  (`grep claude x`, `tail -f /tmp/claude`) is observed but never gated. Nor is
+  an invocation that never shows a box: print mode (`claude -p`), a subcommand
+  as the FIRST argument (`claude mcp list`, `claude update`, `claude doctor`, …)
+  and `--version` / `--help`. Those are not rewritten either. A subcommand word
+  after an option is not recognised: `claude --name doctor` is an interactive
+  session named doctor, and Claude's options take zero, one, several or an
+  optional value, so `claude --settings x mcp list` is also treated as direct,
+  gated and rewritten. A send to such a pane answers `busy` (no box).
+- **`declared`**: the pane was declared a Claude Code pane, whatever its command
+  is. `--controller claude-code` declares every `-e` and `-g` pane, and
+  `open_pane` with `"controller":"claude-code"` declares one. This is how a
+  wrapper that runs `claude` itself (claudish) gets the gate. A grid that mixes
+  shells with Claude panes should declare per pane with `open_pane`, because the
+  flag gates the shells too, and a shell never shows a Claude box, so every
+  send to it would wait and then be refused.
+
+A pane a plugin owns is never gated. Everything below applies to gated panes
+only. A send to any other pane is byte for byte what it always was, and so is
+its reply.
+
+**What a send does depends on its class.** A final `enter` or `return` key
+counts as `"enter":true`.
+
+| Class | Shape | Gated |
+|---|---|---|
+| KEYS | no `text`, no `paste`, no Enter: any keys, printable ones included (`{"keys":["escape"],"enter":false}`, `{"keys":["2"],"enter":false}`) | no |
+| TYPE | `text` (or `paste`) and no Enter | yes: typed when ready and verified, never submitted (`accept:"in_box"`) |
+| SUBMIT | anything with an Enter, including the default `{"text":"…"}` | yes: typed when ready, verified, submitted, confirmed |
+
+**Enter goes last, and goes once.** On a gated pane `enter`/`return` may only be
+the final key, a final Enter key plus `"enter":true` is two Enters, and an
+unknown key name is refused rather than skipped. All three are `bad_request`
+before anything is written, because a send that half-ran could not be
+verified. Split the request instead.
+
+**A CR in `text` is a newline.** On a gated pane `\r` and `\r\n` inside `text`
+become `\n`, in every mode, so a multi-line text is typed as lines and the only
+Return is the final, checked Enter. Any other control character but tab
+(ctrl-c, Escape, DEL, …) is `bad_request`: send it as a key, or use `noGate`.
+Ungated, `text` is written exactly as sent.
+
+**Bash mode works.** A text that starts with `!` switches Claude's box into
+bash mode: Claude consumes the `!` and shows it as the box's glyph. The box
+check treats the leading `!` as that switch and compares the rest, and the
+`! command` history entry is the evidence. A text WITHOUT a leading `!` never
+verifies against a box that is already in bash mode, because submitting it
+would run a shell command rather than send a prompt.
+
+**The default `enter` no longer reaches a dialog.** `enter` defaults to true,
+so `{"keys":["2"]}` is a SUBMIT, and while a dialog shows it is refused
+`busy`/`dialog:<kind>`. Enter on a permission dialog picks option 1, "Yes",
+and magmux will not press it on your behalf. To answer a numbered menu on
+purpose, send `{"keys":["2"],"enter":false}` (a KEYS send, never gated), or
+add `noGate`.
+
+**A gated send, step by step:**
+
+1. **Wait until the box can take input.** The box is on screen; the terminal is
+   in raw mode, and both have been still for a second; Claude's boot reset has
+   happened, or (the first time) 3.5 s have passed since the terminal first
+   went raw; no dialog and no `-- INSERT --` is showing; and, for a send that
+   types, the box is empty. A paste also waits for Claude to turn on bracketed paste. Each of
+   these is read fresh at the moment of the decision. Claude being busy with a
+   turn is **not** a reason to wait: typing while it works is allowed, and
+   Claude queues the prompt.
+2. **Type**, with the same check before every write after the first. A dialog
+   that appears partway stops the typing.
+3. **Verify the box**, starting 150 ms after the last byte. Claude can take
+   several hundred milliseconds to draw what was typed, so this is a wait, not
+   one look: magmux re-reads the box every 40 ms until it holds what was
+   typed, or until its content has stopped changing for 1 s, for at most 3 s.
+   The `readyTimeoutMs` deadline caps that wait but never cuts it below 1.2 s,
+   so a send that became ready at the last moment, or a small
+   `readyTimeoutMs`, still waits for the draw. It must hold exactly what was typed
+   (`verified:"exact"`), or show ONE new `[Pasted text #N …]` token for a paste
+   (`paste_token`; two new tokens are more than was pasted, a mismatch). When the content cannot be known from the request, because
+   the box was not empty or an editing key ran, it must at least not be empty
+   (`non_empty`). Otherwise Enter is not pressed.
+4. **Press Enter**, then wait up to three 2-second windows for **evidence**: a
+   new `❯` entry in Claude's history carrying the verified text
+   (`evidence:"history"`), or an equal user entry in its transcript
+   (`transcript`). An emptied box is never evidence, because a lost prompt
+   looks exactly like a submitted one. If the text is still in the box, magmux
+   verifies it again and presses Enter once more, and the reply then says
+   `accept:"resent_enter"`. If the box never showed any of the text, nothing
+   was submitted and nothing partial is left, and magmux types it ONCE more
+   (back to step 1, within the same deadline) on either of two signals of
+   loss: the box stayed COMPLETELY empty for that whole second AND the
+   terminal went through a reset after the text was typed (a late startup
+   terminal reset swallows the text whole: `retypeCause:"terminal_reset"`);
+   or the box was COMPLETELY empty on every read for the whole 3 s window,
+   with no reset (Claude dropped the text silently and never drew a rune of
+   it; render lag tops out well under a second, so a 3 s blank is not a slow
+   draw: `retypeCause:"never_drawn"`) and the conversation above the box did
+   not change and no turn started meanwhile (if either did, another writer's
+   Enter may have submitted the text before it was drawn, so it is
+   `text_mismatch` and not retyped). The ok reply then carries
+   `retyped:true` and `retypeCause`. A blank box with no reset whose 3 s
+   window the deadline cut short cannot be told from a slow draw, so it is
+   `text_mismatch`, never a retype. Before retyping, magmux checks whether
+   the text was in fact submitted by another Enter (a person at the
+   keyboard, say); if it was, the reply is ok with
+   `accept:"submitted_by_other"`, that evidence, and `enter:false`, because
+   magmux pressed no Enter (a TYPE send too: its text is no longer in the
+   box), and nothing is retyped. A box that held part of the text, all of
+   it, or more than was typed is never retyped, and nor is a paste (paste
+   mode, a bracketed multi-line auto send, or an auto send over 800 runes):
+   a late-drawn paste and its retype would be two tokens, and Enter would
+   submit both. After the one retype the same verify applies, and a second
+   loss is `text_mismatch`.
+
+`readyTimeoutMs` (default 10000, at most 60000) is ONE deadline. Waiting for
+the box, waiting for another delivery to finish typing into the same pane, the
+pre-Enter re-wait and the verify's wait for the text to be drawn all share it,
+so it is the most a send ever waits for readiness.
+
+```jsonc
+--> {"type":"send","id":9,"pane":2,"text":"run the tests"}
+<-- {"type":"reply","id":9,"ok":true,"result":{"pane":2,"bytes":13,"keys":0,"enter":true,
+     "waitedMs":2400,"verified":"exact","accept":"confirmed","evidence":"history"}}
+```
+
+`waitedMs` is the time spent waiting for readiness, including any return to
+the gate before the first key or a retype. `dismissed` lists the
+dialogs that were Escaped, in order, and is omitted when there were none.
+`retyped:true` and `retypeCause` (`terminal_reset` or `never_drawn`) appear
+only when the one automatic retype ran. `accept` is `confirmed`,
+`resent_enter`, `in_box` (a TYPE send, left in the box), or
+`submitted_by_other`: the text left the box through somebody else's Enter and
+evidence for it appeared, so magmux pressed none, and `enter` is then false.
+On a gated reply `enter` says whether MAGMUX pressed Enter.
+
+**`dismissDialogs:true`** presses Escape on a permission, question or plan
+dialog, before typing and again before the Enter. Escape declines, and it is
+the only key this ever presses, so it can never approve anything. magmux then
+waits for the box to come back and delivers as usual. It presses at most three
+times per send, at least 400 ms apart, and only while it holds the pane's
+typing token, so an Escape never lands in the middle of another send's typing.
+A permission or question dialog is pressed only when it shows its own
+`Esc to cancel` hint; the plan dialog shows none and is pressed anyway, because
+Escape was measured to decline it and leave Claude in plan mode. A boot dialog
+(trust, bypass, API key, onboarding) is never dismissed: those are questions
+for the human, and Escape on the trust prompt exits Claude. Neither is a
+`select` dialog, the catch-all for a region with the generic
+`Enter to confirm · Esc to cancel` footer: the boot dialogs carry that very
+footer, so a reworded trust prompt would land there.
+
+**`noGate:true`** turns all of it off for one send: no Enter rule, no wait, no
+verify, no acceptance. It is the ungated send exactly, even into a dialog.
+
+**What a refusal tells you.** magmux reports what it observed. It does not
+prescribe a retry.
+
+| Reply | Enter pressed? | What it means |
+|---|---|---|
+| `busy` `starting` | no | Claude is booting: no box yet, the boot reset not over, or the box only just appeared |
+| `busy` `terminal_not_ready` | no | the pane was ready before, and now the terminal is not raw, changed less than a second ago, or has bracketed paste off for a paste |
+| `busy` `no_input_box` | no | the pane was ready before, and now shows neither a box nor a dialog magmux recognises |
+| `busy` `box_not_empty` | no | the box already holds text, and this send would type into it |
+| `busy` `vim_mode` | no | `-- INSERT --` is showing: vim editing mode is on, so typed text would be read as commands |
+| `busy` `dialog:<kind>` | no | a blocking dialog: `permission`, `question`, `plan`, `select`, `trust`, `bypass`, `api_key` or `onboarding`. Only Escapes were written before typing |
+| `busy` `typing_in_progress` | no | another delivery was still typing into the pane at the deadline |
+| `busy` with `typed:true` | no | the text was typed and the Enter withheld, by a dialog or by a terminal that did not come back in time. The box may hold the text, or part of it |
+| `not_accepted` `text_mismatch` | no (not by magmux) | the box held something other than what was typed: partial text, more than was typed (two paste tokens included), a box still changing after 3 s, or nothing — after the one automatic retype, for a paste (never retyped), or with neither loss signal (no terminal reset, and the 3 s window cut short by the deadline or interrupted), when the text may still appear. The detail says which. Nothing was submitted, EXCEPT when the detail says the box showed the text and then emptied without magmux's Enter: then it is unknown whether another Enter submitted it, so check the conversation before sending it again. A retype is refused `box_not_empty` until the box is cleared |
+| `not_accepted` `empty_box` | no | a submit found the box empty, so there was nothing to submit |
+| `not_accepted` `still_in_box` | yes, once or twice | the text is still in the box, unsubmitted. **Do not retype it**: it is there |
+| `not_accepted` `unconfirmed` | yes | no user-prompt entry and no transcript entry that can be attributed to THIS send appeared within the windows. An identical older prompt does not count. A history entry must be a NEW user-prompt entry after the ones the verify saw, and magmux must be able to tell where those end: when the visible prompts are all the same text (a resent `continue`) and the top of the conversation is not on screen, or a command wipes the screen (`/clear`), the history cannot say, and only the transcript can. A transcript record must have been SUBMITTED after the verify: a queued prompt counts from its enqueue, and an older identical queued prompt that runs later is still the older one. The prompt may have been lost, or taken without a visible sign. You decide |
+
+**How long to wait for the reply.** Every part of a gated send is paced by a
+constant, so its upper bound is a formula: `readyTimeoutMs`, plus the typing,
+plus 22 ms per key, plus the 150 ms settle and the verify's 1.2 s minimum
+window (each counted twice, for the one retype), plus three 2 s acceptance
+windows, plus 2 s of slack (`protocol.SendBudget`). A short prompt comes to
+about 21 s, and `readyTimeoutMs:60000` to about 71 s. A caller that names no timeout is
+never cut off before that:
+
+| Transport | Default wait for a gated send |
+|---|---|
+| the `send` verb on the socket | none: the reply comes when the delivery ends |
+| `call` on the socket, no `timeoutMs` | the larger of 30 s and the bound, at most 15 min |
+| REST, `POST /v1/ops/send` | the larger of 30 s and the bound |
+| WebSocket, no `timeoutMs` | the larger of 30 s and the bound, at most 15 min |
+| a Firebase command | none: its result is written when the delivery ends |
+| Go, `client.Session.SendWith` | the larger of `client.SendTimeout` (20 s) and the bound |
+
+An explicit `timeoutMs` is honoured as given. If it expires, the CALLER gets
+`timeout` and the delivery carries on: the text and the Enter still land. On
+the socket, the next send to that pane on the same connection waits for it. Only shutdown stops a
+delivery halfway.
+
+**Claude panes run in normal editor mode.** When magmux launches `claude`
+directly, it adds `--settings='{"editorMode":"normal"}'`, which overrides the
+user's and the project's settings. If the command already carries
+`--settings`, magmux merges `editorMode` into it rather than appending a second
+flag, because Claude reads only the last one, and every other key the caller
+passed survives. A settings file is merged into a private copy under
+`{sock-dir}/magmux-settings-<euid>/` (mode 0600), and the copy is removed when
+the child is reaped. `list` and `results` report the rewritten `cmd`, and the
+outcome as `editorOverride`:
+
+| `editorOverride` | Meaning |
+|---|---|
+| `added` | there was no `--settings`, so magmux added one |
+| `merged` | merged into the caller's inline `--settings` JSON |
+| `merged_file` | the caller's settings file, merged into a private copy |
+| `unparsed` | a rewrite was not provably safe (a `$VAR` in the value, a relative path after a `cd`, a redirection between the flag and its value, an unreadable file, …), so the command runs exactly as written |
+| `delegated` | a declared wrapper: magmux cannot see the `claude` it runs, so the wrapper must force normal mode itself |
+
+The gate does not take the override on trust. If `-- INSERT --` shows on a
+gated pane for any reason (`unparsed`, a wrapper that did not override, `/vim`
+typed at runtime), every send that would type is refused `busy`/`vim_mode`,
+and nothing is typed into a vim buffer.
+
 ## The Control Panel
 
 Every session has a **control panel** — a magmux pane like any other, except it
@@ -784,9 +1025,13 @@ automatically instead; the countdown is shown, and **any keypress cancels it**.
 the entire point — and clears the pane's completion state exactly as a real
 keystroke would. Multi-line text is wrapped in bracketed paste when the pane has
 requested that mode, and Enter is sent after a short delay so the TUI has taken
-the text before it is submitted. `label` is the short tag the panel shows in its
-verb column; an MCP client puts its tool name there, which is that layer's
-entire footprint on this protocol.
+the text before it is submitted. On a Claude Code pane `send` does more: it
+waits for the box, verifies it and confirms the submit, as [the input
+gate](#claude-code-panes-the-input-gate) describes, and the panel's `⇦` ack
+says what it found (`waited 2.4s · 13 bytes + enter · verified exact ·
+accepted (history)`). `label` is the short tag the panel shows in its verb
+column; an MCP client puts its tool name there, which is that layer's entire
+footprint on this protocol.
 
 **The panel's two directions come from different sources on purpose.** `▶` rows
 are the controller's request as it arrived on the socket; `◀` rows are recorded
@@ -1116,8 +1361,8 @@ It speaks JSON-RPC 2.0 as newline-delimited JSON. stdout carries protocol only.
 | `open_pane` | split the layout and run a command in the new pane |
 | `close_pane` | close a pane and reap its process |
 | `read_pane` | the pane's state, its rendered screen (and its scrollback), its transcript |
-| `send_keys` | type text and press named keys, without waiting |
-| `send_and_wait` | give an agent one instruction and wait for the resulting turn |
+| `send_keys` | type text and press named keys, without waiting for the turn. On a gated Claude pane it still waits for the box, and takes `dismiss_dialogs`, `ready_timeout_ms` and `no_gate` |
+| `send_and_wait` | give an agent one instruction and wait for the resulting turn. Takes the same three gate arguments |
 
 `send_and_wait` is the workhorse: it waits for the turn to visibly *start*
 before waiting for it to finish, so it can never hand back the previous turn's

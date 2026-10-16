@@ -5,11 +5,28 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 )
 
+// withSockDir returns a copy of cmds with every empty SockDir filled from
+// m.socketDir(), so a pane's settings directory follows THIS magmux's socket
+// directory rather than the package global. Every builder runs its commands
+// through it; OpenPane does the same for its one config.
+func (m *Magmux) withSockDir(cmds []PaneConfig) []PaneConfig {
+	out := slices.Clone(cmds)
+	dir := m.socketDir()
+	for i := range out {
+		if out[i].SockDir == "" {
+			out[i].SockDir = dir
+		}
+	}
+	return out
+}
+
 func (m *Magmux) buildLayout(commands []PaneConfig) error {
+	commands = m.withSockDir(commands)
 	statusH := m.statusRowsLocked()
 	availH := m.rows - statusH
 
@@ -203,6 +220,7 @@ func buildColumn(cmds []PaneConfig, y, x, h, w int, spec layoutSpec) (*Pane, []*
 
 // buildGrid creates a balanced 2-column grid layout from a list of commands.
 func (m *Magmux) buildGrid(commands []PaneConfig) error {
+	commands = m.withSockDir(commands)
 	statusH := m.statusRowsLocked()
 	availH := m.rows - statusH
 
@@ -359,6 +377,10 @@ func (m *Magmux) reapChild(p *Pane) bool {
 		return false
 	}
 	err := p.cmd.Wait()
+	// The child is gone, so nothing will read its settings copy again. Here
+	// and not in waitForChild/unwindPane: reapChild is the one place both of
+	// them reach once cmd.Wait has returned. Outside p.mu — it is file I/O.
+	p.removeSettingsFile()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.dead = true
@@ -577,6 +599,19 @@ func (m *Magmux) buildPaneResultsLocked() []map[string]any {
 		}
 		if p.controller != nil {
 			entry["controller"] = p.controller.Name()
+		}
+		// The input gate, additive: an ungated pane's entry is byte-identical.
+		// gateBasis and editorOverride are write-once before publication;
+		// `input` is the controller's published VIEW (history-based, 4 Hz) — a
+		// send decides on its own synchronous reads, so it is advisory.
+		if p.gateBasis != gateNone {
+			entry["gateBasis"] = string(p.gateBasis)
+		}
+		if p.editorOverride != overrideNone {
+			entry["editorOverride"] = string(p.editorOverride)
+		}
+		if snap.Input.Gated {
+			entry["input"] = snap.Input
 		}
 		if snap.Model != "" {
 			entry["model"] = snap.Model

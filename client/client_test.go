@@ -1,10 +1,16 @@
 package client
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"testing"
 	"time"
+
+	"github.com/MadAppGang/magmux/protocol"
 )
 
 // ── the two-phase wait ──────────────────────────────────────────────────────
@@ -303,5 +309,60 @@ func TestSendAndWaitRefusesTwoConcurrentTurnsOnOnePane(t *testing.T) {
 	sess.EndTurn(2)
 	if !sess.BeginTurn(2) {
 		t.Error("the pane was not released")
+	}
+}
+
+// TestClientUnwrapKeepsReasonAndTyped: an error reply's reason and typed
+// survive requestRaw, so protocol.ReasonOf and protocol.TypedOf work on what
+// the client returns exactly as CodeOf does. The error's own wording is
+// unchanged.
+func TestClientUnwrapKeepsReasonAndTyped(t *testing.T) {
+	cases := []struct {
+		name   string
+		reply  string
+		code   string
+		reason string
+		typed  bool
+		text   string
+	}{
+		{"reason and typed",
+			`{"type":"reply","id":%q,"ok":false,"code":"not_accepted","reason":"still_in_box","typed":true,"error":"still there"}`,
+			"not_accepted", "still_in_box", true, "still there (not_accepted)"},
+		{"reason only",
+			`{"type":"reply","id":%q,"ok":false,"code":"busy","reason":"vim_mode","error":"vim"}`,
+			"busy", "vim_mode", false, "vim (busy)"},
+		{"neither",
+			`{"type":"reply","id":%q,"ok":false,"code":"pane_dead","error":"gone"}`,
+			"pane_dead", "", false, "gone (pane_dead)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ours, theirs := net.Pipe()
+			defer ours.Close()
+			defer theirs.Close()
+			s := &Session{ID: "u", state: NewSessionState(), pending: map[string]chan mcpReply{},
+				closed: make(chan struct{}), inFlight: map[int]bool{}, conn: ours}
+			go func() {
+				line, err := bufio.NewReader(theirs).ReadBytes('\n')
+				if err != nil {
+					return
+				}
+				var msg map[string]any
+				_ = json.Unmarshal(line, &msg)
+				id, _ := msg["id"].(string)
+				s.ingest([]byte(fmt.Sprintf(c.reply, id)))
+			}()
+			_, err := s.requestRaw(context.Background(), map[string]any{"type": "send"}, 5*time.Second)
+			if err == nil {
+				t.Fatal("an error reply came back as success")
+			}
+			if protocol.CodeOf(err) != c.code || protocol.ReasonOf(err) != c.reason || protocol.TypedOf(err) != c.typed {
+				t.Errorf("err %v: code %q reason %q typed %v, want %q %q %v", err,
+					protocol.CodeOf(err), protocol.ReasonOf(err), protocol.TypedOf(err), c.code, c.reason, c.typed)
+			}
+			if err.Error() != c.text {
+				t.Errorf("Error() = %q, want %q (the wording is unchanged)", err.Error(), c.text)
+			}
+		})
 	}
 }

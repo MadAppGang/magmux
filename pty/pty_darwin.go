@@ -56,3 +56,7 @@ func clen(b []byte) int {
 	}
 	return len(b)
 }
+
+// ioctlReadTermios reads a terminal's termios (tcgetattr). Untyped, so the
+// darwin and linux values share one call site in termios.go.
+const ioctlReadTermios = unix.TIOCGETA

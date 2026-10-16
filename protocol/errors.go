@@ -74,10 +74,28 @@ const (
 	// caller to opposite places, and discovery genuinely lags at session start
 	// and can fail outright (see the ~/.claude/projects note in CLAUDE.md).
 	CodeNoTranscript = "no_transcript"
+	// CodeNotAccepted means the request typed into a pane's input box and the
+	// input was not shown to be taken: either the box did not hold what was
+	// typed (and no Enter was pressed), or Enter was pressed and no evidence
+	// attributable to a user prompt followed. Reason says which (reasons.go).
+	// Distinct from busy because something WAS typed, so "wait and send again"
+	// is not a safe remedy: the box may already hold the text.
+	CodeNotAccepted = "not_accepted"
 )
 
 // Error is a verb failure with a stable machine-readable code.
-type Error struct{ Code, Msg string }
+//
+// Reason is an optional machine-readable SUB-code (reasons.go): it says which
+// busy or which not_accepted, so a caller can branch without parsing the
+// message. Typed reports that bytes of THIS request reached the PTY before it
+// failed, which is what tells a caller the input box may hold part of it. Both
+// are wire-visible as "reason" and "typed", and only when set, so an error
+// without them serialises exactly as it always did.
+type Error struct {
+	Code, Msg string
+	Reason    string
+	Typed     bool
+}
 
 func (e *Error) Error() string { return e.Msg }
 
@@ -85,6 +103,31 @@ func (e *Error) Error() string { return e.Msg }
 // fmt.Sprintf.
 func Errf(code, format string, a ...any) *Error {
 	return &Error{Code: code, Msg: fmt.Sprintf(format, a...)}
+}
+
+// Errr is Errf with a reason.
+func Errr(code, reason, format string, a ...any) *Error {
+	return &Error{Code: code, Reason: reason, Msg: fmt.Sprintf(format, a...)}
+}
+
+// ReasonOf extracts the reason from a verb failure, or "" when there is none.
+// It reads through wrapping, as CodeOf does.
+func ReasonOf(err error) string {
+	var se *Error
+	if errors.As(err, &se) {
+		return se.Reason
+	}
+	return ""
+}
+
+// TypedOf reports whether a verb failure says bytes reached the PTY first. It
+// is false for nil and for any error that does not carry the flag.
+func TypedOf(err error) bool {
+	var se *Error
+	if errors.As(err, &se) {
+		return se.Typed
+	}
+	return false
 }
 
 // CodeOf extracts the machine-readable code from a verb failure, or "".

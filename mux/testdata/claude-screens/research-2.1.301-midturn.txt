@@ -1,0 +1,39 @@
+=== first turn working
+| ▐▛███▛█   Claude Code v2.1.301
+|▝▜██████▀  Haiku 5.5 · Claude Max
+| ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc
+|❯ Run the Bash command: sleep 20 && echo DONE-ONE
+|  Bash(sleep 20 && echo DONE-ONE)
+|✢ Billowing… (4s · ↓ 92 tokens)
+|                                                                                      47362 tokens
+|────────────────────────────────────────────────────────────────────────────────────────────────────
+|❯
+|────────────────────────────────────────────────────────────────────────────────────────────────────
+|  * Haiku | $0.00 | 10s | 󰍛 464M | ░░░░░░ 5% | ██▀▀▀▀▀--- 5h:70% ↻3m 7d:20% ↻6d9h
+|  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents
+=== after mid-turn send
+| ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc
+|❯ Run the Bash command: sleep 20 && echo DONE-ONE
+|⏺ Bash(sleep 20 && echo DONE-ONE)
+|❯ QUEUED-SECOND say hi
+|  ctrl+x ctrl+s to send now
+|✢ Billowing… (6s · ↓ 102 tokens)
+|                                                                                      47362 tokens
+|────────────────────────────────────────────────────────────────────────────────────────────────────
+|❯ Press up to edit queued messages
+|────────────────────────────────────────────────────────────────────────────────────────────────────
+|  * Haiku | $0.00 | 11s | 󰍛 435M | ░░░░░░ 5% | ██▀▀▀▀▀--- 5h:70% ↻3m 7d:20% ↻6d9h
+|  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents
+=== after first turn ends
+|❯ Run the Bash command: sleep 20 && echo DONE-ONE
+|⏺ Bash(sleep 20 && echo DONE-ONE)
+|  ⎿  DONE-ONE
+|❯ QUEUED-SECOND say hi
+|⏺ Hi! The sleep finished and the command printed DONE-ONE.
+|✻ Baked for 29s · done 8:07 pm
+|                                                                                      47541 tokens
+|────────────────────────────────────────────────────────────────────────────────────────────────────
+|❯
+|────────────────────────────────────────────────────────────────────────────────────────────────────
+|  * Haiku | $0.00 | 37s | 󰍛 500M | ░░░░░░ 5% | ██▀▀▀▀▀--- 5h:70% ↻2m 7d:20% ↻6d9h
+|  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents

@@ -69,6 +69,23 @@ type ClaudeCodeController struct {
 	// from disk and finds unchanged or gone. Both are honest answers.
 	published atomic.Pointer[string]
 
+	// The InputGate's state (controller_claude_input.go). Every field is safe
+	// from any goroutine: tty takes its own leaf lock, the rest are atomics.
+	//
+	// tty is nil until Start, and Start builds it only for a GATED pane, so an
+	// observed-only Claude pane costs exactly what it did before. Settable in
+	// struct-literal tests.
+	tty       *ttyWatch
+	reg       claudeRegistry
+	everReady atomic.Bool  // has ever been READY: "starting" vs a regression
+	boxSince  atomic.Int64 // unix nanos the box became continuously visible; 0 = not visible
+	// prompts is the recent transcript PROMPT records (real user entries,
+	// queue enqueues, queued_command attachments), published for acceptance.
+	// queue is the render goroutine's own list of enqueued prompts not yet
+	// dequeued, which dates a dequeued prompt by its ENQUEUE (F11).
+	prompts atomic.Pointer[promptLog]
+	queue   []queuedPrompt
+
 	snap Snapshot
 }
 
@@ -128,11 +145,8 @@ func encodeProjectDir(cwd string) string {
 //	["zsh", "-l", "-c", `cd /foo && claude 'list files'`]
 //	["claude", "say", "hi"]  (unlikely but possible)
 func extractClaudePrompt(p *Pane) string {
-	if p.cmd == nil {
-		return ""
-	}
-	// Walk cmd.Args looking for a claude invocation with a quoted prompt.
-	for _, arg := range p.cmd.Args {
+	// Walk the launch looking for a claude invocation with a quoted prompt.
+	for _, arg := range launchArgs(p) {
 		if !strings.Contains(arg, "claude") {
 			continue
 		}
@@ -211,12 +225,56 @@ func extractClaudePrompt(p *Pane) string {
 	return ""
 }
 
-func (c *ClaudeCodeController) Name() string { return "claude-code" }
+// launchArgs is what the prompt and cwd extractors read: the pane's original
+// launch line when newPane recorded one, else cmd.Args as they always did.
+// For a shell launch the two give the same answer — cmd.Args is
+// [shell, -l, -c, line] and only the line can mention claude — so the
+// editor-mode rewrite can change what is exec'd without moving discovery, and
+// a struct-literal pane with no launchLine behaves exactly as before.
+func launchArgs(p *Pane) []string {
+	switch {
+	case p == nil:
+		return nil
+	case p.launchLine != "":
+		return []string{p.launchLine}
+	case p.cmd != nil:
+		return p.cmd.Args
+	}
+	return nil
+}
+
+func (c *ClaudeCodeController) Name() string { return claudeCodeName }
 
 func (c *ClaudeCodeController) Start(ctx context.Context) error {
 	if c.spawnedAt.IsZero() {
 		c.spawnedAt = time.Now()
 	}
+	c.snap.State = CtrlStarting
+	// The Start split. The readiness half first, and it cannot fail, so a
+	// gated pane has a working gate whatever the transcript half does.
+	c.startTTYWatch()
+	err := c.startTranscript()
+	if err == nil {
+		return nil
+	}
+	if dbgFile != nil {
+		fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p transcript discovery unavailable: %v\n", c.pane, err)
+	}
+	if inputGateOf(c.pane) != nil {
+		// A GATED pane keeps its controller with transcript discovery dormant
+		// (projectDir stays "", so pollTranscript is a no-op). Returning the
+		// error would make attachController drop the controller, and with it
+		// the gate: a declared pane would silently become ungated.
+		return nil
+	}
+	// An observed-only pane is exactly as before: no transcript, no controller.
+	return err
+}
+
+// startTranscript is Start's transcript half: where claude runs, and therefore
+// which ~/.claude/projects directory to tail. Its one failure is
+// os.UserHomeDir, which leaves discovery with nowhere to look.
+func (c *ClaudeCodeController) startTranscript() error {
 	// Resolve cwd, in descending order of how directly it states where claude
 	// will actually run:
 	//
@@ -245,7 +303,6 @@ func (c *ClaudeCodeController) Start(ctx context.Context) error {
 	}
 	c.projectsDir = filepath.Join(home, ".claude", "projects")
 	c.projectDir = filepath.Join(c.projectsDir, encodeProjectDir(c.cwd))
-	c.snap.State = CtrlStarting
 	if dbgFile != nil {
 		fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p cwd=%q projectDir=%q exists=%v wantPrompt=%q\n",
 			c.pane, c.cwd, c.projectDir, dirExists(c.projectDir), c.wantPrompt)
@@ -264,10 +321,7 @@ func dirExists(path string) bool {
 // (we cannot resolve it reliably against the shell's own state), or when the
 // directory does not exist.
 func extractClaudeCwd(p *Pane) string {
-	if p == nil || p.cmd == nil {
-		return ""
-	}
-	for _, arg := range p.cmd.Args {
+	for _, arg := range launchArgs(p) {
 		idx := strings.Index(arg, "cd ")
 		if idx != 0 && !(idx > 0 && (arg[idx-1] == ' ' || arg[idx-1] == ';')) {
 			continue
@@ -287,7 +341,14 @@ func extractClaudeCwd(p *Pane) string {
 	return ""
 }
 
-func (c *ClaudeCodeController) Stop() error { return nil }
+// Stop ends the termios watch, if any; close is idempotent and a heat after it
+// starts nothing.
+func (c *ClaudeCodeController) Stop() error {
+	if c.tty != nil {
+		c.tty.close()
+	}
+	return nil
+}
 
 // NotifyInput records that a pilot pushed an instruction into this pane.
 // See the InputNotifier docs for why a controller needs to be told.
@@ -330,7 +391,26 @@ func (c *ClaudeCodeController) Poll() (Snapshot, error) {
 	// transcript was never found, so the live snapshot can still reach
 	// awaiting_input (issue #2).
 	c.applyTerminalIdle()
+	c.publishInput()
 	return c.snap, err
+}
+
+// publishInput refreshes Snapshot.Input, the published readiness VIEW, for a
+// gated pane; every other pane keeps it zero. Poll is not a demand: one cold
+// termios sample (a no-op while the hot sampler runs), then a decision on
+// history. It never emits: snapshotChanged does not compare Input (D10).
+func (c *ClaudeCodeController) publishInput() {
+	if inputGateOf(c.pane) == nil {
+		c.snap.Input = InputReadiness{}
+		return
+	}
+	now := time.Now()
+	if c.tty != nil {
+		c.tty.sampleCold(now)
+	}
+	in, _ := c.readiness(now, ReadinessQuery{Class: ClassType, Types: true}, false)
+	in.Gated = true
+	c.snap.Input = in
 }
 
 // applyTerminalIdle reconciles this controller's view with the pane's own.
@@ -929,10 +1009,15 @@ func (c *ClaudeCodeController) applyLine(line []byte) {
 		if !isPrompt {
 			return
 		}
+		// Acceptance evidence: a transcript user entry, keyed, sequenced and
+		// dated by when it was SUBMITTED — its own timestamp, or its enqueue's
+		// when it is a dequeued prompt (review H2, r3 M2).
+		written := parseClaudeTimestamp(entry["timestamp"])
+		c.notePrompt(content, c.dequeuedAt(content, written))
 		// New turn starting
 		c.snap.LastUserPrompt = content
 		c.snap.State = CtrlWorking
-		c.snap.StartedAt = parseClaudeTimestamp(entry["timestamp"])
+		c.snap.StartedAt = written
 		c.snap.CompletedAt = time.Time{}
 		c.snap.LastResponse = ""
 		c.snap.LastTool = ""
@@ -966,6 +1051,11 @@ func (c *ClaudeCodeController) applyLine(line []byte) {
 			c.snap.State = CtrlAwaitingInput
 			c.snap.CompletedAt = parseClaudeTimestamp(entry["timestamp"])
 		}
+
+	case "queue-operation", "attachment":
+		// A queued (mid-turn) prompt: acceptance evidence only, never a turn
+		// boundary — research F11 (controller_claude_input.go, noteQueued).
+		c.noteQueued(t, entry)
 
 	case "permission-mode":
 		// Permission mode change — informational only

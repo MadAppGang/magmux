@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -229,6 +230,13 @@ type Magmux struct {
 	// nothing of magmux's is held while calling into it.
 	hub     *hub.Hub
 	hubOnce sync.Once
+	// typingTokens maps a gated *Pane to its typing token, a cap-1 channel
+	// (inputgate.go). Lazily filled by typingToken, so the zero value works in a
+	// struct literal; entries are never removed, which is the slot table's own
+	// rule (m.allPanes is append-only), so a token can never be swapped under a
+	// delivery holding it. Order: p.typing -> treeMu -> p.mu, and the token is
+	// never acquired under any lock.
+	typingTokens sync.Map
 	// pluginHost is the plugin registry and router (package plugin). Reached
 	// ONLY through m.plugins(), lazily, for the reason the hub is: a
 	// struct-literal Magmux has to work, and every socket line asks the host
@@ -354,6 +362,12 @@ type Magmux struct {
 	// teach itself on a terminal that otherwise shows nothing. Written by
 	// inputLoop under treeMu.Lock, read by renderLocked under RLock.
 	chordArmed bool
+
+	// sockBeforeRead is a TEST SEAM and nil in every real run. When set,
+	// handleSocketConn calls it after the Sub's writer has started and before
+	// the connection's first Read, so a test can order the aggregate write's
+	// failure ahead of the reader deterministically instead of by load.
+	sockBeforeRead func(conn net.Conn)
 }
 
 // claimSession atomically attempts to mark `path` as owned by `p`. Returns
@@ -707,6 +721,44 @@ func (m *Magmux) attachControllers() {
 	}
 }
 
+// attachPaneController is the whole attach order for a pane whose declaration
+// is known (PaneConfig.Controller, resolved):
+//
+//  1. plugin:<name> — the plugin IS the controller, and the factories are not
+//     consulted: the plugin asked to observe this session, and letting a
+//     factory win would give the pane a second opinion the plugin's own
+//     snapshots could never override (p.controller is write-once);
+//     2–4. attachController: declared or direct ⇒ the Claude controller, else
+//     the factories.
+//
+// Called while the pane is still PRIVATE, like attachController.
+func (m *Magmux) attachPaneController(p *Pane, declared string) {
+	if name, ok := strings.CutPrefix(declared, pluginControllerPrefix); ok && name != "" {
+		if m.ctx == nil {
+			m.ctx = context.Background()
+		}
+		p.mux = m
+		if p.controller != nil {
+			return
+		}
+		p.controller = newPluginController(name, p)
+		if dbgFile != nil {
+			fmt.Fprintf(dbgFile, "[ctrl] attached %s to a new pane\n", p.controller.Name())
+		}
+		return
+	}
+	m.attachController(p)
+}
+
+// stopController stops a pane's controller, if it has one: for a Claude pane
+// that ends the termios watch. Called by ClosePane and unwindPane, with no
+// lock held. Stop is idempotent for every controller magmux has.
+func (m *Magmux) stopController(p *Pane) {
+	if p != nil && p.controller != nil {
+		_ = p.controller.Stop()
+	}
+}
+
 // attachController attaches a ToolController to one pane if a factory
 // recognizes its command.
 //
@@ -724,6 +776,25 @@ func (m *Magmux) attachController(p *Pane) {
 	if p.controller != nil {
 		return
 	}
+	// The attach order (a plugin's claim, step 1, is attachPaneController's).
+	// 2–3: a pane newPane gated — declared claude-code, or a direct claude
+	// invocation — gets the Claude controller whatever its command is, and is
+	// never left to the factories: a declared wrapper is invisible to the
+	// loose substring test, and `claude>log` is invisible to it too, so
+	// "gated" would otherwise not imply "has an InputGate". Its Start cannot
+	// fail (the Start split), so the controller is never dropped.
+	if p.gateBasis != gateNone {
+		c := newClaudeCodeController(p)
+		p.controller = c
+		if err := c.Start(m.ctx); err != nil && dbgFile != nil {
+			fmt.Fprintf(dbgFile, "[ctrl] %s.Start error on a gated pane: %v\n", c.Name(), err)
+		}
+		if dbgFile != nil {
+			fmt.Fprintf(dbgFile, "[ctrl] attached %s to pane %d (gate: %s)\n", c.Name(), p.id, p.gateBasis)
+		}
+		return
+	}
+	// 4: today's factories, for observation only.
 	for _, factory := range m.controllerFactories {
 		c := factory(p)
 		if c == nil {

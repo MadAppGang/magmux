@@ -505,8 +505,11 @@ func TestPluginSelfOpenPaneNeedsRegistration(t *testing.T) {
 		replyFailed(t, p.request(map[string]any{
 			"type": "open_pane", "cmd": "sleep 30", "controller": "plugin:ticket",
 		}), protocol.CodeBadRequest)
+		// "claude-code" is accepted now, and it is not this rule's exception:
+		// it names a tool and grants no ownership (TestOpenPaneDeclaredController).
+		// A name that is neither is still refused.
 		replyFailed(t, p.request(map[string]any{
-			"type": "open_pane", "cmd": "sleep 30", "controller": "claude-code",
+			"type": "open_pane", "cmd": "sleep 30", "controller": "codex",
 		}), protocol.CodeBadRequest)
 	})
 

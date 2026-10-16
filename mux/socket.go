@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/MadAppGang/magmux/hub"
+	"github.com/MadAppGang/magmux/protocol"
 	"github.com/MadAppGang/magmux/sockdir"
 )
 
@@ -34,13 +35,18 @@ type sockMsg struct {
 	Enter *bool    `json:"enter,omitempty"` // submit after Text; defaults true
 	// Typed and Paste choose how Text reaches the PTY; they are exclusive (see
 	// sendMode). Neither keeps the old shape.
-	Typed   bool   `json:"typed,omitempty"`   // type Text as keystrokes, newlines as ctrl-j
-	Paste   bool   `json:"paste,omitempty"`   // deliver Text as one bracketed paste, even empty
-	Label   string `json:"label,omitempty"`   // short tag for the control log ("step 2/5")
-	Goal    string `json:"goal,omitempty"`    // the task the pilot is driving
-	Steps   int    `json:"steps,omitempty"`   // planned step count, 0 if open-ended
-	Model   string `json:"model,omitempty"`   // model the pilot itself is running
-	Summary string `json:"summary,omitempty"` // pilot's closing summary
+	Typed bool   `json:"typed,omitempty"` // type Text as keystrokes, newlines as ctrl-j
+	Paste bool   `json:"paste,omitempty"` // deliver Text as one bracketed paste, even empty
+	Label string `json:"label,omitempty"` // short tag for the control log ("step 2/5")
+	// The input gate's three fields (inputgate_send.go). They mean something
+	// only on a gated pane; their zero values are today's send everywhere.
+	DismissDialogs bool   `json:"dismissDialogs,omitempty"` // Escape a dismissable dialog (R5); never approves
+	ReadyTimeoutMs int    `json:"readyTimeoutMs,omitempty"` // readiness deadline; 0 = 10s, > 60000 clamped, < 0 bad_request
+	NoGate         bool   `json:"noGate,omitempty"`         // today's behaviour, even into a dialog
+	Goal           string `json:"goal,omitempty"`           // the task the pilot is driving
+	Steps          int    `json:"steps,omitempty"`          // planned step count, 0 if open-ended
+	Model          string `json:"model,omitempty"`          // model the pilot itself is running
+	Summary        string `json:"summary,omitempty"`        // pilot's closing summary
 	// Client is the controller's identity for the panel header
 	// ("claude-code/2.1"). The ONE field MCP adds to the pilot protocol —
 	// everything else an MCP client does arrives as an ordinary socket verb.
@@ -90,8 +96,12 @@ type sockMsg struct {
 	// make the CALLING PLUGIN the new pane's controller, so the plugin's own
 	// `controller.snapshot` messages become that pane's state.
 	//
-	// It takes only "self". A caller that wrote "plugin:ticket" would be naming
-	// an identity rather than claiming one, and identity on this socket comes
+	// It also takes "claude-code", which names a tool rather than an identity
+	// and grants nothing: the new pane gets the Claude controller and the
+	// input gate whatever its command is (resolveOpenPaneController).
+	//
+	// Nothing else. A caller that wrote "plugin:ticket" would be naming an
+	// identity rather than claiming one, and identity on this socket comes
 	// from the connection's registration and from nowhere else — so any other
 	// value is bad_request, including the correct name of the plugin actually
 	// asking.
@@ -442,19 +452,27 @@ func (m *Magmux) dispatchSocketVerb(msg sockMsg, done func(map[string]any, error
 		if err != nil {
 			return nil, err
 		}
+		if msg.ReadyTimeoutMs < 0 {
+			return nil, sockErrf(sockCodeBadRequest, "send: readyTimeoutMs must not be negative (0 is the default, %d)", protocol.SendReadyWaitDefault.Milliseconds())
+		}
+		req := sendRequest{idx: paneIdx, mode: mode, text: msg.Text, keys: msg.Keys, enter: enter, label: msg.Label,
+			dismiss: msg.DismissDialogs, readyTimeoutMs: msg.ReadyTimeoutMs, noGate: msg.NoGate}
 		// Admitted here, on the reader; DELIVERED on this connection's lane for
 		// this pane (msg.sub), so two instructions to one pane cannot be typed
 		// into each other. A message with no connection behind it — an op
 		// called through the registry, a unit test — keeps the old
 		// one-goroutine-per-send shape.
 		if done == nil {
-			return nil, m.sendToPaneVia(msg.runCtx, msg.sub, paneIdx, mode, msg.Text, msg.Keys, enter, msg.Label, nil)
+			return nil, m.sendRequestVia(msg.runCtx, msg.sub, req, nil)
 		}
 		// Delivery outlives this call, so the reply does too: it means "the
 		// bytes reached the PTY", which is the failure mode that used to live
-		// and die inside sendToPane's goroutine.
+		// and die inside sendToPane's goroutine. On a gated pane it means
+		// more, and the report says what (sendReport.addTo); an ungated reply
+		// is these four keys and nothing else.
 		result := map[string]any{"pane": paneIdx, "bytes": len(msg.Text), "keys": len(msg.Keys), "enter": enter}
-		if err := m.sendToPaneVia(msg.runCtx, msg.sub, paneIdx, mode, msg.Text, msg.Keys, enter, msg.Label, func(err error) {
+		if err := m.sendRequestVia(msg.runCtx, msg.sub, req, func(rep sendReport, err error) {
+			rep.addTo(result)
 			done(result, err)
 		}); err != nil {
 			return nil, err

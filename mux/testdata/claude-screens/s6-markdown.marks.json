@@ -1,0 +1,30 @@
+[
+  {
+    "label": "markdown-in-box",
+    "offset": 3170,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                ◐ medium · /effort\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ Reply ok. md probe: `code span` **bold** *ital* _under_ ~~strike~~ [link](http://x.y) <b>tag</b>\n  a\\*b # notheading > nq - nl 1. nn $HOME ``double`` end\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 1s | 󰍛 428M | ░░░░░░ 0% | ▄---- 5h:18% ↻2h25m 7d:25% ↻6d7h\n  ⏵⏵ auto mode on (shift+tab to cycle)"
+  },
+  {
+    "label": "markdown-in-history",
+    "offset": 6422,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Reply ok. md probe: code span bold ital _under_ strike [link](http://x.y) <b>tag</b> a\\*b #\n  notheading > nq - nl 1. nn $HOME double end\n\n⏺ ok\n\n✻ Churned for 2s · done 10:44 pm\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                      47496 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 12s | 󰍛 486M | ░░░░░░ 5% | ▄---- 5h:18% ↻2h25m 7d:24% ↻6d7h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  },
+  {
+    "label": "claudish-line-in-box",
+    "offset": 7300,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Reply ok. md probe: code span bold ital _under_ strike [link](http://x.y) <b>tag</b> a\\*b #\n  notheading > nq - nl 1. nn $HOME double end\n\n⏺ ok\n\n✻ Churned for 2s · done 10:44 pm\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                      47496 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ Your task is in the file `/tmp/claudish-mux-501/launch-NemaeL/turn-1.md`. Reply only with the\n  word ok, do not read it.\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 12s | 󰍛 486M | ░░░░░░ 5% | ▄---- 5h:18% ↻2h25m 7d:24% ↻6d7h\n  ⏵⏵ auto mode on (shift+tab to cycle)"
+  },
+  {
+    "label": "claudish-line-in-history",
+    "offset": 9543,
+    "cols": 100,
+    "rows": 39,
+    "text": "\n ▐▛███▛█   Claude Code v2.1.301\n▝▜██████▀  Haiku 5.5 · Claude Max\n ▝▝   ▝▝   /…/-Users-user-mag-magmux/860f3351-d943-4552-8e2b-d5d589834f66/scratchpad · /rc\n\n\n❯ Reply ok. md probe: code span bold ital _under_ strike [link](http://x.y) <b>tag</b> a\\*b #\n  notheading > nq - nl 1. nn $HOME double end\n\n⏺ ok\n\n✻ Churned for 2s · done 10:44 pm\n\n❯ Your task is in the file /tmp/claudish-mux-501/launch-NemaeL/turn-1.md. Reply only with the word\n  ok, do not read it.\n\n⏺ ok\n\n✻ Baked for 1s · done 10:44 pm\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                                                      47601 tokens\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ now read that file and do the task\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  * Haiku | $0.00 | 17s | 󰍛 491M | ░░░░░░ 5% | ▄---- 5h:18% ↻2h25m 7d:24% ↻6d7h\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 5 agents"
+  }
+]
