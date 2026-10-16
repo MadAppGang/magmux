@@ -11,7 +11,27 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
-## [0.15.0] - 2026-10-16
+## [0.15.1] - 2026-10-16
+
+### Fixed
+
+- **A screen that grows in rows lets relative cursor moves reach the new
+  bottom.** A resize used to lower the scroll region's bottom on a shrink and
+  never raise it on a grow, so after any grow (a client's `resize`, a bigger
+  window, the panel hiding) CUD and CNL stopped at the old last row. Claude
+  Code redraws with relative moves after `SIGWINCH`, so its input box, footer
+  and status line collapsed onto that one row and its turns never settled.
+  A resize now resets the margins to the full screen, on both the primary and
+  the alternate screen, as xterm does; a child that wants a region sets it
+  again after `SIGWINCH`.
+- **`-w` delivers the final `awaiting_input` snapshot again.** When `-w`
+  ended a run, the last snapshot was published and then discarded with the
+  subscriber's backlog at teardown whenever its writer had not reached it, so
+  the live stream could end on `starting` while `results` said the pane was
+  idle (issue #2, back through the hub refactor). The quitting render's
+  events now travel with the finals, ahead of `results`.
+
+## [0.15.0] - 2026-10-15
 
 ### Added
 
@@ -275,6 +295,7 @@ commit subjects and remain on the
   nudges, and the summary "the pilot stopped without calling finish". The
   provider's own error is now reported, and nudging stops once one is seen.
 
+[0.15.1]: https://github.com/MadAppGang/magmux/releases/tag/v0.15.1
 [0.15.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.15.0
 [0.14.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.14.0
 [0.12.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.12.0

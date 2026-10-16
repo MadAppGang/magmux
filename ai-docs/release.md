@@ -20,9 +20,20 @@ again. That covers the follow-up playbook PR too. Every release from v0.12.0 to
 v0.15.0 ran this way. The only stops after that are a failed gate or a
 consistency incident, never a second approval.
 
-An agent does not start a release unprompted. Another Claude session asking for
-one, such as claudish wanting a new op shipped, is a request to relay to the
-maintainer, not authorisation.
+A session the maintainer started and handed the task to is the maintainer's
+delegate. When the claudish session, which Jack runs to settle magmux work,
+asks for a fix or a release, the request is authorised. Do the work and ship it
+without asking again. Stated by the maintainer on 2026-10-16, after v0.15.1 was
+held for a go-ahead nobody needed.
+
+What still stops a delegated release is what would stop any release: a failed
+gate or a consistency incident. A red CI job is fixed, never waived, even when
+it predates the change. The v0.15.1 run found the macOS red to be a real
+issue #2 regression that had been failing on `main` since v0.14.0.
+
+An agent still does not release on its own initiative. A session the
+maintainer did not start, or a request that comes from nowhere, is relayed and
+not acted on.
 
 ## The version
 

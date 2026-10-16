@@ -395,3 +395,43 @@ func TestResizeOpOverHTTP(t *testing.T) {
 		}
 	}
 }
+
+// TestRowGrowLetsRelativeMovesReachTheNewBottom is the margins bug on the real
+// binary, in claudish's shape. The child redraws on WINCH the way Claude Code
+// does, with RELATIVE moves (home, then CUD far past the screen), and prints
+// its row count where it lands. After a grow in rows the marker must sit on the
+// new last row; the bug left it on the old one (claudish saw Claude Code's
+// input box, footer and status line collapse onto row 49 after 50->60).
+func TestRowGrowLetsRelativeMovesReachTheNewBottom(t *testing.T) {
+	t.Setenv("COLUMNS", "160")
+	t.Setenv("LINES", "50")
+	script := filepath.Join(t.TempDir(), "cud.sh")
+	body := "draw() { set -- $(stty size); printf '\\033[2J\\033[1;1H\\033[999BCUD_%s' \"$1\"; }\n" +
+		"trap draw WINCH\ndraw\nwhile :; do sleep 0.1; done\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := startHeadlessMagmux(t, "--headless", "--no-status", "-e", "sh "+script)
+	conn := dialASAP(t, h.sock, 10*time.Second)
+	rc := &rpcConn{t: t, c: conn, sc: newLineScanner(conn)}
+	ids := &rpcIDs{}
+
+	rowOf := func(text, marker string) int {
+		for i, line := range strings.Split(text, "\n") {
+			if strings.TrimSpace(line) == marker {
+				return i
+			}
+		}
+		return -1
+	}
+	ids.awaitCaptureLine(rc, 0, "CUD_50", 15*time.Second)
+	for _, rows := range []int{60, 40, 55} { // grow, shrink, grow again
+		res := replyOK(t, ids.ask(rc, map[string]any{"type": "resize", "pane": 0, "rows": rows, "cols": 160}))
+		wireResult(t, "resize", res, rows, 160, true, true)
+		marker := fmt.Sprintf("CUD_%d", rows)
+		text := ids.awaitCaptureLine(rc, 0, marker, 10*time.Second)
+		if got := rowOf(text, marker); got != rows-1 {
+			t.Fatalf("after resize to %d rows the child's CUD landed on row %d, want %d:\n%s", rows, got, rows-1, text)
+		}
+	}
+}

@@ -241,7 +241,11 @@ func (m *Magmux) shutdownSocket() {
 	// 3. results, then shutdown, then EOF — for every subscriber, whatever its
 	//    backlog was, and including one that connects after this point (it is
 	//    replayed the same two finals by Hub.Session and closed).
-	finals := make([][]byte, 0, 2)
+	//    The quitting render's own events go first (see Magmux.lastWords):
+	//    published, Finalize would have discarded them with the backlog.
+	m.lastWordsMu.Lock()
+	finals := append(make([][]byte, 0, len(m.lastWords)+2), m.lastWords...)
+	m.lastWordsMu.Unlock()
 	for _, ev := range []any{results, shutdown} {
 		if line := eventLine(ev); len(line) > 0 {
 			finals = append(finals, line)
