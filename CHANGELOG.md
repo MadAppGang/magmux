@@ -101,6 +101,14 @@ commit subjects and remain on the
   In vim mode it did not, which made the loss unrecoverable. The gate waits
   the reset out, the box check catches what it still eats, and the forced
   normal mode makes vim's failure impossible on a pane magmux launches.
+- **A one-shot socket client no longer loses the instructions it sent.** A
+  script that pipes its lines into `nc -U` and hangs up has closed before
+  magmux writes its connect-time snapshot, so that write fails. magmux used to
+  close the whole socket on that failure, and when the close came before the
+  first read, the client's unread lines were thrown away and nothing was typed.
+  It hit about one run in two hundred. Now the failed write shuts only
+  magmux's sending side. Every line the client sent is still read and
+  delivered, and the socket is closed once the reader is done with it.
 
 ## [0.15.1] - 2026-10-16
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -361,6 +362,12 @@ type Magmux struct {
 	// teach itself on a terminal that otherwise shows nothing. Written by
 	// inputLoop under treeMu.Lock, read by renderLocked under RLock.
 	chordArmed bool
+
+	// sockBeforeRead is a TEST SEAM and nil in every real run. When set,
+	// handleSocketConn calls it after the Sub's writer has started and before
+	// the connection's first Read, so a test can order the aggregate write's
+	// failure ahead of the reader deterministically instead of by load.
+	sockBeforeRead func(conn net.Conn)
 }
 
 // claimSession atomically attempts to mark `path` as owned by `p`. Returns

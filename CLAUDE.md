@@ -1070,6 +1070,15 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   behind the first one's pacing. On close a lane accepts nothing new and DRAINS
   what it holds. Dropping the queue instead loses an instruction silently, on
   exactly the client shape most likely to hit it (`TestOneShotSendSurvivesClose`).
+  The READ side has the same rule, one step earlier: such a client has often
+  hung up before the aggregate is written, so that write fails with EPIPE while
+  its lines sit unread in the receive buffer. `sockSink` therefore only
+  `CloseWrite`s on EPIPE while the reader is still running, and whichever of
+  the two finishes LAST closes the fd (`readerFinished`). Every other failure
+  is still a full Close. When `TestOneShotSendSurvivesClose` failed about one
+  run in two hundred, the cause was this bug, not machine load.
+  `TestOneShotSendSurvivesAggregateWriteFailure` forces the order through the
+  `m.sockBeforeRead` seam.
 
 - **`Quiesce` is the only thing that discards a queued item unrun, and it says
   so.** It calls `Discard` rather than dropping the item, because the panel has
