@@ -656,8 +656,10 @@ and `list`/`results` say so with `gateBasis`:
 
 - **`direct`**: the pane's command is a `claude` invocation magmux can see,
   such as `-e 'claude --model opus'` or `-e 'cd /x && claude'`. A loose match
-  (`grep claude x`, `tail -f /tmp/claude`) is observed but never gated, and so
-  is print mode (`claude -p`), which never shows a box.
+  (`grep claude x`, `tail -f /tmp/claude`) is observed but never gated. Nor is
+  an invocation that never shows a box: print mode (`claude -p`), a subcommand
+  (`claude mcp list`, `claude update`, `claude doctor`, …) and `--version` /
+  `--help`. Those are not rewritten either.
 - **`declared`**: the pane was declared a Claude Code pane, whatever its command
   is. `--controller claude-code` declares every `-e` and `-g` pane, and
   `open_pane` with `"controller":"claude-code"` declares one. This is how a
@@ -684,6 +686,19 @@ the final key, a final Enter key plus `"enter":true` is two Enters, and an
 unknown key name is refused rather than skipped. All three are `bad_request`
 before anything is written, because a send that half-ran could not be
 verified. Split the request instead.
+
+**A CR in `text` is a newline.** On a gated pane `\r` and `\r\n` inside `text`
+become `\n`, in every mode, so a multi-line text is typed as lines and the only
+Return is the final, checked Enter. Any other control character but tab
+(ctrl-c, Escape, DEL, …) is `bad_request`: send it as a key, or use `noGate`.
+Ungated, `text` is written exactly as sent.
+
+**Bash mode works.** A text that starts with `!` switches Claude's box into
+bash mode: Claude consumes the `!` and shows it as the box's glyph. The box
+check treats the leading `!` as that switch and compares the rest, and the
+`! command` history entry is the evidence. A text WITHOUT a leading `!` never
+verifies against a box that is already in bash mode, because submitting it
+would run a shell command rather than send a prompt.
 
 **The default `enter` no longer reaches a dialog.** `enter` defaults to true,
 so `{"keys":["2"]}` is a SUBMIT, and while a dialog shows it is refused
@@ -731,13 +746,20 @@ readiness.
 `waitedMs` is the time spent waiting for readiness. `dismissed` lists the
 dialogs that were Escaped, in order, and is omitted when there were none.
 
-**`dismissDialogs:true`** presses Escape on a permission, question, plan or
-select dialog, before typing and again before the Enter. Escape declines, and
-it is the only key this ever presses, so it can never approve anything. magmux
-then waits for the box to come back and delivers as usual. It presses at most
-three times per send, at least 400 ms apart. A boot dialog (trust, bypass, API
-key, onboarding) is never dismissed: those are questions for the human, and
-Escape on the trust prompt exits Claude.
+**`dismissDialogs:true`** presses Escape on a permission, question or plan
+dialog, before typing and again before the Enter. Escape declines, and it is
+the only key this ever presses, so it can never approve anything. magmux then
+waits for the box to come back and delivers as usual. It presses at most three
+times per send, at least 400 ms apart, and only while it holds the pane's
+typing token, so an Escape never lands in the middle of another send's typing.
+A permission or question dialog is pressed only when it shows its own
+`Esc to cancel` hint; the plan dialog shows none and is pressed anyway, because
+Escape was measured to decline it and leave Claude in plan mode. A boot dialog
+(trust, bypass, API key, onboarding) is never dismissed: those are questions
+for the human, and Escape on the trust prompt exits Claude. Neither is a
+`select` dialog, the catch-all for a region with the generic
+`Enter to confirm · Esc to cancel` footer: the boot dialogs carry that very
+footer, so a reworded trust prompt would land there.
 
 **`noGate:true`** turns all of it off for one send: no Enter rule, no wait, no
 verify, no acceptance. It is the ungated send exactly, even into a dialog.

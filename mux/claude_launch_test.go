@@ -67,6 +67,39 @@ func TestClaudeLaunchOf(t *testing.T) {
 		{"claude $(unbalanced", false},
 		{"claude >", false}, // a redirection with no target
 		{"", false},
+
+		// Non-interactive invocations never show an input box (review M4):
+		// subcommands, and the version / help flags anywhere before `--`.
+		{"claude mcp list", false},
+		{"claude mcp add x -- npx y", false},
+		{"claude update", false},
+		{"claude upgrade", false},
+		{"claude doctor", false},
+		{"claude config get model", false},
+		{"claude plugin install x", false},
+		{"claude auth status", false},
+		{"claude setup-token", false},
+		{"claude install stable", false},
+		{"claude --version", false},
+		{"claude -v", false},
+		{"claude --help", false},
+		{"claude -h", false},
+		{"claude --model opus --version", false},
+		{"claude --model opus mcp list", false}, // root option, then the subcommand
+		{"claude --settings='{}' mcp list", false},
+		{"cd /x && claude doctor", false},
+		{"claude 'update the docs'", true},     // a prompt is ONE word; "update" alone is the subcommand
+		{"claude fix the doctor script", true}, // only the first positional names a subcommand
+		{"claude -- --version", true},          // after a bare --, nothing is a flag
+		{"claude --model mcp-model 'p'", true},
+
+		// $TMPDIR containing "claude" (review observation 8): only a command
+		// word whose basename IS `claude` is direct, never a path through a
+		// directory named claude-501.
+		{"/private/tmp/claude-501/x/fakeclaude --flag", false},
+		{"/tmp/claude-501/bin/sh -c 'echo hi'", false},
+		{"cd /tmp/claude-501 && ./run.sh", false},
+		{"/tmp/claude-501/claude", true}, // the basename is claude: a claude binary
 	}
 	for _, r := range rows {
 		got := claudeLaunchOf(shellCfg("/bin/zsh", r.line))
@@ -75,6 +108,35 @@ func TestClaudeLaunchOf(t *testing.T) {
 		}
 		if got.line != r.line {
 			t.Errorf("claudeLaunchOf(%q).line = %q; the launch line is the -c string verbatim", r.line, got.line)
+		}
+	}
+}
+
+// TestTmpdirClaudeIsObservedNotGated (review observation 8): a $TMPDIR such as
+// /private/tmp/claude-501 puts "claude" in paths. The lexer only ever calls a
+// command word whose basename is `claude` direct, so none of these is gated.
+// The LOOSE factory is a substring match and still attaches an observe-only
+// controller where its rule fires (`fakeclaude --flag` holds "claude "); that
+// is today's behaviour, it observes and never gates.
+func TestTmpdirClaudeIsObservedNotGated(t *testing.T) {
+	for _, c := range []struct {
+		line     string
+		observed bool
+	}{
+		{"/private/tmp/claude-501/x/fakeclaude --flag", true},
+		{"/tmp/claude-501/bin/sh -c 'echo hi'", false},
+		{"cd /tmp/claude-501 && ./run.sh", false},
+	} {
+		cfg := shellCfg("/bin/zsh", c.line)
+		if basis, _ := gateDecision("", claudeLaunchOf(cfg)); basis != gateNone {
+			t.Errorf("%q: gate basis %q, want none", c.line, basis)
+		}
+		p := &Pane{cmd: exec.Command(cfg.Cmd, cfg.Args...)}
+		if got := claudeCodeFactory(p) != nil; got != c.observed {
+			t.Errorf("%q: loose factory attached = %v, want %v", c.line, got, c.observed)
+		}
+		if inputGateOf(p) != nil {
+			t.Errorf("%q: gated", c.line)
 		}
 	}
 }
@@ -110,6 +172,11 @@ func TestClaudeLaunchOfShells(t *testing.T) {
 		{PaneConfig{Cmd: "claude", Args: []string{"-p", "x"}}, false},
 		{PaneConfig{Cmd: "claude", Args: []string{"--", "-p"}}, true},
 		{PaneConfig{Cmd: "claudish", Args: []string{"-i"}}, false},
+		{PaneConfig{Cmd: "claude", Args: []string{"mcp", "list"}}, false},
+		{PaneConfig{Cmd: "claude", Args: []string{"--version"}}, false},
+		{PaneConfig{Cmd: "/usr/local/bin/claude", Args: []string{"doctor"}}, false},
+		{PaneConfig{Cmd: "claude", Args: []string{"update the docs"}}, true},
+		{PaneConfig{Cmd: "/private/tmp/claude-501/x/fakeclaude", Args: []string{"--flag"}}, false},
 	}
 	for _, r := range argv {
 		l := claudeLaunchOf(r.cfg)

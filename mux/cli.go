@@ -691,22 +691,19 @@ func Main(args []string) int {
 	mux.sweepSettings()
 	defer mux.removeOwnSettings()
 
+	build := mux.buildLayout
 	if useGrid {
-		if err := mux.buildGrid(commands); err != nil {
-			mux.restore()
-			// os.Exit runs no defer, so the listener and the generated token go
-			// here by hand, exactly as they do on the init() path.
-			rem.cleanup()
-			fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
-			os.Exit(1)
-		}
-	} else {
-		if err := mux.buildLayout(commands); err != nil {
-			mux.restore()
-			rem.cleanup()
-			fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
-			os.Exit(1)
-		}
+		build = mux.buildGrid
+	}
+	if err := build(commands); err != nil {
+		mux.restore()
+		// os.Exit runs no defer, so the listener, the generated token and any
+		// settings copy an earlier pane of this layout was given go here by
+		// hand, exactly as they do on the init() path.
+		rem.cleanup()
+		mux.removeOwnSettings()
+		fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Every session gets a panel, whether or not -c was passed; without -c it

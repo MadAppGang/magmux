@@ -761,8 +761,14 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
 - **`inputGateOf` is THE predicate, and a pane is gated only when BOTH halves
   hold.** Its controller implements `InputGate` AND its write-once `gateBasis`
   is `declared` (`--controller claude-code`, `open_pane controller:"claude-code"`)
-  or `direct` (the lexer found exactly one command-position `claude` word, not in
-  print mode). A loose substring match attaches a controller for OBSERVATION and
+  or `direct` (the lexer found exactly one command-position `claude` word whose
+  BASENAME is `claude` — a `$TMPDIR` of `/private/tmp/claude-501` makes no pane
+  direct — and the invocation shows an input box: not print mode, not a
+  subcommand as the first positional (`claude mcp list`, `claude update`; a
+  positional right after a `--flag` without `=` may be its value, so the next
+  one is checked too), not `--version`/`--help`. `noInputBox`; a non-direct
+  invocation is not rewritten either. `TestClaudeLaunchOf`,
+  `TestTmpdirClaudeIsObservedNotGated`). A loose substring match attaches a controller for OBSERVATION and
   is never gated, because magmux cannot know what such a pane runs; a plugin's
   pane is never gated. Every gate decision, the `list`/`results` `input` key and
   `Snapshot.Input.Gated` go through it, so "gated" cannot mean one thing for a
@@ -787,14 +793,50 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   `TestTrailingEnterKeyIsTheSubmit`, `TestKeysOnlySendIsNotGated`,
   `TestSubmitIntoDialogRefused`.
 
+- **The only `\r` a gated send writes is its final, verified Enter.**
+  `classifySend` (`gatedText`) rewrites `\r` and `\r\n` inside `text` to `\n`
+  in EVERY mode, before admit: raw, auto mode wrote `"fix A\rthen B"` in one
+  write, the embedded Return submitted `fix A` unchecked, and the reply then
+  said nothing had been submitted. Normalised, multi-line auto text takes the
+  bracketed path and rule i; typed mode already mapped every spelling to one
+  ctrl-j; inside a bracketed paste a CR was a newline anyway. Every other
+  control rune but tab is `bad_request` (ctrl-c, Escape, DEL are edits the box
+  check cannot account for). The OUT row and event carry the text AS IT
+  ARRIVED; the delivery types the normalised one. Ungated is untouched.
+  `TestGatedCarriageReturnTakesTheNewlinePath`,
+  `TestGatedTextControlRuneIsBadRequest`, `TestUngatedCarriageReturnIsUntouched`.
+
+- **Bash mode: a leading `!` is a MODE SWITCH, not text.** Measured on 2.1.301
+  (`s7-bashmode`): a `!` typed into an empty box is consumed and replaces the
+  `❯` glyph (`!` + NBSP in the box, `! ` in history). `promptRowStart` accepts
+  both glyphs and reports which (`BoxShell`, `promptEntry.Shell`); `judgeBox`
+  compares a shell box with `Exact` minus its leading `!`, and refuses a shell
+  box the send did not switch into (submitting it would run a shell command);
+  `matches` takes a shell entry only for a shell send and a `❯` entry only for
+  any other. `TestBashModeSendVerifiedAndAccepted`,
+  `TestBashModeMismatchStillRefused`, `TestShellEntryMatchesOnlyAShellSend`.
+
+- **`send`'s Budget hook is a pure lookup.** It runs before the op on every
+  transport, so a pane-less send resolves its pane with `peekTargetPane` (no
+  refusal note); the op's own `targetPane` files the one refusal.
+  `TestSendBudgetHasNoSideEffect`.
+
 - **Dismissal presses Escape and NOTHING else.** `dismissDialogs` writes `0x1b`
-  only when the controller reports `Dismissable` — permission, question, plan,
-  select — at most 3 per send, ≥ 400 ms apart, inside the readiness deadline. A
-  boot dialog is never dismissable (Escape on the trust prompt EXITS Claude),
-  and a working turn always shows the box, so Escape can never interrupt one.
-  Approving anything is not a mode magmux has. Escapes do not set `typed`.
-  `TestDismissPressesOnlyEscape`, `TestNoDismissOnBootDialog`,
-  `TestDismissCountIsPerSend`.
+  only when the controller reports `Dismissable` — permission and question
+  (with their `Esc to cancel` hint) and plan (measured, no hint:
+  `dismissableWithoutHint`) — at most 3 per send, ≥ 400 ms apart, inside the
+  readiness deadline. A boot dialog is never dismissable (Escape on the trust
+  prompt EXITS Claude), and NEITHER is the `select` catch-all: the boot dialogs
+  carry its very footer, so a trust prompt a later Claude rewords falls through
+  to `select`, and only NAMED, measured dialogs may be Escaped. A working turn
+  always shows the box, so Escape can never interrupt one. The Escape is a
+  write, so it is pressed only while the delivery HOLDS the typing token —
+  `waitReady` writes nothing and returns when a dismissal is due, and the
+  post-token re-ask presses it — so it can never land between another
+  delivery's chunks. Approving anything is not a mode magmux has. Escapes do
+  not set `typed`. `TestDismissPressesOnlyEscape`, `TestNoDismissOnBootDialog`,
+  `TestDismissCountIsPerSend`, `TestSelectDialogIsNotDismissable`,
+  `TestDismissWaitsForTypingToken`.
 
 - **Acceptance is two steps, and a submit needs both.** (1) No Enter without a
   VERIFIED box: `CheckBox` after the settle must find `exact` (the `inputKey`

@@ -32,11 +32,14 @@ type claudeScreen struct {
 	// BoxText is the typed text: the ❯ row and its continuation rows, the
 	// two-space indent removed, FAINT runes dropped, each row right-trimmed,
 	// joined by "\n". "" = empty, or a placeholder only.
-	BoxText   string
-	BoxKey    string // inputKey(BoxText)
-	BoxPastes []int  // N of every `[Pasted text #N` token inside BoxText
-	Insert    bool   // `-- INSERT --` on a row BELOW the box's lower rule
-	Working   bool   // a spinner row (`✻ Verb… (…)`) just above the box's top rule
+	BoxText string
+	BoxKey  string // inputKey(BoxText)
+	// BoxShell: the box's glyph is `!`, bash mode (s7). The `!` that switched
+	// the mode is not in BoxText.
+	BoxShell  bool
+	BoxPastes []int // N of every `[Pasted text #N` token inside BoxText
+	Insert    bool  // `-- INSERT --` on a row BELOW the box's lower rule
+	Working   bool  // a spinner row (`✻ Verb… (…)`) just above the box's top rule
 	// Dialog is "" | permission | question | plan | select | trust | bypass |
 	// api_key | onboarding. Read only when no box is visible, and only inside
 	// the dialog region.
@@ -56,6 +59,9 @@ type promptEntry struct {
 	RenderedKey string
 	Paste       int  // N when Text begins with `[Pasted text #N`; 0 otherwise
 	Queued      bool // the F9 hint row `ctrl+x ctrl+s to send now` followed it
+	// Shell: a bash-mode entry, `! cmd` (s7). Evidence only for a bash-mode
+	// send, and a `❯` entry never is for one (matches).
+	Shell bool
 }
 
 const (
@@ -125,9 +131,13 @@ const (
 	anchorCursorRow                       // a `❯ <option>` row anywhere in the region
 )
 
-// dismissableDialogs are the kinds an Escape DECLINES. Boot dialogs are never
-// among them: Escape on the trust prompt exits Claude.
-var dismissableDialogs = map[string]bool{"permission": true, "question": true, "plan": true, "select": true}
+// dismissableDialogs are the kinds an Escape DECLINES: only the NAMED,
+// measured ones. Boot dialogs are never among them — Escape on the trust
+// prompt exits Claude — and neither is the `select` catch-all, because the
+// boot dialogs carry its very footer: a trust prompt a later Claude rewords
+// falls through to `select`, and Escaping it would end the session instead of
+// declining anything (review M5a). `select` is reported and waited out.
+var dismissableDialogs = map[string]bool{"permission": true, "question": true, "plan": true}
 
 // dismissableWithoutHint are the dismissable kinds whose dialog carries NO
 // `Esc to cancel` row, so the hint cannot be what proves Escape declines them.
@@ -219,21 +229,32 @@ func isBoxRule(r styledRow, cols int) bool {
 	return strings.HasPrefix(r.Text, "─") && isRuleRow(r.Text, cols)
 }
 
-// promptRowBody returns what follows a `❯` at column 0 and one space (or the
-// NBSP Claude writes in the box), skipping that many runes, or ok=false.
-func promptRowStart(r styledRow) (skip int, ok bool) {
-	if !strings.HasPrefix(r.Text, "❯") {
-		return 0, false
+// promptRowStart recognises a prompt row: a `❯` — or, in bash mode, a `!` —
+// at column 0 followed by one space (or the NBSP Claude writes in the box),
+// and returns how many runes to skip to reach the text. shell is true for the
+// `!` glyph.
+//
+// The `!` glyph is measured (s7-bashmode): a `!` typed as the first character
+// of an empty box is CONSUMED as a mode switch and replaces the `❯`, in the box
+// (`!` + NBSP) and in the history entry (`! ` + space). It is never box text.
+func promptRowStart(r styledRow) (skip int, shell, ok bool) {
+	var rest string
+	switch {
+	case strings.HasPrefix(r.Text, "❯"):
+		rest = r.Text[len("❯"):]
+	case strings.HasPrefix(r.Text, "!"):
+		rest, shell = r.Text[1:], true
+	default:
+		return 0, false, false
 	}
-	rest := r.Text[len("❯"):]
 	if rest == "" {
-		return 1, true
+		return 1, shell, true
 	}
 	c, _ := utf8.DecodeRuneInString(rest)
 	if c == ' ' || c == ' ' {
-		return 2, true
+		return 2, shell, true
 	}
-	return 0, false
+	return 0, false, false
 }
 
 // visibleText is r.Text with its first `skip` runes and every FAINT rune
@@ -301,7 +322,8 @@ func parseClaudeScreen(rows []styledRow, cols int) claudeScreen {
 	top, bottom, ok := findBox(rows, cols)
 	if ok {
 		sc.BoxVisible = true
-		skip, _ := promptRowStart(rows[top+1])
+		skip, shell, _ := promptRowStart(rows[top+1])
+		sc.BoxShell = shell
 		sc.BoxText = joinRows(rows[top+1], skip, rows[top+2:bottom])
 		sc.BoxKey = inputKey(sc.BoxText)
 		sc.BoxPastes = pasteNs(sc.BoxText)
@@ -348,7 +370,7 @@ func findBox(rows []styledRow, cols int) (top, bottom int, ok bool) {
 		for j > 0 && (rows[j].Text == "" || strings.HasPrefix(rows[j].Text, "  ")) {
 			j--
 		}
-		if _, isPrompt := promptRowStart(rows[j]); !isPrompt || j == 0 || !isBoxRule(rows[j-1], cols) {
+		if _, _, isPrompt := promptRowStart(rows[j]); !isPrompt || j == 0 || !isBoxRule(rows[j-1], cols) {
 			continue
 		}
 		if boxOptionRe.MatchString(plain(rows[j])) && footerBelow(rows[b+1:]) {
@@ -379,7 +401,7 @@ func footerBelow(rows []styledRow) bool {
 func parsePromptEntries(region []styledRow) []promptEntry {
 	var out []promptEntry
 	for i := 0; i < len(region); i++ {
-		skip, ok := promptRowStart(region[i])
+		skip, shell, ok := promptRowStart(region[i])
 		if !ok || (len(region[i].Faint) > 0 && region[i].Faint[0]) {
 			continue
 		}
@@ -397,7 +419,7 @@ func parsePromptEntries(region []styledRow) []promptEntry {
 			}
 		}
 		text := joinRows(first, skip, region[i+1:j])
-		e := promptEntry{Text: text, Key: inputKey(text), RenderedKey: renderedKey(text), Queued: queued}
+		e := promptEntry{Text: text, Key: inputKey(text), RenderedKey: renderedKey(text), Queued: queued, Shell: shell}
 		if m := pasteTokenRe.FindStringSubmatchIndex(text); m != nil && m[0] == 0 {
 			e.Paste, _ = strconv.Atoi(text[m[2]:m[3]])
 		}

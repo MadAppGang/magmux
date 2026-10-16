@@ -21,6 +21,11 @@ A screen at a label is `raw[0:offset]` replayed through the VT parser into a 100
 | `s4-midturn` | a running turn (4 frames); a queued mid-turn send with its `ctrl+x ctrl+s to send now` hint and the faint `Press up to edit queued messages` placeholder (3 frames); a queued paste-mode send; after both ran |
 | `s5-insert-plan` | vim on: `-- INSERT --` footer (the status line's ` I ` is the user's own); the ExitPlanMode dialog |
 | `s6-markdown` | research F10: a markdown probe in the box (raw) and in history (rendered: `` ` `` `**` `*` `~~` dropped, `_` `[]()` `<b>` `\*` kept); claudish's backticked launch line in both; after it, Claude's faint (SGR 2) suggested next prompt in the box |
+| `s7-bashmode` | bash mode: a `!` typed into the empty box is consumed and becomes the box's glyph (`!` + NBSP, faint `Try "…"` placeholder, footer `! for shell mode`); `! echo BASHMODE-OK` typed; the history entry `! echo BASHMODE-OK` (ordinary space) with its `⎿` output, and the `❯` box back |
+
+Scrubbed before commit, same length so every offset still holds: the session id
+(`session_01` + 22 chars → `X`s), `/Users/<name>/` → `/Users/user/` and `-Users-<name>-` →
+`-Users-user-`.
 
 Derived frames (offsets with no mark, named in `claude_screen_test.go`): Claude ends every
 frame with `ESC[?25h`, so a prefix ending there is a complete frame.

@@ -59,6 +59,39 @@ type sendClassification struct {
 	class SendClass
 	keys  []string // after normalisation: a trailing Enter key moved onto enter
 	enter bool
+	text  string // after normalisation: on a gated pane every CR / CRLF is "\n"
+}
+
+// gatedText is the text a gated send delivers, or why it cannot be delivered.
+//
+// A CR in the text is a NEWLINE, and becomes "\n" (CRLF too). Written raw it
+// would be a keystroke Return in the middle of the instruction: an unverified
+// submit of everything before it, after which the box check sees only the
+// rest and the reply says nothing was submitted (review H1). Normalised, a
+// multi-line auto text takes the bracketed path (query().Paste, rule i), typed
+// mode is unchanged (typedWrites already maps every spelling to one ctrl-j),
+// and inside a bracketed paste a CR was a newline already. So normalising is
+// the meaning the caller wrote, in every mode, and refusing would only turn
+// CRLF text from Windows clients into errors.
+//
+// Every OTHER control rune but tab is refused: ctrl-c interrupts, Escape
+// dismisses a dialog or ends a bracketed paste early, DEL and ctrl-u edit the
+// box. None of them is text the box check could account for, and a send that
+// half-ran cannot be verified.
+func gatedText(idx int, text string) (string, error) {
+	for i, r := range text {
+		if r == '\r' || r == '\n' || r == '\t' {
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			return "", sockErrf(sockCodeBadRequest,
+				"pane %d is gated: the text holds control character %U at byte %d; nothing was sent (send keys for it, or noGate)", idx, r, i)
+		}
+	}
+	if !strings.Contains(text, "\r") {
+		return text, nil
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), nil
 }
 
 // isEnterKey reports whether a key submits: anything whose bytes are Return,
@@ -92,10 +125,14 @@ func printableKey(k string) (rune, bool) {
 // Printable keys alone never make a TYPE (r3 H1): `{"keys":["2"],"enter":false}`
 // answers a numbered dialog deliberately, ungated.
 func classifySend(p *Pane, r sendRequest) (sendClassification, error) {
-	out := sendClassification{keys: r.keys, enter: r.enter}
+	out := sendClassification{keys: r.keys, enter: r.enter, text: r.text}
 	g := inputGateOf(p)
 	if g == nil || r.noGate {
 		return out, nil
+	}
+	text, err := gatedText(r.idx, r.text)
+	if err != nil {
+		return out, err
 	}
 	n := len(r.keys)
 	for i, k := range r.keys {
@@ -127,7 +164,7 @@ func classifySend(p *Pane, r sendRequest) (sendClassification, error) {
 	if cls == ClassKeys {
 		return out, nil
 	}
-	return sendClassification{g: g, gated: true, class: cls, keys: keys, enter: submit}, nil
+	return sendClassification{g: g, gated: true, class: cls, keys: keys, enter: submit, text: text}, nil
 }
 
 // sendReport is what a gated delivery observed, for the reply and the ack.
@@ -289,11 +326,13 @@ func (d *sendDelivery) liveness(typed bool) *protocol.Error {
 // it (R5): only Escape, only when the controller says Escape DECLINES what is
 // showing, at most dismissMax per send and dismissGap apart. It reports
 // whether it pressed.
+//
+// The Escape is a write, so the caller holds the pane's typing token: the
+// step-6 loop already does, and the gate presses only after acquiring it
+// (dismissDue), so an Escape can never land between another delivery's
+// chunks (review M5b).
 func (d *sendDelivery) tryDismiss(r InputReadiness, rep *sendReport) (bool, *protocol.Error) {
-	if !d.dismiss || !r.Dismissable || len(rep.dismissed) >= dismissMax {
-		return false, nil
-	}
-	if !rep.lastEsc.IsZero() && time.Since(rep.lastEsc) < dismissGap {
+	if !d.dismissDue(r, rep) {
 		return false, nil
 	}
 	if !d.p.injectPTY([]byte{0x1b}) {
@@ -305,6 +344,15 @@ func (d *sendDelivery) tryDismiss(r InputReadiness, rep *sendReport) (bool, *pro
 	return true, nil
 }
 
+// dismissDue reports whether tryDismiss would press Escape on r now: asked
+// for, dismissable, under the per-send count and past the gap.
+func (d *sendDelivery) dismissDue(r InputReadiness, rep *sendReport) bool {
+	if !d.dismiss || !r.Dismissable || len(rep.dismissed) >= dismissMax {
+		return false
+	}
+	return rep.lastEsc.IsZero() || time.Since(rep.lastEsc) >= dismissGap
+}
+
 // notReadyErr is the gate's refusal: nothing was typed.
 func (d *sendDelivery) notReadyErr(r InputReadiness, start time.Time) *protocol.Error {
 	return gateErr(protocol.CodeBusy, r.Reason, false,
@@ -312,19 +360,17 @@ func (d *sendDelivery) notReadyErr(r InputReadiness, start time.Time) *protocol.
 		d.idx, r.Reason, r.Detail, time.Since(start).Round(10*time.Millisecond))
 }
 
-// waitReady is step 1, the gate: ask until ready, dismissing what may be
-// dismissed, until deadline. Nothing but Escapes is written here.
+// waitReady is step 1, the gate: ask until ready, or until a dismissal is due,
+// until deadline. It writes NOTHING: a due Escape is pressed by the caller
+// after it holds the typing token (review M5b).
 func (d *sendDelivery) waitReady(ctx context.Context, q ReadinessQuery, start, deadline time.Time, rep *sendReport) error {
 	for {
 		if err := d.liveness(false); err != nil {
 			return err
 		}
 		r := d.g.InputReadiness(q)
-		if r.Ready {
+		if r.Ready || d.dismissDue(r, rep) {
 			return nil
-		}
-		if _, err := d.tryDismiss(r, rep); err != nil {
-			return err
 		}
 		if !time.Now().Before(deadline) {
 			return d.notReadyErr(r, start)
@@ -407,6 +453,12 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		r = d.g.InputReadiness(q)
 		if r.Ready {
 			break
+		}
+		// Not ready: a due Escape is pressed now, with the token held, and
+		// the token is released before waiting for the box to come back.
+		if _, err := d.tryDismiss(r, rep); err != nil {
+			fail(err)
+			return
 		}
 		<-tok
 		held = false

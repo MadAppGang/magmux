@@ -429,7 +429,9 @@ func (m *Magmux) admitSend(r sendRequest) (*sendDelivery, error) {
 	if !cls.gated {
 		notifyInput(p)
 	}
-	return &sendDelivery{m: m, p: p, idx: idx, seq: seq, mode: mode, text: text, keys: keys, enter: enter,
+	// The OUT row and the event above carry the text AS IT ARRIVED; the
+	// delivery types the classified text (a gated send's CRs are newlines).
+	return &sendDelivery{m: m, p: p, idx: idx, seq: seq, mode: mode, text: cls.text, keys: keys, enter: enter,
 		gated: cls.gated, g: cls.g, class: cls.class, dismiss: r.dismiss,
 		readyWait: protocol.ReadyWait(r.readyTimeoutMs)}, nil
 }

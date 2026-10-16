@@ -43,9 +43,12 @@ commit subjects and remain on the
   it failed. `not_accepted` is HTTP 409, and every transport carries `reason`
   and `typed` beside `code`.
 - **`send` takes `dismissDialogs`, `readyTimeoutMs` and `noGate`.**
-  `dismissDialogs` presses Escape on a permission, question, plan or select
-  dialog before typing and again before the Enter. Escape declines, and nothing
-  is ever approved. `readyTimeoutMs` is the readiness deadline (default 10000,
+  `dismissDialogs` presses Escape on a permission, question or plan dialog
+  before typing and again before the Enter. Escape declines, and nothing is
+  ever approved. A `select` dialog (the catch-all for the generic
+  `Enter to confirm · Esc to cancel` footer, which boot dialogs share) and the
+  boot dialogs themselves are never Escaped: Escape on the trust prompt exits
+  Claude. `readyTimeoutMs` is the readiness deadline (default 10000,
   at most 60000). `noGate` gives the ungated behaviour on a gated pane, dialog
   included. The MCP `send_keys` and `send_and_wait` tools take them as
   `dismiss_dialogs`, `ready_timeout_ms` and `no_gate`.
@@ -76,6 +79,20 @@ commit subjects and remain on the
   `enter`/`return` may only be the last key, a final Enter key plus
   `"enter":true` is two Enters, and an unknown key name is refused. All three
   are `bad_request`, before any byte is written.
+- **On a gated pane a CR inside `text` is a newline.** `\r` and `\r\n` become
+  `\n` in every mode, so the only Return a gated send presses is its final,
+  checked Enter; any other control character but tab is `bad_request`. A text
+  starting with `!` (Claude's bash mode) is verified as the mode switch plus
+  the command, and confirmed by its `! command` history entry. Ungated panes
+  get `text` exactly as sent.
+- **`claude` subcommands and `--version`/`--help` are not gated or
+  rewritten.** Like `claude -p`, `claude mcp list`, `claude update`,
+  `claude doctor` and the rest never show an input box, so a launch of one is
+  not a direct Claude pane.
+- **Go API: `protocol.Error` has four fields now (`Code`, `Msg`, `Reason`,
+  `Typed`).** Additive, but a composite literal written WITHOUT field names,
+  `protocol.Error{code, msg}`, no longer compiles. Name the fields, or use
+  `protocol.Errf`.
 - **A caller's timeout no longer cuts a send short.** REST, Firebase and `call`
   used to run a send under the caller's context, so a timeout between chunks
   left half a prompt in the box. The delivery now runs until it finishes, and

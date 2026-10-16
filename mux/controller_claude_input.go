@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -73,6 +74,9 @@ type claudeBaseline struct {
 	// renderedKey of the verified and of the sent text: what a HISTORY entry
 	// is compared with, because Claude renders markdown there (F10).
 	verifiedRendered, sentRendered string
+	// shell: the verified box was in bash mode, so only a `! cmd` entry is
+	// evidence, and a `❯` entry never is (and the reverse for a plain send).
+	shell bool
 }
 
 // notePrompt records a real transcript user entry.
@@ -302,6 +306,9 @@ func (c *ClaudeCodeController) InputAccepted(b AcceptBaseline) AcceptVerdict {
 //	Exact set, anything else non-empty                 mismatch
 //	Exact unset, box non-empty                         verified non_empty
 //	box empty                                          empty
+//
+// In bash mode (BoxShell) Exact must begin with the `!` that switched the
+// mode, and the rows above are judged on the rest; otherwise mismatch.
 func judgeBox(sc claudeScreen, want BoxExpect) (v BoxVerdict, verified string, paste int, detail string) {
 	if sc.BoxText == "" {
 		return BoxEmpty, "", 0, "the input box is empty"
@@ -309,7 +316,19 @@ func judgeBox(sc claudeScreen, want BoxExpect) (v BoxVerdict, verified string, p
 	if want.Exact == "" {
 		return BoxVerified, verifiedNonEmpty, 0, ""
 	}
-	if sc.BoxKey == inputKey(want.Exact) {
+	exact := want.Exact
+	if sc.BoxShell {
+		// Bash mode (s7): the leading `!` was consumed as the mode switch, so
+		// it is compared as the switch and the rest as the text. A shell box
+		// the send did NOT switch into is a mismatch whatever it holds:
+		// submitting it would run a shell command, not send a prompt.
+		rest, switched := strings.CutPrefix(exact, "!")
+		if !switched {
+			return BoxMismatch, "", 0, "the input box is in bash mode (`!`) and the send did not start with `!`"
+		}
+		exact = rest
+	}
+	if sc.BoxKey == inputKey(exact) {
 		return BoxVerified, verifiedExact, 0, ""
 	}
 	if want.Pasted {
@@ -323,7 +342,7 @@ func judgeBox(sc claudeScreen, want BoxExpect) (v BoxVerdict, verified string, p
 		}
 	}
 	return BoxMismatch, "", 0, fmt.Sprintf("the box holds %d of %d non-space runes",
-		utf8.RuneCountInString(sc.BoxKey), utf8.RuneCountInString(inputKey(want.Exact)))
+		utf8.RuneCountInString(sc.BoxKey), utf8.RuneCountInString(inputKey(exact)))
 }
 
 // newAcceptBaseline takes the baseline from the screen the verify read.
@@ -331,14 +350,16 @@ func judgeBox(sc claudeScreen, want BoxExpect) (v BoxVerdict, verified string, p
 // there (Exact), or the box text again when that is undetermined.
 func newAcceptBaseline(sc claudeScreen, verified, sent string, paste int, at time.Time, seq uint64) AcceptBaseline {
 	b := AcceptBaseline{At: at, VerifiedKey: inputKey(verified), SentKey: inputKey(sent), Paste: paste}
-	cd := claudeBaseline{transcriptSeq: seq, verifiedRendered: renderedKey(verified), sentRendered: renderedKey(sent)}
+	cd := claudeBaseline{transcriptSeq: seq, verifiedRendered: renderedKey(verified), sentRendered: renderedKey(sent), shell: sc.BoxShell}
 	b.controllerData = cd // countMatches reads the rendered keys from it
 	cd.matchCount = countMatches(sc.Prompts, b)
 	b.controllerData = cd
 	return b
 }
 
-// matches says whether an entry carries the baselined content:
+// matches says whether an entry carries the baselined content. The entry's
+// kind must be the send's first: a bash-mode (`! cmd`) entry for a send that
+// switched into bash mode, a `❯` entry for any other (s7). Then:
 //
 //   - its key equals the VERIFIED key (what the box showed), or the SENT key.
 //     The second is not in the design's sketch and is what the captures
@@ -355,10 +376,10 @@ func newAcceptBaseline(sc claudeScreen, verified, sent string, paste int, at tim
 //     starts with it (a history row Claude abbreviated; unseen in 2.1.301),
 //     in either form.
 func matches(e promptEntry, b AcceptBaseline) bool {
-	if e.Key == "" {
+	cd, _ := b.controllerData.(claudeBaseline)
+	if e.Key == "" || e.Shell != cd.shell {
 		return false
 	}
-	cd, _ := b.controllerData.(claudeBaseline)
 	if e.Key == b.VerifiedKey || e.Key == b.SentKey ||
 		(e.RenderedKey != "" && (e.RenderedKey == cd.verifiedRendered || e.RenderedKey == cd.sentRendered)) {
 		return true
@@ -502,9 +523,10 @@ func readRegEntry(path string) (regEntry, bool) {
 		return e, false
 	}
 	defer f.Close()
-	buf := make([]byte, regFileMax)
-	n, _ := f.Read(buf)
-	if json.Unmarshal(buf[:n], &e) != nil {
+	// Whole, up to the bound: a short read cannot half-parse, and a file past
+	// regFileMax is cut and fails to unmarshal.
+	b, err := io.ReadAll(io.LimitReader(f, regFileMax))
+	if err != nil || json.Unmarshal(b, &e) != nil {
 		return regEntry{}, false
 	}
 	return e, true

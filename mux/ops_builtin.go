@@ -223,7 +223,7 @@ func (m *Magmux) sendOp() hub.Op {
 			"typed": boolProp("Type the text as keystrokes: short paced runs, every newline as ctrl-j, never bracketed. Exclusive with paste."),
 			"paste": boolProp("Deliver the text as one bracketed paste, even a single line or nothing at all (an empty paste is Cmd+V over a clipboard image). Exclusive with typed."),
 			"label": strProp("Short tag for the panel's OUT row, e.g. \"step 2/5\"."),
-			"dismissDialogs": boolProp("Gated pane: press Escape on a dismissable dialog (permission, question, plan, select) " +
+			"dismissDialogs": boolProp("Gated pane: press Escape on a dismissable dialog (permission, question, plan) " +
 				"before typing and before the Enter. Escape declines; nothing is ever approved."),
 			"readyTimeoutMs": intProp("Gated pane: how long to wait for the input box to be ready, shared by every wait " +
 				"before the Enter. 0 = 10000; above 60000 is clamped."),
@@ -234,7 +234,9 @@ func (m *Magmux) sendOp() hub.Op {
 }
 
 // sendBudgetOf is send's Budget: sendBudget for a gated pane, 0 otherwise. It
-// runs with no hub lock held and takes only treeMu's RLock (paneByID).
+// runs with no hub lock held, takes only treeMu's RLock (paneByID) and cp.mu
+// (peekTargetPane), and has no side effect: it runs before the op on every
+// transport, so anything it recorded would be recorded twice.
 func (m *Magmux) sendBudgetOf(args json.RawMessage) time.Duration {
 	msg, err := opMsg("send", hub.Caller{}, args)
 	if err != nil || msg.NoGate {
@@ -242,7 +244,10 @@ func (m *Magmux) sendBudgetOf(args json.RawMessage) time.Duration {
 	}
 	idx := m.parsePaneIndex(msg.Pane)
 	if idx == paneUnspecified && m.control != nil {
-		if idx, err = m.control.targetPane(); err != nil {
+		// peek, never targetPane: the op itself resolves the pane again and
+		// files the refusal once; a budget is a plan, not a request.
+		var ok bool
+		if idx, ok = m.control.peekTargetPane(); !ok {
 			return 0
 		}
 	}

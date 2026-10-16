@@ -187,7 +187,7 @@ func promptKeys(ps []promptEntry) []string {
 // capture call and the byte offset being taken.
 func TestClaudeCapturesReplayFaithfully(t *testing.T) {
 	norm := func(s string) string { return strings.TrimRight(strings.ReplaceAll(s, "\u00a0", " "), " ") }
-	for _, sc := range []string{"s1-box-history", "s2-permission", "s3-paste", "s4-midturn", "s5-insert-plan", "s6-markdown"} {
+	for _, sc := range []string{"s1-box-history", "s2-permission", "s3-paste", "s4-midturn", "s5-insert-plan", "s6-markdown", "s7-bashmode"} {
 		for _, m := range loadClaudeMarks(t, sc) {
 			got := strings.Split(replayClaude(t, sc, m.Offset, m.Rows, m.Cols).capture(0, false).Text, "\n")
 			want := strings.Split(m.Text, "\n")
@@ -225,7 +225,7 @@ func TestDerivedFramesAreFrameEnds(t *testing.T) {
 // TestTailRowsFaintIsPerRune: one flag per emitted rune, on every row of every
 // capture, and the placeholder's runes are the faint ones.
 func TestTailRowsFaintIsPerRune(t *testing.T) {
-	for _, sc := range []string{"s1-box-history", "s2-permission", "s3-paste", "s4-midturn", "s5-insert-plan", "s6-markdown"} {
+	for _, sc := range []string{"s1-box-history", "s2-permission", "s3-paste", "s4-midturn", "s5-insert-plan", "s6-markdown", "s7-bashmode"} {
 		for _, m := range loadClaudeMarks(t, sc) {
 			for i, r := range replayClaude(t, sc, m.Offset, m.Rows, m.Cols).tailRows(0) {
 				if n := utf8.RuneCountInString(r.Text); n != len(r.Faint) {

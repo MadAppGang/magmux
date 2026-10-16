@@ -71,10 +71,11 @@ type launchInfo struct {
 	// word after the claude word up to the next control operator, minus the
 	// skipped redirections.
 	args []int
-	// print: the invocation carries -p / --print before a bare `--`. Print
-	// mode never shows an input box, so it is never direct.
-	print bool
-	// direct: exactly one command-position claude word, not in print mode.
+	// noBox: the invocation never shows an input box — print mode (-p /
+	// --print), a subcommand (`claude mcp list`, `claude update`), or
+	// --version / --help — so it is never direct (noInputBox).
+	noBox bool
+	// direct: exactly one command-position claude word, and not noBox.
 	direct bool
 }
 
@@ -84,12 +85,14 @@ type launchInfo struct {
 //   - `[-l] -c <s>` under a POSIX-family shell, where the lexer finds exactly
 //     one command-position claude word in <s>.
 //
-// Print mode (-p / --print before a bare `--`) is not direct in either form.
+// An invocation that never shows an input box (noInputBox: print mode, a
+// subcommand, --version / --help) is not direct in either form, so it is
+// neither gated nor rewritten.
 func claudeLaunchOf(cfg PaneConfig) launchInfo {
 	info := launchInfo{claude: -1}
 	if filepath.Base(cfg.Cmd) == claudeWordBase {
-		info.print = printMode(cfg.Args)
-		info.direct = !info.print
+		info.noBox = noInputBox(cfg.Args)
+		info.direct = !info.noBox
 		return info
 	}
 	line, ok := shellLine(cfg)
@@ -130,8 +133,8 @@ func claudeLaunchOf(cfg PaneConfig) launchInfo {
 			vals = append(vals, "") // an expansion is not a flag we can see
 		}
 	}
-	info.print = printMode(vals)
-	info.direct = !info.print
+	info.noBox = noInputBox(vals)
+	info.direct = !info.noBox
 	return info
 }
 
@@ -147,15 +150,50 @@ func shellLine(cfg PaneConfig) (string, bool) {
 	return "", false
 }
 
-// printMode reports -p / --print before a bare `--`.
-func printMode(args []string) bool {
+// claudeSubcommands are Claude Code's subcommands (2.1.301 `claude --help`,
+// plus `config` and `migrate-installer` from earlier releases). None of them
+// is the interactive session with an input box. `attach` does open a session,
+// but one magmux did not launch and has not rewritten, so it is left
+// ungated with the rest: doubt lands on "not direct".
+var claudeSubcommands = map[string]bool{
+	"agents": true, "attach": true, "auth": true, "auto-mode": true, "config": true,
+	"doctor": true, "gateway": true, "import": true, "install": true, "kill": true,
+	"logs": true, "mcp": true, "migrate-installer": true, "plugin": true, "plugins": true,
+	"purge": true, "respawn": true, "rm": true, "setup-token": true, "stop": true,
+	"ultrareview": true, "update": true, "upgrade": true,
+}
+
+// noInputBox reports an invocation that never shows an input box, judged on
+// the arguments before a bare `--`:
+//
+//   - -p / --print, or -v / --version / -h / --help, anywhere;
+//   - a subcommand as the FIRST positional argument. A positional directly
+//     after a `-x` / `--flag` with no `=` may be that flag's value
+//     (`--model opus mcp list`), so the next positional is a candidate too;
+//     the first positional NOT after such a flag ends the search, which is
+//     what keeps `claude fix the doctor script` a prompt.
+//
+// An expansion ("" here) is a positional that names nothing.
+func noInputBox(args []string) bool {
+	afterFlag, searching := false, true
 	for _, a := range args {
 		switch a {
 		case "--":
 			return false
-		case "-p", "--print":
+		case "-p", "--print", "-v", "--version", "-h", "--help":
 			return true
 		}
+		if strings.HasPrefix(a, "-") && a != "-" {
+			afterFlag = !strings.Contains(a, "=")
+			continue
+		}
+		if searching && claudeSubcommands[a] {
+			return true
+		}
+		if !afterFlag {
+			searching = false
+		}
+		afterFlag = false
 	}
 	return false
 }
@@ -500,6 +538,9 @@ func skipNested(s string, i int, open, close byte) (int, error) {
 	for i < len(s) {
 		switch c := s[i]; {
 		case c == '\\':
+			if i+1 >= len(s) { // a trailing backslash: readWord's rule
+				return 0, errUnparsed
+			}
 			i += 2
 			continue
 		case c == '\'':

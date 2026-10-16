@@ -110,7 +110,7 @@ func sessionProp() map[string]any {
 // are ignored.
 func dismissDialogsProp() map[string]any {
 	return boolProp("Gated Claude pane: press Escape on a dismissable dialog (permission, question, " +
-		"plan, select) before typing and before Enter. Escape declines; nothing is ever approved. Default: false.")
+		"plan) before typing and before Enter. Escape declines; nothing is ever approved. Default: false.")
 }
 
 func readyTimeoutProp() map[string]any {
