@@ -55,6 +55,7 @@ const (
 	sockCodeNoController  = protocol.CodeNoController
 	sockCodeNoTranscript  = protocol.CodeNoTranscript
 	sockCodePluginGone    = protocol.CodePluginGone
+	sockCodeNotAccepted   = protocol.CodeNotAccepted
 )
 
 // sockVerbs and sockEvents are what `capabilities` advertises. Maintained by
@@ -130,6 +131,14 @@ func (m *Magmux) replyBytes(id json.RawMessage, result map[string]any, err error
 		var se *sockErr
 		if errors.As(err, &se) {
 			code = se.Code
+			// The reason and the typed flag ride beside the code, and only
+			// when set: a failure without them is the line it always was.
+			if se.Reason != "" {
+				reply["reason"] = se.Reason
+			}
+			if se.Typed {
+				reply["typed"] = true
+			}
 		}
 		reply["code"] = code
 		reply["error"] = err.Error()

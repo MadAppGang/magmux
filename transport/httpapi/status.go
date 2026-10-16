@@ -21,7 +21,8 @@ import (
 //     unsupported is 501, because that one means magmux has no such FEATURE.
 //   - 409 for the whole family of "the pane is real but not in a state that can
 //     serve this" — dead, hidden, the control panel, no controller, no
-//     transcript. They are conflicts with current state, not bad requests: the
+//     transcript — and not_accepted, where the input box did not take what
+//     was typed. They are conflicts with current state, not bad requests: the
 //     same bytes would have worked a moment ago or will work later.
 //   - 502 for plugin_gone. magmux is the gateway and the plugin is the upstream.
 //   - 503 for not_ready, with the layout still being built, which is exactly
@@ -40,7 +41,7 @@ func StatusFor(code string) int {
 	case protocol.CodeNoSuchPane, protocol.CodeUnknownVerb:
 		return http.StatusNotFound
 	case protocol.CodePaneDead, protocol.CodePaneIsControl, protocol.CodePaneHidden,
-		protocol.CodeNoController, protocol.CodeNoTranscript:
+		protocol.CodeNoController, protocol.CodeNoTranscript, protocol.CodeNotAccepted:
 		return http.StatusConflict
 	case protocol.CodeTooLarge:
 		return http.StatusRequestEntityTooLarge
@@ -84,20 +85,30 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // resource is unavailable and the caller has done nothing wrong, which is 503
 // with Retry-After.
 func writeErrStatus(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, map[string]any{
-		"ok": false, "code": protocol.CodeOf(err), "error": err.Error(),
-	})
+	writeJSON(w, status, errBody(protocol.CodeOf(err), err))
 }
 
 // writeErr answers with magmux's failure shape, at the status its code maps to.
 //
 // The body always carries BOTH the code and the message: the status is a coarse
-// class that several codes share (409 covers five of them), and a client that
+// class that several codes share (409 covers six of them), and a client that
 // branched on the status alone could not tell "the pane is dead" from "the pane
 // is the control panel".
 func writeErr(w http.ResponseWriter, err error) {
 	code := protocol.CodeOf(err)
-	writeJSON(w, StatusFor(code), map[string]any{
-		"ok": false, "code": code, "error": err.Error(),
-	})
+	writeJSON(w, StatusFor(code), errBody(code, err))
+}
+
+// errBody is magmux's failure shape: ok, code and error, plus the reason and
+// the typed flag when the error carries them. They are added only when set, so
+// a failure without them has exactly the body it always had.
+func errBody(code string, err error) map[string]any {
+	body := map[string]any{"ok": false, "code": code, "error": err.Error()}
+	if r := protocol.ReasonOf(err); r != "" {
+		body["reason"] = r
+	}
+	if protocol.TypedOf(err) {
+		body["typed"] = true
+	}
+	return body
 }

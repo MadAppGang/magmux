@@ -124,7 +124,7 @@ func (s *Sub) Deliver(pane int, item LaneItem) error {
 		case pushOK:
 			return nil
 		case pushFull:
-			return protocol.Errf(protocol.CodeBusy,
+			return protocol.Errr(protocol.CodeBusy, protocol.ReasonQueueFull,
 				"pane %d already has %d requests queued on this connection", pane, laneMaxItems)
 		case pushRefused:
 			return protocol.Errf(protocol.CodeNotReady,
@@ -133,7 +133,7 @@ func (s *Sub) Deliver(pane int, item LaneItem) error {
 			s.dropLane(pane, l)
 		}
 	}
-	return protocol.Errf(protocol.CodeBusy, "pane %d's lane could not be opened", pane)
+	return protocol.Errr(protocol.CodeBusy, protocol.ReasonQueueFull, "pane %d's lane could not be opened", pane)
 }
 
 // laneFor returns this Sub's lane for a pane, creating it if there is none.

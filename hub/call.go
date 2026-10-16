@@ -148,7 +148,7 @@ func (s *Sub) Call(ctx context.Context, op string, args json.RawMessage, reply R
 	}
 
 	if !s.takeCallSlot() {
-		a.send(nil, protocol.Errf(protocol.CodeBusy,
+		a.send(nil, protocol.Errr(protocol.CodeBusy, protocol.ReasonInFlight,
 			"this connection already has %d requests running", maxInFlightCalls))
 		return
 	}

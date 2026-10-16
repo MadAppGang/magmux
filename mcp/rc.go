@@ -735,6 +735,11 @@ func (s *mcpServer) callDynamicTool(req rpcRequest, name string, raw json.RawMes
 		if code == "" {
 			code = "error"
 		}
+		// The reason, when there is one, is the half a model can act on:
+		// "busy" alone does not say whether to wait or to stop.
+		if r := protocol.ReasonOf(err); r != "" {
+			code += "/" + r
+		}
 		s.respond(req.ID, toolResultError("%s failed (%s): %v", name, code, err))
 		return
 	}

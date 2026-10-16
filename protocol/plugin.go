@@ -125,7 +125,11 @@ type InvokeResult struct {
 	OK     bool            `json:"ok"`
 	Result map[string]any  `json:"result,omitempty"`
 	Code   string          `json:"code,omitempty"`
-	Error  string          `json:"error,omitempty"`
+	// Reason is the optional sub-code (reasons.go), carried to the caller as
+	// Error.Reason. There is deliberately no Typed: that is magmux's own claim
+	// about its own PTY writes, and no plugin is in a position to make it.
+	Reason string `json:"reason,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 // PluginEvent is a plugin telling every subscriber something happened. It must

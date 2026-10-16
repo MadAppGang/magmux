@@ -334,6 +334,9 @@ func TestInFlightCapAnswersBusy(t *testing.T) {
 	if protocol.CodeOf(err) != protocol.CodeBusy {
 		t.Errorf("the %dth call failed with %v, want busy", MaxInFlight+1, err)
 	}
+	if r := protocol.ReasonOf(err); r != protocol.ReasonInFlight {
+		t.Errorf("the plugin's in-flight cap carries reason %q, want %q", r, protocol.ReasonInFlight)
+	}
 	cancel()
 	wg.Wait()
 }
@@ -448,5 +451,54 @@ func TestBudgetOfClampsAndDefaults(t *testing.T) {
 	if got := budgetOf(ctx2); got <= 0 {
 		t.Errorf("an expired deadline gave %v; it must still be positive so the invoke goes "+
 			"out and is cancelled rather than refused by arithmetic", got)
+	}
+}
+
+// TestPluginRoutedErrorKeepsItsReason: a plugin's invoke_result reason reaches
+// the caller of its op, and the host's own reply lines carry reason and typed
+// exactly as the socket's do. A plugin's in-flight cap is a reasoned busy.
+func TestPluginRoutedErrorKeepsItsReason(t *testing.T) {
+	b := newBus(t)
+	h := newTestHost(t, b)
+	f := newFakeConn(t, h, "sock#1")
+	f.handle(registerMsg("ticket", nil))
+	replyTo(f, float64(1))
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := h.cfg.Hub.Call(context.Background(), hub.Caller{}, "ticket.work", nil)
+		errc <- err
+	}()
+	inv := f.await("the invoke", func(m map[string]any) bool { return m["type"] == protocol.MsgInvoke })
+	f.handle(map[string]any{
+		"type": protocol.MsgInvokeResult, "call": inv["call"], "ok": false,
+		"code": protocol.CodeBusy, "reason": protocol.ReasonTypingInProgress, "error": "held",
+	})
+	err := <-errc
+	if protocol.CodeOf(err) != protocol.CodeBusy || protocol.ReasonOf(err) != protocol.ReasonTypingInProgress {
+		t.Errorf("plugin-routed error = %v (code %q, reason %q), want busy/typing_in_progress",
+			err, protocol.CodeOf(err), protocol.ReasonOf(err))
+	}
+	if protocol.TypedOf(err) {
+		t.Error("a plugin's error claimed typed; only magmux's own delivery may say so")
+	}
+
+	var reply map[string]any
+	line := replyBytes([]byte(`7`), nil, &protocol.Error{Code: protocol.CodeNotAccepted, Msg: "m",
+		Reason: protocol.ReasonEmptyBox, Typed: true})
+	if err := json.Unmarshal(line, &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply["reason"] != protocol.ReasonEmptyBox || reply["typed"] != true {
+		t.Errorf("host reply = %v, want reason and typed", reply)
+	}
+	reply = nil
+	if err := json.Unmarshal(replyBytes([]byte(`8`), nil, protocol.Errf(protocol.CodePaneDead, "x")), &reply); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"reason", "typed"} {
+		if _, ok := reply[k]; ok {
+			t.Errorf("a host reply with no %s carries the key: %v", k, reply)
+		}
 	}
 }

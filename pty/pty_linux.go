@@ -51,3 +51,7 @@ func Open() (master *os.File, slave *os.File, err error) {
 
 	return master, slave, nil
 }
+
+// ioctlReadTermios reads a terminal's termios (tcgetattr). Untyped, so the
+// darwin and linux values share one call site in termios.go.
+const ioctlReadTermios = unix.TCGETS

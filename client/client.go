@@ -181,6 +181,8 @@ type mcpReply struct {
 	Result map[string]any  `json:"result,omitempty"`
 	Error  string          `json:"error,omitempty"`
 	Code   string          `json:"code,omitempty"`
+	Reason string          `json:"reason,omitempty"`
+	Typed  bool            `json:"typed,omitempty"`
 }
 
 // sockRequestError is a structured failure reported by magmux itself. The code
@@ -190,6 +192,10 @@ type mcpReply struct {
 type sockRequestError struct {
 	Code string
 	Msg  string
+	// Reason and Typed are carried for protocol.ReasonOf and protocol.TypedOf,
+	// and are deliberately not in Error's wording, which is unchanged.
+	Reason string
+	Typed  bool
 }
 
 func (e *sockRequestError) Error() string {
@@ -205,7 +211,9 @@ func (e *sockRequestError) Error() string {
 // Unwrap exposes the failure as the protocol.Error magmux sent, so
 // protocol.CodeOf reads its code. Error keeps its own wording, with the code
 // beside the message, because that is what the model is shown.
-func (e *sockRequestError) Unwrap() error { return &protocol.Error{Code: e.Code, Msg: e.Msg} }
+func (e *sockRequestError) Unwrap() error {
+	return &protocol.Error{Code: e.Code, Msg: e.Msg, Reason: e.Reason, Typed: e.Typed}
+}
 
 // sockTimeoutError is "our own timer fired and magmux said nothing". It is a
 // type rather than a formatted string because it is the ONE failure that says
@@ -962,7 +970,7 @@ func (s *Session) requestRaw(ctx context.Context, msg map[string]any, timeout ti
 	select {
 	case r := <-ch:
 		if !r.OK {
-			return r.Result, &sockRequestError{Code: r.Code, Msg: r.Error}
+			return r.Result, &sockRequestError{Code: r.Code, Msg: r.Error, Reason: r.Reason, Typed: r.Typed}
 		}
 		return r.Result, nil
 	case <-ctx.Done():

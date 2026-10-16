@@ -60,13 +60,17 @@ func newFixture(t *testing.T, opts ...func(*Config)) *fixture {
 		{Spec: protocol.OpSpec{Name: "input", Class: protocol.ClassInput}, Fn: record("input")},
 		{Spec: protocol.OpSpec{Name: "boom", Class: protocol.ClassRead}, Fn: func(ctx context.Context, c hub.Caller, args json.RawMessage) (map[string]any, error) {
 			var a struct {
-				Code string `json:"code"`
+				Code   string `json:"code"`
+				Reason string `json:"reason"`
+				Typed  bool   `json:"typed"`
 			}
 			_ = json.Unmarshal(args, &a)
 			if a.Code == "" {
 				a.Code = protocol.CodeInternal
 			}
-			return nil, protocol.Errf(a.Code, "deliberate %s", a.Code)
+			e := protocol.Errr(a.Code, a.Reason, "deliberate %s", a.Code)
+			e.Typed = a.Typed
+			return nil, e
 		}},
 	}
 	if err := h.Register(protocol.SourceBuiltin, ops...); err != nil {
@@ -579,6 +583,7 @@ func TestCodeToStatusMap(t *testing.T) {
 		protocol.CodePaneHidden:    409,
 		protocol.CodeNoController:  409,
 		protocol.CodeNoTranscript:  409,
+		protocol.CodeNotAccepted:   409,
 		protocol.CodeTooLarge:      413,
 		protocol.CodeBusy:          429,
 		protocol.CodeUnsupported:   501,
@@ -607,7 +612,7 @@ func TestCodeToStatusMap(t *testing.T) {
 		got := decode(t, resp)
 		if got["ok"] != false || got["code"] != code {
 			t.Errorf("%q: body = %v; the code must survive beside the status, "+
-				"because five codes share 409", code, got)
+				"because six codes share 409", code, got)
 		}
 	}
 

@@ -198,6 +198,12 @@ func applyWatchSpec(sub *hub.Sub, spec string, fps int) {
 // aggregate like everything else.
 func errorEvent(pane int, err error) []byte {
 	ev := map[string]any{"type": "error", "code": protocol.CodeOf(err), "error": err.Error()}
+	if r := protocol.ReasonOf(err); r != "" {
+		ev["reason"] = r
+	}
+	if protocol.TypedOf(err) {
+		ev["typed"] = true
+	}
 	if pane > 0 {
 		ev["pane"] = pane
 	}

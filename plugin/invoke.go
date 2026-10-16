@@ -134,7 +134,9 @@ func resultOf(name, op string, res protocol.InvokeResult) (map[string]any, error
 	if msg == "" {
 		msg = fmt.Sprintf("plugin op %s failed and reported no reason", protocol.QualifiedOp(name, op))
 	}
-	return res.Result, &protocol.Error{Code: code, Msg: msg}
+	// Typed is never set from a plugin: it is magmux's claim about its own PTY
+	// writes, and InvokeResult has no field for a plugin to make it with.
+	return res.Result, &protocol.Error{Code: code, Msg: msg, Reason: res.Reason}
 }
 
 // begin reserves a call slot and returns its id and answer channel.
@@ -146,7 +148,7 @@ func (p *plug) begin() (string, chan protocol.InvokeResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(p.calls) >= MaxInFlight {
-		return "", nil, protocol.Errf(protocol.CodeBusy,
+		return "", nil, protocol.Errr(protocol.CodeBusy, protocol.ReasonInFlight,
 			"plugin %q already has %d invocations in flight", p.name, MaxInFlight)
 	}
 	// Buffered: deliver must never block on a caller that has already given up,

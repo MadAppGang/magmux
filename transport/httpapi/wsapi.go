@@ -370,6 +370,12 @@ func replyBytes(id json.RawMessage, result map[string]any, err error) []byte {
 	case err != nil:
 		reply["code"] = protocol.CodeOf(err)
 		reply["error"] = err.Error()
+		if r := protocol.ReasonOf(err); r != "" {
+			reply["reason"] = r
+		}
+		if protocol.TypedOf(err) {
+			reply["typed"] = true
+		}
 	case result != nil:
 		reply["result"] = result
 	}

@@ -370,3 +370,52 @@ func TestNewPluginRefusesWhatMagmuxWould(t *testing.T) {
 		t.Errorf("the environment was not used: %+v", p.cfg)
 	}
 }
+
+// TestPluginSDKAnswerCarriesReason: a handler's reasoned error reaches magmux
+// as invoke_result's reason. typed is never sent: it is magmux's own claim
+// about its own PTY writes, and no plugin is in a position to make it.
+func TestPluginSDKAnswerCarriesReason(t *testing.T) {
+	f := startFakeMux(t)
+	p, err := NewPlugin(PluginConfig{
+		Name: "ticket", Version: "0.1.0", Sock: f.path, Token: "a-token",
+		Ops: []PluginOp{{
+			Name: "busy", Description: "always busy", Class: protocol.ClassRead,
+			Handler: func(context.Context, Invocation) (map[string]any, error) {
+				return nil, &protocol.Error{Code: protocol.CodeBusy, Msg: "held",
+					Reason: protocol.ReasonTypingInProgress, Typed: true}
+			},
+		}, {
+			Name: "plain", Description: "fails plainly", Class: protocol.ClassRead,
+			Handler: func(context.Context, Invocation) (map[string]any, error) {
+				return nil, protocol.Errf(protocol.CodeNoSuchPane, "no")
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Connect(context.Background()); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer p.Close()
+	f.awaitType(protocol.MsgPluginRegister)
+
+	f.send(map[string]any{"type": protocol.MsgInvoke, "call": "r1", "op": "busy", "caller": map[string]any{}})
+	res := f.await("the busy result", func(m map[string]any) bool {
+		return m["type"] == protocol.MsgInvokeResult && m["call"] == "r1"
+	})
+	if res["code"] != protocol.CodeBusy || res["reason"] != protocol.ReasonTypingInProgress {
+		t.Errorf("invoke_result = %v, want code and reason", res)
+	}
+	if _, ok := res["typed"]; ok {
+		t.Errorf("a plugin's invoke_result carried typed: %v", res)
+	}
+
+	f.send(map[string]any{"type": protocol.MsgInvoke, "call": "r2", "op": "plain", "caller": map[string]any{}})
+	res = f.await("the plain result", func(m map[string]any) bool {
+		return m["type"] == protocol.MsgInvokeResult && m["call"] == "r2"
+	})
+	if _, ok := res["reason"]; ok {
+		t.Errorf("an error with no reason carried the key: %v", res)
+	}
+}
