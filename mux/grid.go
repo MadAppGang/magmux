@@ -5,11 +5,28 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 )
 
+// withSockDir returns a copy of cmds with every empty SockDir filled from
+// m.socketDir(), so a pane's settings directory follows THIS magmux's socket
+// directory rather than the package global. Every builder runs its commands
+// through it; OpenPane does the same for its one config.
+func (m *Magmux) withSockDir(cmds []PaneConfig) []PaneConfig {
+	out := slices.Clone(cmds)
+	dir := m.socketDir()
+	for i := range out {
+		if out[i].SockDir == "" {
+			out[i].SockDir = dir
+		}
+	}
+	return out
+}
+
 func (m *Magmux) buildLayout(commands []PaneConfig) error {
+	commands = m.withSockDir(commands)
 	statusH := m.statusRowsLocked()
 	availH := m.rows - statusH
 
@@ -203,6 +220,7 @@ func buildColumn(cmds []PaneConfig, y, x, h, w int, spec layoutSpec) (*Pane, []*
 
 // buildGrid creates a balanced 2-column grid layout from a list of commands.
 func (m *Magmux) buildGrid(commands []PaneConfig) error {
+	commands = m.withSockDir(commands)
 	statusH := m.statusRowsLocked()
 	availH := m.rows - statusH
 

@@ -90,8 +90,12 @@ type sockMsg struct {
 	// make the CALLING PLUGIN the new pane's controller, so the plugin's own
 	// `controller.snapshot` messages become that pane's state.
 	//
-	// It takes only "self". A caller that wrote "plugin:ticket" would be naming
-	// an identity rather than claiming one, and identity on this socket comes
+	// It also takes "claude-code", which names a tool rather than an identity
+	// and grants nothing: the new pane gets the Claude controller and the
+	// input gate whatever its command is (resolveOpenPaneController).
+	//
+	// Nothing else. A caller that wrote "plugin:ticket" would be naming an
+	// identity rather than claiming one, and identity on this socket comes
 	// from the connection's registration and from nowhere else — so any other
 	// value is bad_request, including the correct name of the plugin actually
 	// asking.

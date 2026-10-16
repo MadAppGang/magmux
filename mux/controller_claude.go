@@ -140,11 +140,8 @@ func encodeProjectDir(cwd string) string {
 //	["zsh", "-l", "-c", `cd /foo && claude 'list files'`]
 //	["claude", "say", "hi"]  (unlikely but possible)
 func extractClaudePrompt(p *Pane) string {
-	if p.cmd == nil {
-		return ""
-	}
-	// Walk cmd.Args looking for a claude invocation with a quoted prompt.
-	for _, arg := range p.cmd.Args {
+	// Walk the launch looking for a claude invocation with a quoted prompt.
+	for _, arg := range launchArgs(p) {
 		if !strings.Contains(arg, "claude") {
 			continue
 		}
@@ -223,15 +220,56 @@ func extractClaudePrompt(p *Pane) string {
 	return ""
 }
 
-func (c *ClaudeCodeController) Name() string { return "claude-code" }
+// launchArgs is what the prompt and cwd extractors read: the pane's original
+// launch line when newPane recorded one, else cmd.Args as they always did.
+// For a shell launch the two give the same answer — cmd.Args is
+// [shell, -l, -c, line] and only the line can mention claude — so the
+// editor-mode rewrite can change what is exec'd without moving discovery, and
+// a struct-literal pane with no launchLine behaves exactly as before.
+func launchArgs(p *Pane) []string {
+	switch {
+	case p == nil:
+		return nil
+	case p.launchLine != "":
+		return []string{p.launchLine}
+	case p.cmd != nil:
+		return p.cmd.Args
+	}
+	return nil
+}
+
+func (c *ClaudeCodeController) Name() string { return claudeCodeName }
 
 func (c *ClaudeCodeController) Start(ctx context.Context) error {
 	if c.spawnedAt.IsZero() {
 		c.spawnedAt = time.Now()
 	}
-	// The readiness half first: it cannot fail, so a gated pane has a working
-	// gate even when the transcript half below gives up (os.UserHomeDir).
+	c.snap.State = CtrlStarting
+	// The Start split. The readiness half first, and it cannot fail, so a
+	// gated pane has a working gate whatever the transcript half does.
 	c.startTTYWatch()
+	err := c.startTranscript()
+	if err == nil {
+		return nil
+	}
+	if dbgFile != nil {
+		fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p transcript discovery unavailable: %v\n", c.pane, err)
+	}
+	if inputGateOf(c.pane) != nil {
+		// A GATED pane keeps its controller with transcript discovery dormant
+		// (projectDir stays "", so pollTranscript is a no-op). Returning the
+		// error would make attachController drop the controller, and with it
+		// the gate: a declared pane would silently become ungated.
+		return nil
+	}
+	// An observed-only pane is exactly as before: no transcript, no controller.
+	return err
+}
+
+// startTranscript is Start's transcript half: where claude runs, and therefore
+// which ~/.claude/projects directory to tail. Its one failure is
+// os.UserHomeDir, which leaves discovery with nowhere to look.
+func (c *ClaudeCodeController) startTranscript() error {
 	// Resolve cwd, in descending order of how directly it states where claude
 	// will actually run:
 	//
@@ -260,7 +298,6 @@ func (c *ClaudeCodeController) Start(ctx context.Context) error {
 	}
 	c.projectsDir = filepath.Join(home, ".claude", "projects")
 	c.projectDir = filepath.Join(c.projectsDir, encodeProjectDir(c.cwd))
-	c.snap.State = CtrlStarting
 	if dbgFile != nil {
 		fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p cwd=%q projectDir=%q exists=%v wantPrompt=%q\n",
 			c.pane, c.cwd, c.projectDir, dirExists(c.projectDir), c.wantPrompt)
@@ -279,10 +316,7 @@ func dirExists(path string) bool {
 // (we cannot resolve it reliably against the shell's own state), or when the
 // directory does not exist.
 func extractClaudeCwd(p *Pane) string {
-	if p == nil || p.cmd == nil {
-		return ""
-	}
-	for _, arg := range p.cmd.Args {
+	for _, arg := range launchArgs(p) {
 		idx := strings.Index(arg, "cd ")
 		if idx != 0 && !(idx > 0 && (arg[idx-1] == ' ' || arg[idx-1] == ';')) {
 			continue

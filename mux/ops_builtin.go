@@ -133,6 +133,14 @@ func (m *Magmux) builtinOps() []hub.Op {
 				"split":  strProp("auto | horizontal | vertical."),
 				"ratio":  map[string]any{"type": "number", "description": "First half's share of the space. 0 means half."},
 				"focus":  boolProp("Move the keyboard to the new pane."),
+				// An enum of ONE: "self" is a plugin connection's word and no
+				// op caller is one, so it is not advertised here.
+				"controller": map[string]any{
+					"type": "string",
+					"enum": []any{claudeCodeName},
+					"description": "Declare the pane a Claude Code pane whatever `cmd` is (e.g. a wrapper " +
+						"that execs claude itself): it gets the Claude controller and its input is gated.",
+				},
 			}, "cmd")),
 
 		m.op("close_pane", protocol.ClassControl,

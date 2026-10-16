@@ -58,6 +58,13 @@ func Main(args []string) int {
 			fmt.Println("            `list`, `results` and live `snapshot` events, so a client can")
 			fmt.Println("            address panes by name instead of by index. Ignored with a")
 			fmt.Println("            message if no -e precedes it, and dropped by -g.")
+			fmt.Println("  --controller NAME  Declare every -e and -g pane a NAME pane, whatever its")
+			fmt.Println("            command is (never the control panel). The one NAME is claude-code:")
+			fmt.Println("            the pane gets the Claude controller and its input is gated, which")
+			fmt.Println("            is how a wrapper that runs claude itself (claudish) is driven")
+			fmt.Println("            safely. Anywhere on the line; the last one wins. A grid that")
+			fmt.Println("            mixes shells with Claude panes gates the shells too: declare per")
+			fmt.Println("            pane with open_pane {\"controller\":\"claude-code\"} instead.")
 			fmt.Println("  -w        Auto-exit when all panes are done (dead or idle)")
 			fmt.Println("            Needs at least one -e/-g pane. `magmux -w` with no command runs")
 			fmt.Println("            the default shell layout and never auto-exits, and so does")
@@ -259,8 +266,23 @@ func Main(args []string) int {
 	var remoteOpts remoteOptions
 	var pluginCmds []string
 	var firebaseArg string
+	var controllerArg string
+	controllerSet := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--controller":
+			// Recorded only, and position-independent like -w: claudish puts
+			// it before -e, and it applies to every -e/-g pane whichever side
+			// of them it sits. Validated after the loop, so a repeated flag is
+			// judged on the value that wins. A trailing flag with no value is
+			// recorded as "" and refused as an unknown controller, rather than
+			// silently doing nothing like a valueless -e does.
+			controllerSet = true
+			controllerArg = ""
+			if i+1 < len(args) {
+				i++
+				controllerArg = args[i]
+			}
 		case "--firebase":
 			if i+1 < len(args) {
 				i++
@@ -502,6 +524,16 @@ func Main(args []string) int {
 			{Cmd: shell, Args: []string{"-l"}},
 			{Cmd: shell, Args: []string{"-l"}},
 			{Cmd: shell, Args: []string{"-l"}},
+		}
+	}
+
+	// --controller, decided here: after the commands exist and before
+	// anything has been written, bound or spawned, so a refusal is a plain
+	// line on a normal terminal and an exit with nothing to clean up.
+	if controllerSet {
+		if err := applyControllerFlag(commands, controllerArg, gridFile != "" || len(customCmds) > 0); err != nil {
+			fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
+			os.Exit(1)
 		}
 	}
 
@@ -770,6 +802,30 @@ func Main(args []string) int {
 
 	mux.cleanup()
 	return 0
+}
+
+// applyControllerFlag carries a --controller value onto every -e/-g pane's
+// PaneConfig.Controller, which every builder copies through newPaneFor. It is
+// called only when the flag was given. The control panel is never declared:
+// it has no process, let alone a Claude one.
+//
+// Two refusals, both fatal: a value that is not a known controller, and a
+// flag with no -e/-g pane to apply to (`magmux --controller claude-code`, or
+// with only -c) — a flag that silently does nothing is the failure this repo
+// keeps refusing.
+func applyControllerFlag(commands []PaneConfig, name string, haveSessions bool) error {
+	if name != claudeCodeName {
+		return fmt.Errorf("unknown controller %q (known: %s)", name, knownControllers)
+	}
+	if !haveSessions {
+		return fmt.Errorf("--controller applies to -e/-g panes and there are none")
+	}
+	for i := range commands {
+		if !commands[i].Control {
+			commands[i].Controller = name
+		}
+	}
+	return nil
 }
 
 // Suppress unused import warning
