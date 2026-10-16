@@ -11,6 +11,97 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+### Added
+
+- **A `send` into a Claude Code pane waits until Claude can take it, and says
+  whether it did.** Such a pane is *gated*: `list` and `results` show it as
+  `gateBasis` (`direct` for a `claude …` launch, `declared` for
+  `--controller`). A gated send types nothing until the input box is on screen,
+  the terminal has been raw and still for a second, no dialog is showing, the
+  box is empty and vim mode is off. It presses Enter only once the box holds
+  exactly what was typed, and it answers ok only when a new user-prompt entry or
+  transcript entry carrying that text appears. The ok reply adds `waitedMs`,
+  `verified` (`exact`, `paste_token` or `non_empty`), `accept` (`confirmed`,
+  `resent_enter`, or `in_box` for a send with no Enter) and `evidence`
+  (`history` or `transcript`). Typing while Claude is working is allowed:
+  Claude queues it, and the queued entry is the evidence. Sends to every other
+  pane are byte-identical to before, reply included.
+- **`--controller claude-code` declares every `-e` and `-g` pane a Claude Code
+  pane, whatever command starts it.** This is how a wrapper that runs `claude`
+  itself, such as claudish, gets the gate. `open_pane` takes
+  `"controller":"claude-code"` for the same thing, one pane at a time. A grid
+  that mixes shells with Claude panes should declare per pane, because the flag
+  gates the shells as well.
+- **`busy` carries a `reason`, and a new code, `not_accepted`, says the box did
+  not take what was typed.** The busy reasons are `starting`,
+  `terminal_not_ready`, `no_input_box`, `box_not_empty`, `vim_mode`,
+  `dialog:<kind>` (permission, question, plan, select, trust, bypass, api_key,
+  onboarding) and `typing_in_progress`. The hub's own `busy` errors now carry
+  `queue_full` or `in_flight`. The not_accepted reasons are `text_mismatch`
+  and `empty_box` (Enter was not pressed) and `still_in_box` and `unconfirmed`
+  (it was). `"typed":true` on an error means bytes had reached the pane before
+  it failed. `not_accepted` is HTTP 409, and every transport carries `reason`
+  and `typed` beside `code`.
+- **`send` takes `dismissDialogs`, `readyTimeoutMs` and `noGate`.**
+  `dismissDialogs` presses Escape on a permission, question, plan or select
+  dialog before typing and again before the Enter. Escape declines, and nothing
+  is ever approved. `readyTimeoutMs` is the readiness deadline (default 10000,
+  at most 60000). `noGate` gives the ungated behaviour on a gated pane, dialog
+  included. The MCP `send_keys` and `send_and_wait` tools take them as
+  `dismiss_dialogs`, `ready_timeout_ms` and `no_gate`.
+- **`list` and `results` show the gate's view of a gated pane:** `input`
+  (`ready`, `reason`, `detail`, refreshed four times a second, advisory),
+  `gateBasis`, and `editorOverride` (below).
+- **Go: `client.Session.SendWith` and `client.SendOptions`**, which wait as
+  long as the send can take; `protocol.ReasonOf`, `protocol.TypedOf`,
+  `protocol.SendBudget`, and the `protocol.Reason*` constants.
+
+### Changed
+
+- **Claude panes that magmux launches directly run in normal editor mode,
+  interactive ones included.** Under vim mode the box starts in INSERT and a
+  stray keystroke is a command, so magmux adds `--settings='{"editorMode":"normal"}'`
+  to a direct `claude` launch, or merges `editorMode` into the caller's own
+  `--settings` and keeps every other key. A settings FILE is merged into a
+  private copy (`{sock-dir}/magmux-settings-<euid>/`, mode 0600), which is
+  removed when the child is reaped. `editorOverride` reports `added`, `merged`,
+  `merged_file`, `unparsed` (a rewrite that was not provably safe, so the
+  command runs unchanged) or `delegated` (a declared wrapper must do it
+  itself). The `cmd` that `list` and `results` report is the rewritten one. If
+  `-- INSERT --` shows anyway, every gated send is refused `busy`/`vim_mode`.
+- **On a gated pane, the default `enter` no longer reaches a dialog.**
+  `{"keys":["2"]}` submits, because `enter` defaults to true, so while a dialog
+  shows it is refused `busy`/`dialog:<kind>`. Answer a menu with
+  `{"keys":["2"],"enter":false}`, which is never gated, or with `noGate`.
+  `enter`/`return` may only be the last key, a final Enter key plus
+  `"enter":true` is two Enters, and an unknown key name is refused. All three
+  are `bad_request`, before any byte is written.
+- **A caller's timeout no longer cuts a send short.** REST, Firebase and `call`
+  used to run a send under the caller's context, so a timeout between chunks
+  left half a prompt in the box. The delivery now runs until it finishes, and
+  only shutdown cancels it. A caller that stops waiting gets `timeout` while the
+  text and the Enter still land. When `timeoutMs` is absent, the default wait of
+  `call`, REST and the WebSocket is at least the gated send's own bound: about
+  18 s for a short prompt, about 68 s with `readyTimeoutMs:60000`.
+- **The MCP send tools say why a send failed:**
+  `could not send to pane 2: busy (dialog:permission): … (text was typed)`.
+  `send_keys`'s own timeout went from 60 s to 3 minutes, so it can hold the
+  longest gated send.
+
+### Fixed
+
+- **Prompts sent while Claude Code starts up are no longer lost or left
+  unsubmitted, and claudish and agent prompts land.** Claude Code draws its box
+  at about one second, then resets its terminal once or twice. Under a full
+  plugin load that reset came about 2.5 s after spawn, sometimes after the box
+  was already up. A prompt typed into that window vanished, or sat in the box
+  unsubmitted, while `send` answered ok because the bytes had reached the PTY.
+  claudish team runs failed four slot launches in six with
+  `prompt_not_accepted`. In normal mode a second Enter rescued the stuck box.
+  In vim mode it did not, which made the loss unrecoverable. The gate waits
+  the reset out, the box check catches what it still eats, and the forced
+  normal mode makes vim's failure impossible on a pane magmux launches.
+
 ## [0.15.1] - 2026-10-16
 
 ### Fixed

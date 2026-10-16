@@ -101,7 +101,7 @@ func (r Result) ResultPane() (int, bool) {
 }
 
 // Code is magmux's own error code, which is carried in the body of every
-// refusal beside the message. The status alone is not enough — 409 covers five
+// refusal beside the message. The status alone is not enough — 409 covers six
 // codes — so a caller that branches on failure branches on this.
 func (r Result) Code() string {
 	s, _ := r.Body["code"].(string)

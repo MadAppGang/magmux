@@ -213,12 +213,13 @@ func (m *Magmux) sendOp() hub.Op {
 			"verifies the box holds exactly what was typed before pressing Enter, and answers ok "+
 			"only once a user-prompt entry or transcript entry shows the prompt was taken; "+
 			"otherwise `busy` or `not_accepted` with a `reason`. There Enter may only be the final "+
-			"key, and keys with no text and \"enter\":false (a menu answer) are not gated.",
+			"key, a submit is never pressed into a dialog (busy dialog:<kind>, unless dismissDialogs declines it "+
+			"first), and keys with no text and \"enter\":false (a menu answer) are not gated.",
 		objectSchema(map[string]any{
 			"pane":  paneProp,
 			"text":  strProp("The instruction. Sent as a bracketed paste when the pane asked for one."),
 			"keys":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Named keys to press after the text, e.g. [\"tab\",\"down\"]. On a gated pane enter/return may only be the last."},
-			"enter": boolProp("Submit after the text. Defaults to true."),
+			"enter": boolProp("Submit after the text. Defaults to true, so on a gated pane {\"keys\":[\"2\"]} submits too; send \"enter\":false to answer a menu."),
 			"typed": boolProp("Type the text as keystrokes: short paced runs, every newline as ctrl-j, never bracketed. Exclusive with paste."),
 			"paste": boolProp("Deliver the text as one bracketed paste, even a single line or nothing at all (an empty paste is Cmd+V over a clipboard image). Exclusive with typed."),
 			"label": strProp("Short tag for the panel's OUT row, e.g. \"step 2/5\"."),
