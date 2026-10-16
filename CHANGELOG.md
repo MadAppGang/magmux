@@ -11,6 +11,8 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-10-16
+
 ### Fixed
 
 - **A screen that grows in rows lets relative cursor moves reach the new
@@ -29,7 +31,7 @@ commit subjects and remain on the
   idle (issue #2, back through the hub refactor). The quitting render's
   events now travel with the finals, ahead of `results`.
 
-## [0.15.0] - 2026-10-16
+## [0.15.0] - 2026-10-15
 
 ### Added
 
@@ -293,6 +295,7 @@ commit subjects and remain on the
   nudges, and the summary "the pilot stopped without calling finish". The
   provider's own error is now reported, and nudging stops once one is seen.
 
+[0.15.1]: https://github.com/MadAppGang/magmux/releases/tag/v0.15.1
 [0.15.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.15.0
 [0.14.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.14.0
 [0.12.0]: https://github.com/MadAppGang/magmux/releases/tag/v0.12.0
