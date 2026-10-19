@@ -328,6 +328,9 @@ func TestClientUnwrapKeepsReasonAndTyped(t *testing.T) {
 		{"reason and typed",
 			`{"type":"reply","id":%q,"ok":false,"code":"not_accepted","reason":"still_in_box","typed":true,"error":"still there"}`,
 			"not_accepted", "still_in_box", true, "still there (not_accepted)"},
+		{"maybe submitted",
+			`{"type":"reply","id":%q,"ok":false,"code":"not_accepted","reason":"text_mismatch","typed":true,"maybeSubmitted":true,"error":"unknown"}`,
+			"not_accepted", "text_mismatch", true, "unknown (not_accepted)"},
 		{"reason only",
 			`{"type":"reply","id":%q,"ok":false,"code":"busy","reason":"vim_mode","error":"vim"}`,
 			"busy", "vim_mode", false, "vim (busy)"},
@@ -359,6 +362,9 @@ func TestClientUnwrapKeepsReasonAndTyped(t *testing.T) {
 			if protocol.CodeOf(err) != c.code || protocol.ReasonOf(err) != c.reason || protocol.TypedOf(err) != c.typed {
 				t.Errorf("err %v: code %q reason %q typed %v, want %q %q %v", err,
 					protocol.CodeOf(err), protocol.ReasonOf(err), protocol.TypedOf(err), c.code, c.reason, c.typed)
+			}
+			if want := c.name == "maybe submitted"; protocol.MaybeSubmittedOf(err) != want {
+				t.Errorf("err %v: maybeSubmitted %v, want %v", err, protocol.MaybeSubmittedOf(err), want)
 			}
 			if err.Error() != c.text {
 				t.Errorf("Error() = %q, want %q (the wording is unchanged)", err.Error(), c.text)

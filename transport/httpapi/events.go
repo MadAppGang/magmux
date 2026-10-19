@@ -204,6 +204,9 @@ func errorEvent(pane int, err error) []byte {
 	if protocol.TypedOf(err) {
 		ev["typed"] = true
 	}
+	if protocol.MaybeSubmittedOf(err) {
+		ev["maybeSubmitted"] = true
+	}
 	if pane > 0 {
 		ev["pane"] = pane
 	}

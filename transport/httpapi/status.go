@@ -110,5 +110,8 @@ func errBody(code string, err error) map[string]any {
 	if protocol.TypedOf(err) {
 		body["typed"] = true
 	}
+	if protocol.MaybeSubmittedOf(err) {
+		body["maybeSubmitted"] = true
+	}
 	return body
 }

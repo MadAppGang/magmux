@@ -95,6 +95,10 @@ type Error struct {
 	Code, Msg string
 	Reason    string
 	Typed     bool
+	// MaybeSubmitted: the text may ALREADY be in the conversation through an
+	// Enter that was not magmux's, so the caller must check before sending it
+	// again. Wire-visible as "maybeSubmitted", only when set.
+	MaybeSubmitted bool
 }
 
 func (e *Error) Error() string { return e.Msg }
@@ -126,6 +130,16 @@ func TypedOf(err error) bool {
 	var se *Error
 	if errors.As(err, &se) {
 		return se.Typed
+	}
+	return false
+}
+
+// MaybeSubmittedOf reports whether a verb failure says the text may already have
+// been submitted by another writer. False for nil and for any other error.
+func MaybeSubmittedOf(err error) bool {
+	var se *Error
+	if errors.As(err, &se) {
+		return se.MaybeSubmitted
 	}
 	return false
 }

@@ -74,6 +74,9 @@ func TestForeignSubmitBeforeFirstDrawIsNotRetyped(t *testing.T) {
 			if strings.Contains(msg, "nothing was submitted") {
 				t.Errorf("error %q claims nothing was submitted", msg)
 			}
+			if !protocol.MaybeSubmittedOf(o.err) {
+				t.Error("the reply does not carry maybeSubmitted")
+			}
 		})
 	}
 }
