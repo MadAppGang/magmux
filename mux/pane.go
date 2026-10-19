@@ -54,6 +54,9 @@ type Pane struct {
 	// saw before the editor-mode rewrite existed. Write-once before
 	// publication.
 	launchLine string
+	// bindID and bindPath are PaneConfig.SessionID / Transcript, for the Claude
+	// controller. Write-once before publication.
+	bindID, bindPath string
 	// settingsDir is where this pane's private settings copy would go
 	// (settingsDir(PaneConfig.SockDir)). Write-once before publication.
 	settingsDir string
@@ -208,6 +211,7 @@ func preparePane(y, x, h, w int, cfg PaneConfig) *Pane {
 
 	launch := claudeLaunchOf(cfg)
 	p.launchLine = launch.line
+	p.bindID, p.bindPath = cfg.SessionID, cfg.Transcript
 	p.gateBasis, p.editorOverride = gateDecision(cfg.Controller, launch)
 	p.settingsDir = settingsDir(cfg.SockDir)
 	return p
@@ -722,6 +726,11 @@ type PaneConfig struct {
 	// gateBasis and editorOverride from it before spawn; OpenPane's private
 	// section and attachController attach from it.
 	Controller string
+	// SessionID and Transcript DECLARE the Claude Code session a claude-code
+	// pane runs (claude_binding.go), already normalised: the controller tails
+	// exactly that transcript and never discovers one. Empty = discovery.
+	SessionID  string
+	Transcript string
 	// SockDir is the socket directory of the magmux that owns this pane, the
 	// base of settingsDir. buildGrid, buildLayout and OpenPane fill it from
 	// m.socketDir(); empty falls back to the package default.

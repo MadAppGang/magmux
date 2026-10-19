@@ -195,6 +195,9 @@ func TestTextThatLeftTheBoxIsNotNothingSubmitted(t *testing.T) {
 	if strings.Contains(msg, "nothing was submitted") || !strings.Contains(msg, "unknown whether") {
 		t.Errorf("error %q: must say it is unknown whether another Enter submitted it", msg)
 	}
+	if !protocol.MaybeSubmittedOf(o.err) {
+		t.Error("the reply does not carry maybeSubmitted: a caller can only find this case by matching the wording")
+	}
 	if got := log.settle(); got != "hello" {
 		t.Errorf("bytes %q, want the text once and no Enter", got)
 	}

@@ -317,6 +317,9 @@ func (a *Adapter) writeResult(pushId string, result map[string]any, err error) {
 		if protocol.TypedOf(err) {
 			rec["typed"] = true
 		}
+		if protocol.MaybeSubmittedOf(err) {
+			rec["maybeSubmitted"] = true
+		}
 	} else if result != nil {
 		rec["result"] = jsonString(result)
 	}

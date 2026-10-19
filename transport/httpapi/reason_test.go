@@ -20,14 +20,14 @@ func TestReplyCarriesReasonAndTyped(t *testing.T) {
 
 	t.Run("http", func(t *testing.T) {
 		body, _ := json.Marshal(map[string]any{
-			"code": protocol.CodeNotAccepted, "reason": protocol.ReasonStillInBox, "typed": true})
+			"code": protocol.CodeNotAccepted, "reason": protocol.ReasonStillInBox, "typed": true, "maybeSubmitted": true})
 		resp := f.do(t, "POST", "/v1/ops/boom", f.full, bytes.NewReader(body))
 		if resp.StatusCode != http.StatusConflict {
 			t.Errorf("not_accepted answered %d, want 409", resp.StatusCode)
 		}
 		got := decode(t, resp)
-		if got["code"] != protocol.CodeNotAccepted || got["reason"] != protocol.ReasonStillInBox || got["typed"] != true {
-			t.Errorf("body = %v, want code, reason and typed", got)
+		if got["code"] != protocol.CodeNotAccepted || got["reason"] != protocol.ReasonStillInBox || got["typed"] != true || got["maybeSubmitted"] != true {
+			t.Errorf("body = %v, want code, reason, typed and maybeSubmitted", got)
 		}
 
 		body, _ = json.Marshal(map[string]any{"code": protocol.CodeBusy, "reason": protocol.ReasonVimMode})
@@ -41,7 +41,7 @@ func TestReplyCarriesReasonAndTyped(t *testing.T) {
 
 		body, _ = json.Marshal(map[string]any{"code": protocol.CodePaneDead})
 		got = decode(t, f.do(t, "POST", "/v1/ops/boom", f.full, bytes.NewReader(body)))
-		for _, k := range []string{"reason", "typed"} {
+		for _, k := range []string{"reason", "typed", "maybeSubmitted"} {
 			if _, ok := got[k]; ok {
 				t.Errorf("an error with no %s carries the key: %v", k, got)
 			}
@@ -88,18 +88,18 @@ func TestReplyCarriesReasonAndTyped(t *testing.T) {
 				}
 			}
 		}
-		if err := cc.WriteText(`{"id":1,"op":"boom","args":{"code":"not_accepted","reason":"text_mismatch","typed":true}}`); err != nil {
+		if err := cc.WriteText(`{"id":1,"op":"boom","args":{"code":"not_accepted","reason":"text_mismatch","typed":true,"maybeSubmitted":true}}`); err != nil {
 			t.Fatal(err)
 		}
 		r := next()
-		if r["code"] != protocol.CodeNotAccepted || r["reason"] != protocol.ReasonTextMismatch || r["typed"] != true {
-			t.Errorf("ws reply = %v, want code, reason and typed", r)
+		if r["code"] != protocol.CodeNotAccepted || r["reason"] != protocol.ReasonTextMismatch || r["typed"] != true || r["maybeSubmitted"] != true {
+			t.Errorf("ws reply = %v, want code, reason, typed and maybeSubmitted", r)
 		}
 		if err := cc.WriteText(`{"id":2,"op":"boom","args":{"code":"pane_dead"}}`); err != nil {
 			t.Fatal(err)
 		}
 		r = next()
-		for _, k := range []string{"reason", "typed"} {
+		for _, k := range []string{"reason", "typed", "maybeSubmitted"} {
 			if _, ok := r[k]; ok {
 				t.Errorf("a ws reply with no %s carries the key: %v", k, r)
 			}

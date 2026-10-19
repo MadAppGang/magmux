@@ -35,6 +35,15 @@ type ClaudeCodeController struct {
 	spawnedAt   time.Time // when the controller was attached
 	wantPrompt  string    // first user prompt passed to the pane (from cmd.Args)
 
+	// bindID and bindPath are the DECLARED binding (claude_binding.go): the
+	// session id and, when the caller gave it, the exact transcript path.
+	// Write-once at construction. With bindID set, discovery never runs.
+	bindID   string
+	bindPath string
+	// boundBy is how discovery found sessionPath (bindPrompt / bindMtime),
+	// published for `list`.
+	boundBy atomic.Pointer[string]
+
 	sessionPath string // resolved active session file (empty until found)
 	fileSize    int64  // last read offset
 
@@ -106,10 +115,14 @@ const (
 )
 
 func newClaudeCodeController(p *Pane) *ClaudeCodeController {
-	return &ClaudeCodeController{
+	c := &ClaudeCodeController{
 		pane:       p,
 		wantPrompt: extractClaudePrompt(p),
 	}
+	if p != nil {
+		c.bindID, c.bindPath = p.bindID, p.bindPath
+	}
+	return c
 }
 
 // encodeProjectDir converts a working directory into the directory name
@@ -250,6 +263,13 @@ func (c *ClaudeCodeController) Start(ctx context.Context) error {
 		c.spawnedAt = time.Now()
 	}
 	c.snap.State = CtrlStarting
+	if c.bindID != "" && c.pane != nil && c.pane.mux != nil && !c.pane.mux.declareSession(c.bindID, c.pane) {
+		// Two panes of one magmux declaring one session: the second waits, and
+		// findNamedSession keeps refusing it the file while the first holds it.
+		if dbgFile != nil {
+			fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p session %s is already declared by another pane\n", c.pane, c.bindID)
+		}
+	}
 	// The Start split. The readiness half first, and it cannot fail, so a
 	// gated pane has a working gate whatever the transcript half does.
 	c.startTTYWatch()
@@ -296,12 +316,17 @@ func (c *ClaudeCodeController) startTranscript() error {
 			c.cwd = wd
 		}
 	}
-	// Compute project dir
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
+	// Compute project dir: under the Claude config directory the child uses
+	// (CLAUDE_CONFIG_DIR, as claudeConfigDir resolves it), else ~/.claude. A
+	// declared transcript says where it lives outright.
+	config := configDirOfTranscript(c.bindPath)
+	if config == "" {
+		config = c.claudeConfigDir()
 	}
-	c.projectsDir = filepath.Join(home, ".claude", "projects")
+	if config == "" {
+		return fmt.Errorf("no Claude config directory: CLAUDE_CONFIG_DIR is unset and the home directory is unknown")
+	}
+	c.projectsDir = filepath.Join(config, "projects")
 	c.projectDir = filepath.Join(c.projectsDir, encodeProjectDir(c.cwd))
 	if dbgFile != nil {
 		fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p cwd=%q projectDir=%q exists=%v wantPrompt=%q\n",
@@ -530,6 +555,9 @@ type sessionCandidate struct {
 // Files already claimed by sibling controllers are skipped. Returns ""
 // if no matching file is found yet (we'll retry on the next poll).
 func (c *ClaudeCodeController) findActiveSession() string {
+	if c.bindID != "" {
+		return c.findNamedSession()
+	}
 	candidates := c.collectCandidates(c.projectDir)
 
 	if c.wantPrompt != "" {
@@ -570,6 +598,7 @@ func (c *ClaudeCodeController) findActiveSession() string {
 		fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p strategy=mtime fresh=%v %s\n",
 			c.pane, best.fresh, filepath.Base(best.path))
 	}
+	c.setBoundBy(bindMtime)
 	return best.path
 }
 
@@ -589,6 +618,7 @@ func (c *ClaudeCodeController) matchByPrompt(candidates []sessionCandidate) stri
 			fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p strategy=prompt %s\n",
 				c.pane, cand.path)
 		}
+		c.setBoundBy(bindPrompt)
 		return cand.path
 	}
 	return ""
@@ -1099,3 +1129,8 @@ func claudeCodeFactory(p *Pane) ToolController {
 
 // Suppress unused warning for the helper.
 var _ = fmt.Sprintf
+
+// setBoundBy publishes how discovery found the transcript, for `list`.
+func (c *ClaudeCodeController) setBoundBy(mode string) {
+	c.boundBy.Store(&mode)
+}

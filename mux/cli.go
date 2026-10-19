@@ -67,6 +67,12 @@ func Main(args []string) int {
 			fmt.Println("            pane with open_pane {\"controller\":\"claude-code\"} instead.")
 			fmt.Println("            Claude panes run in normal editor mode; a declared wrapper must")
 			fmt.Println("            force that itself (see Controlled Sessions below).")
+			fmt.Println("  --session-id ID  With --controller claude-code and exactly one -e: the")
+			fmt.Println("            Claude Code session that pane runs. The controller tails exactly")
+			fmt.Println("            ID.jsonl (found under CLAUDE_CONFIG_DIR, else ~/.claude) and never")
+			fmt.Println("            guesses a transcript; `list` echoes it as sessionId, bound:named.")
+			fmt.Println("  --transcript PATH  The same, naming the transcript's absolute path; its")
+			fmt.Println("            name must be ID.jsonl when both are given.")
 			fmt.Println("  -w        Auto-exit when all panes are done (dead or idle)")
 			fmt.Println("            Needs at least one -e/-g pane. `magmux -w` with no command runs")
 			fmt.Println("            the default shell layout and never auto-exits, and so does")
@@ -282,6 +288,7 @@ func Main(args []string) int {
 	var firebaseArg string
 	var controllerArg string
 	controllerSet := false
+	var sessionIDArg, transcriptArg string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--controller":
@@ -297,6 +304,23 @@ func Main(args []string) int {
 				i++
 				controllerArg = args[i]
 			}
+		case "--session-id", "--transcript":
+			// Recorded only, position-independent like --controller, and
+			// checked after the loop with it (applyBindingFlags).
+			v := ""
+			if i+1 < len(args) {
+				v = args[i+1]
+			}
+			if v == "" {
+				fmt.Fprintf(os.Stderr, "magmux: %s needs a value\n", args[i])
+				os.Exit(1)
+			}
+			if args[i] == "--session-id" {
+				sessionIDArg = v
+			} else {
+				transcriptArg = v
+			}
+			i++
 		case "--firebase":
 			if i+1 < len(args) {
 				i++
@@ -549,6 +573,10 @@ func Main(args []string) int {
 			fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
 			os.Exit(1)
 		}
+	}
+	if err := applyBindingFlags(commands, sessionIDArg, transcriptArg, controllerSet, gridFile == "" && len(customCmds) == 1); err != nil {
+		fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
+		os.Exit(1)
 	}
 
 	// The control panel is the last pane, so session panes keep the indices a
@@ -852,3 +880,29 @@ func applyControllerFlag(commands []PaneConfig, name string, haveSessions bool) 
 // Suppress unused import warning
 var _ = io.EOF
 var _ = math.MaxInt
+
+// applyBindingFlags carries --session-id / --transcript onto the one -e pane
+// (claude_binding.go). A session id names ONE session, so it needs exactly one
+// -e pane and no -g — binding several panes to one transcript would put one
+// session's state on all of them — and it needs --controller claude-code,
+// because only the Claude controller reads a transcript. Every refusal is
+// fatal, before anything is spawned: a binding that silently does nothing
+// leaves the caller trusting a gate that reads somebody else's session.
+func applyBindingFlags(commands []PaneConfig, id, path string, controllerSet, oneSession bool) error {
+	id, path, err := normalizeBinding(id, path)
+	if err != nil || id == "" {
+		return err
+	}
+	if !controllerSet {
+		return fmt.Errorf("--session-id and --transcript need --controller claude-code")
+	}
+	if !oneSession {
+		return fmt.Errorf("--session-id and --transcript bind one session, so they need exactly one -e pane and no -g")
+	}
+	for i := range commands {
+		if !commands[i].Control {
+			commands[i].SessionID, commands[i].Transcript = id, path
+		}
+	}
+	return nil
+}

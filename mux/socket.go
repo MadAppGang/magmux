@@ -106,6 +106,10 @@ type sockMsg struct {
 	// value is bad_request, including the correct name of the plugin actually
 	// asking.
 	Controller string `json:"controller,omitempty"`
+	// SessionID and Transcript declare the Claude Code session of an open_pane
+	// with controller:"claude-code" (claude_binding.go). Refused without it.
+	SessionID  string `json:"session_id,omitempty"`
+	Transcript string `json:"transcript,omitempty"`
 	// caller is who sent this message, as the adapter resolved it. It is
 	// UNEXPORTED and has no tag, so encoding/json can never fill it: no
 	// sequence of bytes on the wire can claim an identity, which is what makes

@@ -307,6 +307,11 @@ func wantErr(t *testing.T, o sendOutcome, code, reason string, typed bool) {
 	if e.Reason != reason || e.Typed != typed {
 		t.Fatalf("reason=%q typed=%v (%v), want %q %v", e.Reason, e.Typed, o.err, reason, typed)
 	}
+	// maybeSubmitted is the machine-readable form of "it is unknown whether
+	// another Enter submitted it": set on exactly the replies that say so.
+	if says := strings.Contains(e.Msg, "unknown whether"); e.MaybeSubmitted != says {
+		t.Fatalf("maybeSubmitted=%v but the message says unknown-whether=%v: %v", e.MaybeSubmitted, says, o.err)
+	}
 }
 
 func asSockErr(err error, out **sockErr) bool {

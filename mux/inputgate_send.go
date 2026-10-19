@@ -312,6 +312,14 @@ func gateErr(code, reason string, typed bool, format string, a ...any) *protocol
 	return e
 }
 
+// maybeSubmitted marks a not_accepted whose text may already be in the
+// conversation through another writer's Enter: the one reply a caller must
+// never answer by sending again, so it carries a flag rather than only words.
+func maybeSubmitted(e *protocol.Error) *protocol.Error {
+	e.MaybeSubmitted = true
+	return e
+}
+
 // typingToken is the pane's cap-1 typing token (D12). Lazily created; never
 // removed (Magmux.typingTokens).
 func (m *Magmux) typingToken(p *Pane) chan struct{} {
@@ -880,18 +888,18 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 			// Enter: another writer may have submitted it with no evidence on
 			// screen or in the transcript yet. "Nothing was submitted" would
 			// invite a retry into a duplicate (r4 M3c).
-			fail(gateErr(protocol.CodeNotAccepted, reason, true,
+			fail(maybeSubmitted(gateErr(protocol.CodeNotAccepted, reason, true,
 				"pane %d: the input box showed the text and then emptied without magmux's Enter (%s); it is unknown whether another Enter submitted it, so check the conversation before sending it again; magmux pressed no Enter and did not retype it",
-				d.idx, detail))
+				d.idx, detail)))
 			return
 		}
 		if convMoved != "" {
 			// Never drawn, and something a submit changes did change: the
 			// text may be in the conversation already, through an Enter that
 			// was not magmux's (r5 M1). Same honesty as leftBox.
-			fail(gateErr(protocol.CodeNotAccepted, reason, true,
+			fail(maybeSubmitted(gateErr(protocol.CodeNotAccepted, reason, true,
 				"pane %d: the input box stayed empty after typing (%s); it is unknown whether another writer's Enter submitted it, so check the conversation before sending it again; magmux pressed no Enter",
-				d.idx, detail))
+				d.idx, detail)))
 			return
 		}
 		fail(gateErr(protocol.CodeNotAccepted, reason, true,

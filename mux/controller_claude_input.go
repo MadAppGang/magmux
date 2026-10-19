@@ -900,30 +900,53 @@ func (r *claudeRegistry) invalidate() {
 // regMaxAge. Lookup: <pid>.json for the pane's own process (zsh and bash exec
 // the last simple command of -c); otherwise the entry whose sessionId is the
 // transcript's, by a directory scan at most once per regScanEvery. A claudish
-// pane's pid is the wrapper's, so only the second can hit, and only once the
-// transcript is found. Missing anything: the zero entry.
+// pane's pid is the wrapper's, so only the second can hit: from the start for a
+// declared session, else once the transcript is found. Missing anything: the
+// zero entry.
 func (c *ClaudeCodeController) registry(now time.Time) regEntry {
 	if cached := c.reg.cur.Load(); cached != nil && now.Sub(cached.at) < regMaxAge {
 		return cached.e
 	}
-	dir := filepath.Join(c.claudeConfigDir(), "sessions")
+	config := configDirOfTranscript(c.bindPath)
+	if config == "" {
+		config = c.claudeConfigDir()
+	}
+	dir := filepath.Join(config, "sessions")
 	var e regEntry
 	found := false
 	if p := c.pane; p != nil && p.cmd != nil && p.cmd.Process != nil {
 		e, found = readRegEntry(filepath.Join(dir, fmt.Sprintf("%d.json", p.cmd.Process.Pid)))
+		// A declared session is the authority on whose entry this is: a pid
+		// file naming another session is not this pane's.
+		if found && c.bindID != "" && e.SessionID != c.bindID {
+			e, found = regEntry{}, false
+		}
 	}
 	if !found {
 		if prev := c.reg.cur.Load(); prev != nil {
 			e = prev.e // a throttled scan keeps the last answer
 		}
-		if path := c.published.Load(); path != nil && *path != "" &&
+		if id := c.registrySessionID(); id != "" &&
 			now.Sub(time.Unix(0, c.reg.lastScan.Load())) >= regScanEvery {
 			c.reg.lastScan.Store(now.UnixNano())
-			e = scanRegistry(dir, strings.TrimSuffix(filepath.Base(*path), ".jsonl"))
+			e = scanRegistry(dir, id)
 		}
 	}
 	c.reg.cur.Store(&regCached{e: e, at: now})
 	return e
+}
+
+// registrySessionID is the session id the registry is searched by: the
+// declared one — known before the transcript exists, so a declared pane has
+// registry corroboration from its first prompt — else the found transcript's.
+func (c *ClaudeCodeController) registrySessionID() string {
+	if c.bindID != "" {
+		return c.bindID
+	}
+	if path := c.published.Load(); path != nil && *path != "" {
+		return strings.TrimSuffix(filepath.Base(*path), ".jsonl")
+	}
+	return ""
 }
 
 // claudeConfigDir is CLAUDE_CONFIG_DIR as the pane's child sees it (the last

@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -216,7 +217,12 @@ type Magmux struct {
 	// pane that owns them. Used so sibling controllers don't both pick the
 	// same JSONL file when running in the same project directory.
 	claimedSessions map[string]*Pane
-	claimedMu       sync.Mutex
+	// declaredSessions maps a DECLARED session id to its pane, from the moment
+	// the controller starts — before the transcript exists — so a discovering
+	// sibling cannot take <id>.jsonl in the window before its owner claims it.
+	// Guarded by claimedMu.
+	declaredSessions map[string]*Pane
+	claimedMu        sync.Mutex
 	// control is the controlled-session panel. Always non-nil so the record*
 	// methods are safe to call unconditionally; it only paints if a control
 	// pane was built for it (magmux -c).
@@ -382,6 +388,9 @@ func (m *Magmux) claimSession(path string, p *Pane) bool {
 	if owner, ok := m.claimedSessions[path]; ok && owner != p {
 		return false
 	}
+	if m.declaredByOtherLocked(path, p) {
+		return false
+	}
 	m.claimedSessions[path] = p
 	return true
 }
@@ -395,7 +404,29 @@ func (m *Magmux) isSessionClaimed(path string, p *Pane) bool {
 	if owner, ok := m.claimedSessions[path]; ok && owner != p {
 		return true
 	}
-	return false
+	return m.declaredByOtherLocked(path, p)
+}
+
+// declareSession reserves a declared session id for p. Returns false when
+// another pane of this magmux already declared it.
+func (m *Magmux) declareSession(id string, p *Pane) bool {
+	m.claimedMu.Lock()
+	defer m.claimedMu.Unlock()
+	if m.declaredSessions == nil {
+		m.declaredSessions = make(map[string]*Pane)
+	}
+	if owner, ok := m.declaredSessions[id]; ok && owner != p {
+		return false
+	}
+	m.declaredSessions[id] = p
+	return true
+}
+
+// declaredByOtherLocked reports whether path is <id>.jsonl for an id another
+// pane declared. Caller holds claimedMu.
+func (m *Magmux) declaredByOtherLocked(path string, p *Pane) bool {
+	owner, ok := m.declaredSessions[strings.TrimSuffix(filepath.Base(path), ".jsonl")]
+	return ok && owner != p
 }
 
 // releaseSessions drops every transcript claim held by p.
@@ -414,6 +445,11 @@ func (m *Magmux) releaseSessions(p *Pane) {
 	for path, owner := range m.claimedSessions {
 		if owner == p {
 			delete(m.claimedSessions, path)
+		}
+	}
+	for id, owner := range m.declaredSessions {
+		if owner == p {
+			delete(m.declaredSessions, id)
 		}
 	}
 	m.claimedMu.Unlock()

@@ -382,6 +382,9 @@ func replyBytes(id json.RawMessage, result map[string]any, err error) []byte {
 		if protocol.TypedOf(err) {
 			reply["typed"] = true
 		}
+		if protocol.MaybeSubmittedOf(err) {
+			reply["maybeSubmitted"] = true
+		}
 	case result != nil:
 		reply["result"] = result
 	}

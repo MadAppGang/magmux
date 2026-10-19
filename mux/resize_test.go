@@ -513,3 +513,47 @@ func TestResizeIsAdvertised(t *testing.T) {
 		t.Fatalf(`"rows":"30" through the hub: %v, want bad_request`, err)
 	}
 }
+
+// TestManualModeChangeRepaintsTheHint: entering or leaving manual mode without
+// moving the size changes only the status bar's "r auto" hint, and the renderer
+// paints only dirty panes — so both edges must mark the screen dirty, or the
+// hint lags until some unrelated output arrives.
+func TestManualModeChangeRepaintsTheHint(t *testing.T) {
+	m := sessionMux(t, 1)
+	m.headless = true
+	clean := func() {
+		m.treeMu.RLock()
+		for _, p := range m.livePanesLocked(nil) {
+			p.mu.Lock()
+			p.dirty = false
+			p.mu.Unlock()
+		}
+		m.treeMu.RUnlock()
+	}
+	dirty := func() bool {
+		p := m.paneByID(0)
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.dirty
+	}
+
+	r, c := screenSize(m)
+	clean()
+	wantResult(t, "same size", mustResize(t, m, fmt.Sprintf(`{"type":"resize","rows":%d,"cols":%d}`, r, c)), r, c, false, true)
+	if !dirty() {
+		t.Fatal("a same-size resize entered manual mode without a repaint: \"r auto\" would not appear")
+	}
+
+	clean()
+	wantResult(t, "auto", mustResize(t, m, `{"type":"resize","auto":true}`), r, c, false, false)
+	if !dirty() {
+		t.Fatal("an auto release that kept the size left manual mode without a repaint: \"r auto\" would linger")
+	}
+
+	// And a release with nothing to release stays quiet: no flicker for a no-op.
+	clean()
+	mustResize(t, m, `{"type":"resize","auto":true}`)
+	if dirty() {
+		t.Fatal("releasing an already-automatic size repainted the screen")
+	}
+}
