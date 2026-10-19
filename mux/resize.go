@@ -217,6 +217,12 @@ func (m *Magmux) resizeLocked(req resizeReq) (res map[string]any, changed bool, 
 	// applySizeLocked. Manual mode is still pinned, so "manual" in the reply
 	// has one meaning and a repeated identical call is idempotent.
 	if sr == m.rows && sc == m.cols {
+		if m.manualRows != sr || m.manualCols != sc {
+			// Entering manual mode changes the status bar ("r auto"), though not
+			// a cell of any pane: repaint so the hint appears now, not at the
+			// next unrelated change.
+			m.markAllDirtyLocked()
+		}
 		m.manualRows, m.manualCols = sr, sc
 		return m.resizeResultLocked(target, false), false, nil
 	}
@@ -284,9 +290,13 @@ func (m *Magmux) resizeTargetLocked(idx int) (*Pane, error) {
 //
 // Caller holds treeMu.Lock.
 func (m *Magmux) releaseManualLocked() (changed bool) {
+	wasManual := m.manualRows != 0 || m.manualCols != 0
 	m.manualRows, m.manualCols = 0, 0
 	r, c := m.screenSizeLocked()
 	if r == m.rows && c == m.cols {
+		if wasManual {
+			m.markAllDirtyLocked() // the hint drops "r auto" though the size did not move
+		}
 		return false
 	}
 	m.applySizeLocked()
@@ -309,8 +319,7 @@ func (m *Magmux) releaseManualSize() {
 		m.treeMu.Unlock()
 		return
 	}
-	m.releaseManualLocked()
-	m.markAllDirtyLocked() // the hint drops "r auto" even when the size did not move
+	m.releaseManualLocked() // repaints either way: the hint drops "r auto"
 	m.treeMu.Unlock()
 	m.control.markDirty()
 }
