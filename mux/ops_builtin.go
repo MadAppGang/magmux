@@ -142,6 +142,8 @@ func (m *Magmux) builtinOps() []hub.Op {
 					"description": "Declare the pane a Claude Code pane whatever `cmd` is (e.g. a wrapper " +
 						"that execs claude itself): it gets the Claude controller and its input is gated.",
 				},
+				"session_id": strProp("With controller:\"claude-code\": the Claude Code session id the pane runs. The pane tails exactly <id>.jsonl and never discovers a transcript."),
+				"transcript": strProp("With controller:\"claude-code\": the absolute path of that session's transcript; its file name must be <session_id>.jsonl when both are given."),
 			}, "cmd")),
 
 		m.op("close_pane", protocol.ClassControl,

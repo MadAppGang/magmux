@@ -600,6 +600,23 @@ func (m *Magmux) buildPaneResultsLocked() []map[string]any {
 		if p.controller != nil {
 			entry["controller"] = p.controller.Name()
 		}
+		// The transcript binding, so a caller can check WHICH session the gate
+		// reads before trusting it (claude_binding.go). Additive: absent until a
+		// Claude pane has one.
+		if cc, ok := p.controller.(*ClaudeCodeController); ok {
+			if path, id, mode, seen := cc.Binding(); mode != "" || path != "" {
+				if path != "" {
+					entry["transcriptPath"] = path
+				}
+				if id != "" {
+					entry["sessionId"] = id
+				}
+				if mode != "" {
+					entry["bound"] = mode
+				}
+				entry["transcriptSeen"] = seen
+			}
+		}
 		// The input gate, additive: an ungated pane's entry is byte-identical.
 		// gateBasis and editorOverride are write-once before publication;
 		// `input` is the controller's published VIEW (history-based, 4 Hz) — a

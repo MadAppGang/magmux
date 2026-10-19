@@ -575,6 +575,14 @@ func (m *Magmux) sockOpenPane(msg sockMsg) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	bindID, bindPath, err := normalizeBinding(msg.SessionID, msg.Transcript)
+	if err != nil {
+		return nil, sockErrf(sockCodeBadRequest, "open_pane: %v", err)
+	}
+	if bindID != "" && controller != claudeCodeName {
+		return nil, sockErrf(sockCodeBadRequest,
+			`open_pane: session_id and transcript declare a Claude Code session, so they need controller:"claude-code"`)
+	}
 
 	// Run-level until the reply names an id: there is no pane to route to yet.
 	seq := m.control.recordRequest(-1, "open_pane", cmd)
@@ -587,6 +595,8 @@ func (m *Magmux) sockOpenPane(msg sockMsg) (map[string]any, error) {
 			Label: msg.Label,
 			// The ONE declaration field, so newPane decides on it.
 			Controller: controller,
+			SessionID:  bindID,
+			Transcript: bindPath,
 		},
 		Target: target,
 		Split:  split,
