@@ -11,6 +11,43 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-20
+
+### Added
+
+- **A Claude pane can be told which session it runs.** `--session-id ID` and
+  `--transcript PATH` (with `--controller claude-code` and exactly one `-e`),
+  or `session_id` / `transcript` beside `"controller":"claude-code"` in
+  `open_pane`. The pane then tails exactly that transcript, waits for it to
+  appear, and never guesses one; Claude's session registry is read by that id.
+  An id alone is looked up under `CLAUDE_CONFIG_DIR` (else `~/.claude`).
+- **`list` and `results` say which transcript a Claude pane reads**:
+  `sessionId`, `transcriptPath`, `bound` (`named`, `prompt` or `mtime`) and
+  `transcriptSeen`, so a caller can check the binding before trusting the gate.
+- **`"maybeSubmitted":true` on a `not_accepted` reply** whose text may already
+  be in the conversation through an Enter that was not magmux's (the box
+  showed the text and emptied, or the conversation moved while it stayed
+  empty). Such a reply must never be answered by sending again; until now it
+  could only be recognised by its wording. Carried on the socket, HTTP,
+  WebSocket, SSE, Firebase and plugin replies, and by the Go client
+  (`protocol.MaybeSubmittedOf`).
+
+### Fixed
+
+- **A declared wrapper pane no longer reads another session's transcript.**
+  With no prompt to match, discovery took the newest transcript in the cwd's
+  project directory, and a wrapper's child writes none until its first prompt
+  is accepted — so a sibling slot or the parent session in the same directory
+  won, and the claim stuck. The gate then answered from that session: a false
+  `busy dialog:permission` from its registry, refused retypes from its
+  conversation. Declaring the session (above) is the fix; an undeclared pane
+  still guesses, and now says so with `bound:"mtime"`.
+- **Transcript discovery honours `CLAUDE_CONFIG_DIR`**, as the registry lookup
+  already did, instead of always looking under `~/.claude/projects`.
+- **The status bar's `r auto` hint appears and disappears at once** when a
+  `resize` enters manual mode at the current size, or `{"auto":true}` leaves it
+  without a size change. It used to wait for the next unrelated output.
+
 ## [0.16.0] - 2026-10-17
 
 ### Added

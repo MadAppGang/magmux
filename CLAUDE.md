@@ -260,6 +260,24 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   matching on transcript content. Keep it that way — a wrong directory name
   otherwise strands the controller in `starting` silently and forever.
 
+- **A DECLARED binding is the only way a wrapper pane reads the right
+  transcript, so it must never fall back.** A wrapper shows no prompt, so
+  discovery takes the newest transcript in the cwd's project directory — and
+  the child writes none until its first prompt is accepted, so at the first
+  send every candidate is another session's, and `claimSession` cannot help:
+  it is per magmux process and claudish runs one magmux per pane. With
+  `bindID` set (`--session-id` / `--transcript`, `open_pane` `session_id` /
+  `transcript`), `findActiveSession` calls `findNamedSession` and nothing else:
+  an empty answer while the file is missing is honest, a foreign one is the
+  bug. `declareSession` reserves the id from the moment the controller starts,
+  so a discovering sibling in the SAME magmux cannot take `<id>.jsonl` before
+  its owner claims it; the registry is read by the declared id, under the
+  declared transcript's config directory (`configDirOfTranscript`), and a pid
+  entry naming another session is discarded. `list` echoes `bound` so a
+  caller can tell `named` from the `mtime` guess.
+  `TestDeclaredPanesInOneCwdBindTheirOwnTranscripts` carries an undeclared
+  control that must reproduce the false `dialog:permission`.
+
 - **Controller idle state is one-way, so injected input must un-stick it.**
   `applyTerminalIdle` promotes a snapshot to `awaiting_input` and then refuses
   to touch it ("already settled"); only a new transcript entry moves it back

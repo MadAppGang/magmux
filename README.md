@@ -396,10 +396,15 @@ carries a **`panes`** array; the per-pane live event carries a singular **`pane`
 | `gateBasis` | string | why the pane's input is gated: `direct` (a `claude …` launch) or `declared` (`--controller`, `open_pane controller:"claude-code"`). Omitted when the pane is not gated. See [The input gate](#claude-code-panes-the-input-gate) |
 | `editorOverride` | string | what magmux did about Claude's editor mode: `added` \| `merged` \| `merged_file` \| `unparsed` \| `delegated` (omitted when nothing was attempted) |
 | `input` | object | gated panes only: `{"ready":false,"reason":"starting","detail":"…"}`, the gate's published view, refreshed four times a second. A send decides on its own fresh reads, so this is advisory |
+| `sessionId` | string | Claude panes: the Claude Code session the pane is bound to — the declared one, or the found transcript's (omitted until there is one) |
+| `transcriptPath` | string | Claude panes: the transcript the controller tails — the declared path, or the one found (omitted until known) |
+| `bound` | string | how that transcript was chosen: `named` (declared with `--session-id`/`--transcript` or `open_pane` `session_id`/`transcript`; the only file ever tailed), `prompt` (its first prompt matched the launch's) or `mtime` (the newest transcript in the cwd's project directory — a GUESS, which can be another session's). See [Declaring the session](#declaring-the-session) |
+| `transcriptSeen` | bool | whether that transcript exists yet. A declared pane reports `false` until its child writes it |
 
-The last twelve are additive; the forward-compat clause above already covers
+The last sixteen are additive; the forward-compat clause above already covers
 them, and every one is omitted rather than reported as a zero when it cannot be
-sourced.
+sourced. The one exception is `transcriptSeen`, which is present, `false`
+included, whenever the pane has a binding to report.
 
 **Pane ids follow argument order.** Panes created from `-e` receive ids
 `0..N-1` in the order the flags were given, and magmux's own panes — the control
@@ -450,9 +455,11 @@ The `id` round-trips **verbatim**: send `7` and you get `7`, send `"7"` and you
 get `"7"`. `ok:true` carries `result`; `ok:false` carries `code` and `error`.
 Branch on `code` — the `error` string beside it is for a human and may be
 reworded at any time. A failure can also carry `reason`, a machine-readable
-sub-code that says which failure of that kind it was, and `"typed":true`,
-which says bytes of this request reached the pane before it failed. Both are
-omitted when they do not apply, so a failure without them is the line it
+sub-code that says which failure of that kind it was, `"typed":true`,
+which says bytes of this request reached the pane before it failed, and
+`"maybeSubmitted":true`, which says the text may already be in the
+conversation through an Enter that was not magmux's — never answer that one by
+sending again. All three are omitted when they do not apply, so a failure without them is the line it
 always was.
 
 | `code` | Meaning |
@@ -672,6 +679,45 @@ and `list`/`results` say so with `gateBasis`:
   flag gates the shells too, and a shell never shows a Claude box, so every
   send to it would wait and then be refused.
 
+#### Declaring the session
+
+A declared WRAPPER shows magmux no prompt, so magmux has to guess which
+transcript under `~/.claude/projects/<cwd>/` is the pane's: the newest one,
+preferring files that appeared after the pane started. Claude Code writes no
+transcript until its first prompt is accepted, so at the first send every
+candidate is somebody else's — a sibling started a moment later, or the parent
+session in the same directory — and the guess sticks. The gate then reads that
+session: a false `busy dialog:permission` from its registry, a refused retype
+from its conversation.
+
+A caller that knows the session says so, and magmux stops guessing:
+
+```bash
+magmux --controller claude-code --session-id "$ID" \
+       --transcript "$CLAUDE_CONFIG_DIR/projects/<dir>/$ID.jsonl" -e '. launch.sh'
+```
+
+```jsonc
+{"type":"open_pane","cmd":". launch.sh","controller":"claude-code","session_id":"…","transcript":"/abs/….jsonl"}
+```
+
+Either field alone is enough, and given both the file must be `<session_id>.jsonl`.
+The flags need `--controller claude-code` and exactly one `-e` (no `-g`); the
+`open_pane` fields need `"controller":"claude-code"`. The pane then tails exactly
+that transcript, waits for it to appear, and never falls back to discovery. With
+only an id, the file is looked for under `$CLAUDE_CONFIG_DIR/projects` (the
+pane's env, else magmux's, else `~/.claude`), in the cwd's directory first and
+then in any. Claude's session registry is read by that id, under the
+transcript's config directory. `list` echoes the binding (`sessionId`,
+`transcriptPath`, `bound:"named"`, `transcriptSeen`), so check it before
+trusting the gate.
+
+**A send outlives its connection.** If the socket drops mid-send, the delivery
+runs to completion (only shutdown cancels it), but its reply went to the
+connection that is gone, and no verb reports a past send's outcome. A new
+connection learns it from the session: `transcript`, or `list`'s `prompt`, which
+on a declared pane are the right session's.
+
 A pane a plugin owns is never gated. Everything below applies to gated panes
 only. A send to any other pane is byte for byte what it always was, and so is
 its reply.
@@ -819,7 +865,7 @@ prescribe a retry.
 | `busy` `dialog:<kind>` | no | a blocking dialog: `permission`, `question`, `plan`, `select`, `trust`, `bypass`, `api_key` or `onboarding`. Only Escapes were written before typing |
 | `busy` `typing_in_progress` | no | another delivery was still typing into the pane at the deadline |
 | `busy` with `typed:true` | no | the text was typed and the Enter withheld, by a dialog or by a terminal that did not come back in time. The box may hold the text, or part of it |
-| `not_accepted` `text_mismatch` | no (not by magmux) | the box held something other than what was typed: partial text, more than was typed (two paste tokens included), a box still changing after 3 s, or nothing — after the one automatic retype, for a paste (never retyped), or with neither loss signal (no terminal reset, and the 3 s window cut short by the deadline or interrupted), when the text may still appear. The detail says which. Nothing was submitted, EXCEPT when the detail says the box showed the text and then emptied without magmux's Enter: then it is unknown whether another Enter submitted it, so check the conversation before sending it again. A retype is refused `box_not_empty` until the box is cleared |
+| `not_accepted` `text_mismatch` | no (not by magmux) | the box held something other than what was typed: partial text, more than was typed (two paste tokens included), a box still changing after 3 s, or nothing — after the one automatic retype, for a paste (never retyped), or with neither loss signal (no terminal reset, and the 3 s window cut short by the deadline or interrupted), when the text may still appear. The detail says which. Nothing was submitted, EXCEPT when the detail says the box showed the text and then emptied without magmux's Enter: then it is unknown whether another Enter submitted it, so check the conversation before sending it again (the reply carries `"maybeSubmitted":true`). A retype is refused `box_not_empty` until the box is cleared |
 | `not_accepted` `empty_box` | no | a submit found the box empty, so there was nothing to submit |
 | `not_accepted` `still_in_box` | yes, once or twice | the text is still in the box, unsubmitted. **Do not retype it**: it is there |
 | `not_accepted` `unconfirmed` | yes | no user-prompt entry and no transcript entry that can be attributed to THIS send appeared within the windows. An identical older prompt does not count. A history entry must be a NEW user-prompt entry after the ones the verify saw, and magmux must be able to tell where those end: when the visible prompts are all the same text (a resent `continue`) and the top of the conversation is not on screen, or a command wipes the screen (`/clear`), the history cannot say, and only the transcript can. A transcript record must have been SUBMITTED after the verify: a queued prompt counts from its enqueue, and an older identical queued prompt that runs later is still the older one. The prompt may have been lost, or taken without a visible sign. You decide |
