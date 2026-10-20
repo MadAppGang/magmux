@@ -42,7 +42,8 @@ type fakeMux struct {
 func startFakeMux(t *testing.T) *fakeMux {
 	t.Helper()
 	// Not t.TempDir(): on darwin its path plus a test name overruns sun_path,
-	// so the same harness passes or fails according to what the test is called.
+	// which this fake's plain net.Listen cannot bind, so the same harness would
+	// pass or fail according to what the test is called.
 	dir, err := os.MkdirTemp("", "magmux-sdk")
 	if err != nil {
 		t.Fatal(err)

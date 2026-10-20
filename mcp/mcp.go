@@ -31,6 +31,7 @@ import (
 	"github.com/MadAppGang/magmux/buildinfo"
 	"github.com/MadAppGang/magmux/client"
 	"github.com/MadAppGang/magmux/proc"
+	"github.com/MadAppGang/magmux/sockdir"
 )
 
 // ── JSON-RPC 2.0 ────────────────────────────────────────────────────────────
@@ -195,6 +196,19 @@ func Run(args []string) int {
 		}
 	}
 
+	// The socket directory, through the same resolver as magmux's own
+	// --sock-dir. An unusable MAGMUX_SOCK_DIR stops the server before it is
+	// built, so the refusal goes to stderr and not one byte reaches stdout,
+	// whose only writer is the server. A client reports a server that failed
+	// to start and keeps its stderr; serving would instead answer every
+	// discovery with "no sessions found" for a directory nobody looked in.
+	dir, err := sockdir.Resolve("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "magmux mcp: %v\n", err)
+		return 1
+	}
+	sockdir.Dir = dir
+
 	logw := io.Writer(os.Stderr)
 	if p := os.Getenv("MAGMUX_MCP_LOG"); p != "" {
 		f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -233,7 +247,9 @@ It attaches, in priority order, to:
 
 Environment:
   MAGMUX_SOCK      socket of the host magmux, exported to every pane
-  MAGMUX_SOCK_DIR  where to look for sockets (default: /tmp)
+  MAGMUX_SOCK_DIR  where to look for sockets (default: /tmp), at any depth.
+                   If it is missing, not a directory or not writable, the
+                   server does not start: exit 1, the reason on stderr.
   MAGMUX_MCP_LOG   log file; without it, logs go to stderr
 
 If you run magmux with --sock-dir, set MAGMUX_SOCK_DIR to the same directory

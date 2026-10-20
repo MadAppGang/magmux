@@ -18,6 +18,8 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,6 +33,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/MadAppGang/magmux/unixsock"
+	"github.com/MadAppGang/magmux/unixsock/unixsocktest"
 )
 
 // ── the child MCP server ────────────────────────────────────────────────────
@@ -221,13 +226,20 @@ func (w *syncWriter) String() string {
 func startE2EMagmux(t *testing.T, bin string, args ...string) *e2eMagmux {
 	t.Helper()
 	// /tmp, not t.TempDir(): on darwin TMPDIR plus the test's own name overruns
-	// sun_path, and a unix socket under it fails to bind.
+	// sun_path, and the plain net.Dial callers in these tests cannot reach a
+	// socket there. TestMCPReachesDeepSocket picks a deep one on purpose.
 	dir, err := os.MkdirTemp("/tmp", "mmx-e2e-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
+	return startE2EMagmuxIn(t, bin, dir, args...)
+}
 
+// startE2EMagmuxIn is startE2EMagmux with the socket directory chosen by the
+// caller, who also owns its removal.
+func startE2EMagmuxIn(t *testing.T, bin, dir string, args ...string) *e2eMagmux {
+	t.Helper()
 	full := append([]string{"--headless", "--sock-dir", dir}, args...)
 	cmd := exec.Command(bin, full...)
 	cmd.Stdin = nil
@@ -258,7 +270,7 @@ func startE2EMagmux(t *testing.T, bin string, args ...string) *e2eMagmux {
 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		if conn, err := net.Dial("unix", m.sock); err == nil {
+		if conn, err := unixsock.Dial(context.Background(), &net.Dialer{}, m.sock); err == nil {
 			conn.Close()
 			return m
 		}
@@ -474,6 +486,102 @@ func TestMCPServerDrivesARealMagmux(t *testing.T) {
 	}
 	t.Logf("%d JSON-RPC lines on stdout, none of them anything else", lines)
 	t.Logf("total %v", time.Since(t0).Round(time.Millisecond))
+}
+
+// REGRESSION: G-10 deep socket paths (>= sun_path) refused or silently moved to /tmp — Fixed in /dev:fix session dev-fix-20261017-g10-socket
+//
+// TestMCPRefusesBadSockDirOnStderrOnly: an unusable MAGMUX_SOCK_DIR stops
+// `magmux mcp` before it serves, and says so on stderr. stdout belongs to the
+// protocol, so not one byte of the refusal may reach it.
+func TestMCPRefusesBadSockDirOnStderrOnly(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("subprocess test requires darwin or linux")
+	}
+	bin := e2eBinary(t)
+	missing := filepath.Join(t.TempDir(), "definitely-not-here")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "mcp")
+	// MAGMUX_MCP_LOG unset: logs go to stderr, which is where the refusal is
+	// looked for. MAGMUX_SOCK empty: no host magmux to attach to.
+	cmd.Env = append(os.Environ(), "MAGMUX_SOCK_DIR="+missing, "MAGMUX_SOCK=", "MAGMUX_MCP_LOG=")
+	cmd.Stdin = nil // /dev/null: the server sees EOF at once
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("magmux mcp did not exit within 10s\nstderr: %s", stderr.String())
+	}
+
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("run magmux mcp: %v", err)
+	}
+	if code == 0 {
+		t.Errorf("magmux mcp exited 0 with MAGMUX_SOCK_DIR=%s; want non-zero\nstderr: %s", missing, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("magmux mcp wrote %d bytes to stdout, want 0: %q", stdout.Len(), stdout.String())
+	}
+	for _, want := range []string{"MAGMUX_SOCK_DIR", missing} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr does not name %q; got %q", want, stderr.String())
+		}
+	}
+}
+
+// REGRESSION: G-10 deep socket paths (>= sun_path) refused or silently moved to /tmp — Fixed in /dev:fix session dev-fix-20261017-g10-socket
+//
+// TestMCPReachesDeepSocket: a magmux bound in a deep --sock-dir is found by
+// `magmux mcp` through MAGMUX_SOCK_DIR, probed as reachable, and driven.
+func TestMCPReachesDeepSocket(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("subprocess test requires darwin or linux")
+	}
+	bin := e2eBinary(t)
+	deep := unixsocktest.DeepDir(t, "magmux-1.sock", unixsocktest.DeepPathLen)
+
+	m := startE2EMagmuxIn(t, bin, deep, "-e", "sh")
+	if len(m.sock) < unixsocktest.DeepPathLen {
+		t.Fatalf("the socket path is %d bytes, want >= %d: %s", len(m.sock), unixsocktest.DeepPathLen, m.sock)
+	}
+
+	c := startMCPChild(t, bin, deep)
+	c.send(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize",
+		"params": map[string]any{
+			"protocolVersion": "2025-06-18",
+			"clientInfo":      map[string]any{"name": "magmux-e2e", "version": "1.0"},
+			"capabilities":    map[string]any{},
+		}})
+	c.reply(1, 15*time.Second)
+	c.send(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+	c.send(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+		"params": map[string]any{"name": "list_sessions", "arguments": map[string]any{}}})
+	listing := readPaneText(t, c.reply(2, 20*time.Second))
+	var line string
+	for _, l := range strings.Split(listing, "\n") {
+		if strings.Contains(l, "id="+m.id+" ") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("list_sessions does not list session %s:\n%s", m.id, listing)
+	}
+	if !strings.Contains(line, "sock="+m.sock+"  reachable") {
+		t.Fatalf("list_sessions does not report %s reachable:\n%s", m.sock, line)
+	}
+
+	c.send(map[string]any{"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+		"params": map[string]any{"name": "list_panes", "arguments": map[string]any{"session_id": m.id}}})
+	res := c.reply(3, 20*time.Second)
+	if res["isError"] == true {
+		t.Fatalf("list_panes on the deep session failed: %s", readPaneText(t, res))
+	}
 }
 
 func e2eToolNames(res map[string]any) map[string]bool {

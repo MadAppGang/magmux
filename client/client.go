@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/MadAppGang/magmux/protocol"
+	"github.com/MadAppGang/magmux/unixsock"
 )
 
 // Reply timeouts. Reads are cheap and local; open_pane pays for a fork/exec;
@@ -659,8 +660,8 @@ func Dial(ctx context.Context, id, sockPath string, pid int, opts ...DialOption)
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	d := net.Dialer{Timeout: 2 * time.Second}
-	conn, err := d.DialContext(ctx, "unix", sockPath)
+	// unixsock reaches a socket at any depth, past the OS's sun_path limit.
+	conn, err := unixsock.Dial(ctx, &net.Dialer{Timeout: 2 * time.Second}, sockPath)
 	if err != nil {
 		return nil, err
 	}

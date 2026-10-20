@@ -61,7 +61,7 @@ the same for the status bar.
 | `--no-idle-done` | an idle pane is resting, not finished: no ✓ DONE, and `-w` waits for exit |
 | `-x SECS` | close SECS after a driver finishes (default: wait for a keypress) |
 | `--id NAME` | bind `magmux-NAME.sock` instead of the pid socket (not all digits) |
-| `--sock-dir DIR` | bind the IPC socket in DIR instead of `/tmp` |
+| `--sock-dir DIR` | bind the IPC socket in DIR instead of `/tmp`, at any depth; exits 1 if DIR is unusable |
 
 [Remote control](#remote-control) — off unless you ask for it:
 
@@ -277,7 +277,7 @@ The palette is resolved once at startup, first answer wins: `--theme`,
 | `MAGMUX_SCROLLBACK` | `1000` | Lines of [history](#scrollback) kept per pane; `0` turns it off |
 | `MAGMUX_SEL_FG` | `0` (black) | Selection foreground (256-color index) |
 | `MAGMUX_SEL_BG` | `220` (yellow) | Selection background (256-color index) |
-| `MAGMUX_SOCK_DIR` | `/tmp` | Directory for the [IPC socket](#ipc-socket-protocol). `--sock-dir` wins over it |
+| `MAGMUX_SOCK_DIR` | `/tmp` | Directory for the [IPC socket](#ipc-socket-protocol). `--sock-dir` wins over it; an unusable directory makes magmux and `magmux mcp` exit 1 |
 | `MAGMUX_DEBUG` | (unset) | Enable debug logging to `/tmp/magmux-debug.log` |
 
 ## IPC Socket Protocol
@@ -303,9 +303,13 @@ sweep below identifies a socket as reapable *by its name being a pid*, so a live
 and almost always removable.
 
 **Directory.** `--sock-dir DIR`, or `MAGMUX_SOCK_DIR`, moves the socket out of
-`/tmp`; the flag wins. A directory that is missing, is not a directory, or would
-push the path past the OS limit on socket paths (~104 bytes on macOS) is ignored
-with a line on stderr, and `/tmp` is used. `--sock-dir` also exports
+`/tmp`; the flag wins, and when it is given the variable is not consulted. Any
+depth works, including a socket path longer than the OS limit on socket
+addresses (104 bytes on macOS, 108 on Linux). A directory that is missing, is
+not a directory or is not writable is fatal: magmux exits 1 and names the
+source, the directory and the reason on stderr, and never falls back to
+`/tmp`. So does a bind that fails (`magmux: socket PATH: ERROR`), before any
+pane starts. `--sock-dir` also exports
 `MAGMUX_SOCK_DIR` to children, so a `magmux mcp` started inside a pane finds the
 right directory — but it cannot reach an MCP server the *client* launched in its
 own process tree. For that, set `MAGMUX_SOCK_DIR` in the client's own `env`
@@ -1432,7 +1436,9 @@ shell, build or dev-server pane has no transcript, so its scrollback is.**
    pointed at. If the magmux you want was started with `--sock-dir`, set
    `MAGMUX_SOCK_DIR` to the same directory in this client's own `env` block —
    `--sock-dir` reaches magmux's children, but nothing magmux does at runtime
-   can reach a server the client launched itself.
+   can reach a server the client launched itself. A `MAGMUX_SOCK_DIR` that is
+   missing, not a directory or not writable stops `magmux mcp` before it
+   serves: exit 1, the reason on stderr, nothing on stdout.
 3. **Inside tmux.** `request_session` tells the client to use **its own** tmux
    MCP tooling to split a pane and run `magmux --id NAME -c -e '<cmd>'` there,
    then call `attach_session`.

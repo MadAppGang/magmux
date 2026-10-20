@@ -94,14 +94,25 @@ func startHeadlessMagmux(t *testing.T, args ...string) *headlessMagmux {
 
 	// sockTestDir, NOT t.TempDir(). On darwin TMPDIR is ~80 bytes and the test's
 	// own NAME is part of the path, so a unix socket under t.TempDir() overruns
-	// sun_path and net.Listen fails with "bind: invalid argument" — and a
-	// shorter test name sits just under the limit, so the same harness would
-	// pass or fail according to what the test is called. Every fixture in this
-	// repo that creates a real socket uses sockTestDir for exactly this reason.
+	// sun_path. magmux binds it anyway (unixsock), but the tests' own plain
+	// net.Dial callers cannot reach it, and a shorter test name sits just under
+	// the limit, so the same harness would pass or fail according to what the
+	// test is called. Deep directories are tested on purpose, with
+	// unixsocktest.DeepDir.
 	dir := sockTestDir(t)
-	args = append([]string{"--sock-dir", dir}, args...)
+	return spawnHeadlessMagmux(t, bin, dir, nil, append([]string{"--sock-dir", dir}, args...)...)
+}
 
+// spawnHeadlessMagmux is startHeadlessMagmux without the choice of directory:
+// args are passed as given, env (if any) is appended to the test's own
+// environment, and dir is only where the pid socket is EXPECTED — h.sock is
+// built from it whether or not magmux agrees to bind there.
+func spawnHeadlessMagmux(t *testing.T, bin, dir string, env []string, args ...string) *headlessMagmux {
+	t.Helper()
 	cmd := exec.Command(bin, args...)
+	if env != nil {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	// Stdin nil => exec hands the child os.DevNull, which is not a terminal, so
 	// auto-degrade fires with no flag at all. Tests that want the FORCED path
 	// pass --headless explicitly and assert the same outcome.
@@ -147,21 +158,33 @@ func startHeadlessMagmux(t *testing.T, args ...string) *headlessMagmux {
 // "exit code -1" would let a caller squint past it.
 func (h *headlessMagmux) wait(d time.Duration) int {
 	h.t.Helper()
-	select {
-	case <-h.exited:
-	case <-time.After(d):
+	code, ok := h.exitWithin(d)
+	if !ok {
 		_ = h.cmd.Process.Signal(syscall.SIGKILL)
 		<-h.exited
 		h.t.Fatalf("magmux did not exit within %v\nstderr: %s", d, h.stderr.String())
 	}
+	return code
+}
+
+// exitWithin is wait without the verdict: it reports whether magmux exited
+// within d and, if it did, its exit code. It leaves a running magmux running,
+// for a caller that has more to look at before the cleanup stops it.
+func (h *headlessMagmux) exitWithin(d time.Duration) (int, bool) {
+	h.t.Helper()
+	select {
+	case <-h.exited:
+	case <-time.After(d):
+		return -1, false
+	}
 	if h.waitErr == nil {
-		return 0
+		return 0, true
 	}
 	if ee, ok := h.waitErr.(*exec.ExitError); ok {
-		return ee.ExitCode()
+		return ee.ExitCode(), true
 	}
 	h.t.Fatalf("wait magmux: %v", h.waitErr)
-	return -1
+	return -1, true
 }
 
 // requireSilentStdout is AC1.4, and it is asserted by byte count rather than by

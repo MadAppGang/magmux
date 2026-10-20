@@ -1086,7 +1086,7 @@ func (m *Magmux) handleSIGWINCH() {
 // and a second one into an immediate exit.
 //
 // The handler must not unlink anything. The socket is removed inside
-// socketServer's <-m.quit goroutine, which first broadcasts `results`, then
+// serveSocket's <-m.quit goroutine, which first broadcasts `results`, then
 // `shutdown`, then closes every subscriber to give it a clean EOF *after* that
 // event. Trapping the signal and calling os.Remove(m.sockPath) is the one-line
 // version of this feature and it silently deletes `results` — the one event
@@ -1099,7 +1099,7 @@ func (m *Magmux) handleSIGWINCH() {
 // PLACEMENT: after markLayoutReady(), and nowhere earlier. The layout builders
 // write m.root, m.allPanes and m.focused WITHOUT holding treeMu — legally,
 // because startup is single-threaded up to that point. Closing m.quit inside
-// that window is what makes it multi-threaded: socketServer's teardown
+// that window is what makes it multi-threaded: serveSocket's teardown
 // goroutine wakes, calls buildPaneResults, takes treeMu.RLock and walks
 // m.allPanes while buildGrid is still writing it. -race would flag that, and it
 // is semantically wrong besides — main() would then go on to fork children for
@@ -1110,7 +1110,7 @@ func (m *Magmux) handleSIGWINCH() {
 // start through child spawn and controller attach, tens of milliseconds — keeps
 // today's default disposition, so the process dies and leaks its socket. It is
 // bounded by the socket being pid-named, which means the synchronous reaper in
-// socketServer removes it on the very next magmux start. Trading a rare
+// listenSocket removes it on the very next magmux start. Trading a rare
 // self-healing leaked file for a startup data race is the right direction.
 func (m *Magmux) handleSignals() {
 	// Buffered so a second signal is not dropped while phase 1 is still

@@ -12,6 +12,7 @@ package mux
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MadAppGang/magmux/unixsock"
 )
 
 // TestVersionFlagExitsZero pins the exit status of --version and -v.
@@ -54,7 +57,7 @@ func dialASAP(t *testing.T, sock string, within time.Duration) net.Conn {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
-		conn, err := net.Dial("unix", sock)
+		conn, err := unixsock.Dial(context.Background(), &net.Dialer{}, sock)
 		if err == nil {
 			t.Cleanup(func() { conn.Close() })
 			_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))

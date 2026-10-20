@@ -6,7 +6,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/MadAppGang/magmux/auth"
@@ -96,9 +95,9 @@ func Main(args []string) int {
 			fmt.Println("  --id NAME Bind magmux-NAME.sock instead of the pid socket ([A-Za-z0-9_-],")
 			fmt.Println("            max 64, not all digits — an all-digit name is ambiguous with")
 			fmt.Println("            a pid socket and the startup reaper could remove it)")
-			fmt.Println("  --sock-dir DIR  Bind the IPC socket in DIR instead of /tmp. Ignored with")
-			fmt.Println("            a message if DIR is missing, is not a directory, or would make")
-			fmt.Println("            the socket path too long for the OS.")
+			fmt.Println("  --sock-dir DIR  Bind the IPC socket in DIR instead of /tmp, at any depth.")
+			fmt.Println("            Fatal if DIR is missing, is not a directory or is not")
+			fmt.Println("            writable: magmux exits 1 with the reason on stderr.")
 			fmt.Println("  --listen ADDR  Also serve HTTP, WebSocket and server-sent events on ADDR")
 			fmt.Println("            (e.g. 127.0.0.1:7777 or :7777). A pane is a shell, so this is")
 			fmt.Println("            remote code execution: it is always protected by a bearer token,")
@@ -171,7 +170,8 @@ func Main(args []string) int {
 			fmt.Println("IPC Socket:")
 			fmt.Println("  /tmp/magmux-{pid}.sock — JSON line protocol")
 			fmt.Println("  /tmp/magmux-{name}.sock with --id NAME (known before magmux starts)")
-			fmt.Println("  --sock-dir DIR / MAGMUX_SOCK_DIR move the directory; /tmp is the default")
+			fmt.Println("  --sock-dir DIR / MAGMUX_SOCK_DIR move the directory; /tmp is the default.")
+			fmt.Println("  An unusable directory, or a socket that cannot be bound, exits 1.")
 			fmt.Println("  Env var MAGMUX_SOCK exported to child processes")
 			fmt.Println()
 			fmt.Println("  On startup magmux removes sockets in that directory whose owning")
@@ -250,9 +250,10 @@ func Main(args []string) int {
 			fmt.Println("                  Only the primary screen records; the ring fills lazily,")
 			fmt.Println("                  so a pane that never scrolls costs nothing.")
 			fmt.Println("  MAGMUX_SOCK_DIR Directory for the IPC socket (default: /tmp). --sock-dir")
-			fmt.Println("                  wins over it. Set this in an MCP client's own env block")
-			fmt.Println("                  as well: --sock-dir cannot reach a `magmux mcp` that the")
-			fmt.Println("                  client started in its own process tree.")
+			fmt.Println("                  wins over it, and then it is not checked. Fatal if it is")
+			fmt.Println("                  unusable, like the flag. Set this in an MCP client's own")
+			fmt.Println("                  env block as well: --sock-dir cannot reach a `magmux mcp`")
+			fmt.Println("                  that the client started in its own process tree.")
 			fmt.Println("  MAGMUX_SEL_FG   Selection foreground (256-color index, default: 0)")
 			fmt.Println("  MAGMUX_SEL_BG   Selection background (256-color index, default: 220)")
 			fmt.Println("  MAGMUX_TOKEN    The --listen bearer token. Wins over --token-file and is")
@@ -484,37 +485,28 @@ func Main(args []string) int {
 		}
 	}
 
-	// --sock-dir, resolved after the loop and not inside it, because the
-	// sun_path length check has to be made against the path that will REALLY be
-	// bound. Probing with an empty id would happily pass a directory that fits
-	// a 5-digit pid and is 40 bytes too long for a 64-character --id, and
-	// net.Listen reports that as the unhelpful "invalid argument".
-	//
-	// Never fatal: a bad --sock-dir costs the caller its chosen path and
-	// nothing else, exactly as a bad --id does. Said out loud on stderr,
-	// because an agent polling the directory it asked for would otherwise just
-	// hang.
-	var muxSockDir string
+	// The socket directory: --sock-dir, else MAGMUX_SOCK_DIR, else /tmp, through
+	// the one resolver `magmux mcp` uses too. An unusable directory is FATAL,
+	// unlike a bad --id: an agent polling the directory it asked for must get
+	// an exit status and a reason, not a socket somewhere else. This runs
+	// before prepareRemote and init(), so stderr is still a plain terminal and
+	// there is nothing to restore.
+	muxSockDir, err := sockdir.Resolve(sockDirArg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "magmux: %v\n", err)
+		return 1
+	}
+	// Three carriers, because there are three audiences. The package var
+	// reaches the MCP call sites in this process that have no *Magmux to ask;
+	// the field is what this magmux binds; the env var reaches CHILDREN,
+	// including a `magmux mcp` started from inside a pane. It cannot reach an
+	// MCP server the client started in its own process tree — nothing magmux
+	// does at runtime can — which is why MAGMUX_SOCK_DIR exists as an env var at
+	// all and not as a flag-only feature. Without the flag the env var, if any,
+	// is already what children inherit.
+	sockdir.Dir = muxSockDir
 	if sockDirArg != "" {
-		id := sockID
-		if id == "" {
-			id = strconv.Itoa(os.Getpid())
-		}
-		if dir, ok, why := sockdir.ValidDir(sockDirArg, id); ok {
-			// Three carriers, because there are three audiences. The package
-			// var reaches the four MCP call sites in this process that have no
-			// *Magmux to ask; the field is what this magmux binds; the env var
-			// reaches CHILDREN, including a `magmux mcp` started from inside a
-			// pane. It cannot reach an MCP server the client started in its own
-			// process tree — nothing magmux does at runtime can — which is why
-			// MAGMUX_SOCK_DIR exists as an env var at all and not as a
-			// flag-only feature.
-			sockdir.Dir = dir
-			muxSockDir = dir
-			os.Setenv("MAGMUX_SOCK_DIR", dir)
-		} else {
-			fmt.Fprintf(os.Stderr, "magmux: ignoring --sock-dir %q (%s); using %s\n", sockDirArg, why, sockdir.Dir)
-		}
+		os.Setenv("MAGMUX_SOCK_DIR", muxSockDir)
 	}
 
 	// Determine commands and mode
@@ -676,17 +668,28 @@ func Main(args []string) int {
 	}
 	defer mux.restore()
 
-	// Publish MAGMUX_SOCK synchronously. socketServer does this too, but it
-	// runs on its own goroutine and the sleep below is a delay, not a
-	// synchronisation primitive: on a loaded machine that goroutine can still
-	// be unscheduled when the first child forks, and the child then inherits an
-	// empty MAGMUX_SOCK with nothing to say why. The path is derived from the
-	// pid or --id, so it is known before the listener exists.
+	// Publish MAGMUX_SOCK before any child forks, so every child inherits it.
+	// The path is derived from the pid or --id, so it is known before the
+	// listener exists.
 	mux.sockPath = mux.socketPath()
 	os.Setenv("MAGMUX_SOCK", mux.sockPath)
 
-	// Start socket server before spawning children (so MAGMUX_SOCK is set)
-	go mux.socketServer()
+	// Bind SYNCHRONOUSLY, before any pane or plugin is forked. A magmux that
+	// cannot bind must not run: a caller polling the path it was promised
+	// would wait on a socket that never appears, and every child would be
+	// told a MAGMUX_SOCK nothing answers. Unwound like the layout failures
+	// below, so the message lands on the restored terminal.
+	ln, err := mux.listenSocket()
+	if err != nil {
+		mux.restore()
+		rem.cleanup()
+		fmt.Fprintf(os.Stderr, "magmux: socket %s: %v\n", mux.sockPath, err)
+		os.Exit(1)
+	}
+	// The accept loop and its teardown run on their own goroutine; the
+	// listener is already bound, so a client connecting from here on is
+	// queued and then held at the door until markLayoutReady.
+	go mux.serveSocket(ln)
 	// The HTTP surface comes up with it. Its listener is already bound, so a
 	// client connecting now is ACCEPTED and answered rather than refused at the
 	// TCP level; until markLayoutReady it gets 503 not_ready on the streaming
@@ -698,8 +701,6 @@ func Main(args []string) int {
 	// any other way out of main must release them or a client sits on the
 	// timeout for no reason.
 	defer mux.markLayoutReady()
-	// Give the socket a moment to bind before spawning children
-	sleepMs(10)
 
 	// Plugins start HERE: after MAGMUX_SOCK is published and before the layout
 	// exists. A plugin's first act is to dial that socket, and a connection
@@ -711,7 +712,7 @@ func Main(args []string) int {
 
 	// The private settings directory's two sweeps (claude_settings.go). The
 	// dead-owner sweep runs synchronously before any pane is built, beside
-	// socketServer's ReapStale and under the same deadline; the exit sweep
+	// listenSocket's ReapStale and under the same deadline; the exit sweep
 	// takes whatever copy this process still owns. It is a defer of its own,
 	// not part of restore(), because restore() returns early headless — which
 	// is exactly the mode the driven panes that get a copy run in. A hard exit

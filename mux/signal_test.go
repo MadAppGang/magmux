@@ -59,7 +59,7 @@ func TestSIGTERMTearsDownLikeAQuit(t *testing.T) {
 		t.Error("no shutdown event after SIGTERM")
 	}
 
-	// And the socket is unlinked — by socketServer's teardown goroutine, not by
+	// And the socket is unlinked — by serveSocket's teardown goroutine, not by
 	// the handler. Reaching EOF above means that goroutine got past its
 	// broadcasts; give the remaining ln.Close/os.Remove a moment to land.
 	deadline := time.Now().Add(3 * time.Second)

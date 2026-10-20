@@ -304,21 +304,6 @@ $(printf '%s\n' "$DRIVER_BUILD" | sed 's/^/       /')"
 fi
 [ -x "$DRIVER_BIN" ] || die "go build reported success but $DRIVER_BIN is not executable"
 
-# The unix socket path, measured BEFORE anything starts.
-#
-# `sockdir.sunPathMax` is 100 (sockdir/sockdir.go), a deliberate margin under
-# the smaller of the two real sun_path limits — 104 on darwin, 108 on linux.
-# Overrun it and magmux does not fail: it falls back to /tmp with a warning on
-# a stderr this launcher has redirected to a file, so the symptom is a socket
-# nobody expected in a directory the teardown does not clean. Measure it here,
-# name the limit, and refuse.
-SOCK_PATH="$STATE/magmux-$ID.sock"
-if [ "${#SOCK_PATH}" -gt 100 ]; then
-  die "the socket path would be ${#SOCK_PATH} bytes and the limit is 100 (sockdir/sockdir.go: sunPathMax):
-       $SOCK_PATH
-       set RC_DEMO_STATE to something shorter, e.g. RC_DEMO_STATE=/tmp/$ID"
-fi
-
 # ── 2. the geometry, the height budget, and the LAYOUT DECISION ────────────
 #
 # FIRST, and deliberately before the state directory, the static server, magmux

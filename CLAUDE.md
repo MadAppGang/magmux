@@ -80,7 +80,24 @@ Socket lifecycle:
 
 - `sockdir/sockdir.go` (package `sockdir`) — where the socket is bound (`--sock-dir` / `MAGMUX_SOCK_DIR`)
   and the startup sweep that removes pid-named sockets whose owner is provably
-  dead. Free functions, no `*Magmux`, no locks.
+  dead. Free functions, no `*Magmux`, no locks. `Resolve` is the ONE resolver
+  for the flag and the env, used by `mux.Main` and `mcp.Run`; an unusable
+  directory is an error (exit 1, stderr), never a fallback to `/tmp`. `Dir`
+  reads nothing at package init.
+- `unixsock/` (package `unixsock`, std only) — `Listen` and `Dial` at ANY path
+  length; every bind and dial of a magmux socket goes through it
+  (`mux/socket.go`, `client.Dial`, `mcp`'s `probeSocket`). A path under
+  `sizeof(sun_path)` takes the direct call. A longer one is addressed by a
+  short alias: on darwin the base name, on a NEW goroutine that locks its
+  thread, `__pthread_fchdir`s it and never unlocks, so the runtime discards
+  the thread and no revert exists; on linux `/proc/self/fd/<dirfd>/<name>`.
+  Never a process-wide `chdir`: other goroutines and forked children would see
+  it (`TestPerThreadCwdDoesNotLeak`). On the long branch the listener does not
+  unlink on Close and `Addr()` is the alias, so the caller removes the file by
+  its real path, which `serveSocket` and `Main` always do.
+- `mux/socket.go` — `listenSocket` (reaper sweep, stale remove, bind) runs
+  SYNCHRONOUSLY in `Main` before any pane or plugin forks, and a failed bind
+  exits 1; `serveSocket` is the accept loop and its teardown, on a goroutine.
 
 Tool controllers:
 
