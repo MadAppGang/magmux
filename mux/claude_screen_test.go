@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -122,16 +123,24 @@ const (
 // capture carries no attributes, so every rune is non-faint.
 func claudishScreen(t *testing.T, name string) ([]styledRow, int) {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(claudeScreensDir, "claudish-2.1.290-"+name+".json"))
+	return textScreen(t, "claudish-2.1.290-"+name+".json")
+}
+
+// textScreen loads any claudish-format text capture (`cols`, `lines`) by its
+// file name under testdata/claude-screens: the claudish-2.1.290-* boot
+// dialogs and the size-* captures. Every rune reads as non-faint.
+func textScreen(t *testing.T, file string) ([]styledRow, int) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(claudeScreensDir, file))
 	if err != nil {
-		t.Fatalf("read %s: %v", name, err)
+		t.Fatalf("read %s: %v", file, err)
 	}
 	var cap struct {
 		Cols  int      `json:"cols"`
 		Lines []string `json:"lines"`
 	}
 	if err := json.Unmarshal(b, &cap); err != nil {
-		t.Fatalf("parse %s: %v", name, err)
+		t.Fatalf("parse %s: %v", file, err)
 	}
 	return textRows(cap.Lines), cap.Cols
 }
@@ -618,5 +627,236 @@ func TestRuleRow(t *testing.T) {
 		if got := isRuleRow(c.text, c.cols); got != c.want {
 			t.Errorf("isRuleRow(%q…, %d) = %v", c.text[:min(len(c.text), 12)], c.cols, got)
 		}
+	}
+}
+
+// ── dialogs at small widths ─────────────────────────────────────────────────
+
+// realScreen is one real Claude screen in testdata, under a stable name.
+type realScreen struct {
+	name string
+	rows []styledRow
+	cols int
+}
+
+// allRealClaudeScreens is EVERY real screen in testdata/claude-screens: each
+// labelled moment of every s*.raw replay, the two derived s4 frames, every
+// claudish-format text capture (claudish-*, size-*) and every block of the F9
+// research capture. Nothing is drawn by hand.
+func allRealClaudeScreens(t *testing.T) []realScreen {
+	t.Helper()
+	var out []realScreen
+	for _, sc := range []string{"s1-box-history", "s2-permission", "s3-paste", "s4-midturn", "s5-insert-plan", "s6-markdown", "s7-bashmode"} {
+		for _, m := range loadClaudeMarks(t, sc) {
+			v := replayClaude(t, sc, m.Offset, m.Rows, m.Cols).tailView(0)
+			out = append(out, realScreen{sc + "/" + m.Label, v.Rows, v.Cols})
+		}
+	}
+	for _, off := range []int{s4BlinkOff, s4BlinkOn} {
+		v := replayClaude(t, "s4-midturn", off, 39, 100).tailView(0)
+		out = append(out, realScreen{"s4-midturn@" + strconv.Itoa(off), v.Rows, v.Cols})
+	}
+	for _, pat := range []string{"claudish-*.json", "size-*.json"} {
+		files, err := filepath.Glob(filepath.Join(claudeScreensDir, pat))
+		if err != nil || len(files) == 0 {
+			t.Fatalf("no %s in testdata (%v)", pat, err)
+		}
+		for _, f := range files {
+			rows, cols := textScreen(t, filepath.Base(f))
+			out = append(out, realScreen{filepath.Base(f), rows, cols})
+		}
+	}
+	for _, title := range []string{"first turn working", "after mid-turn send", "after first turn ends"} {
+		out = append(out, realScreen{"research/" + title, researchScreen(t, title), 100})
+	}
+	return out
+}
+
+// TestDialogsAt40Columns: Claude Code 2.1.304 at 40x24 (MTL-140 live
+// captures), through the whole screen reader. At 40 columns the question
+// dialog's footer wraps as `Enter to select · ↑/↓ to navigate · Esc` over
+// `to cancel`, so the dismissal hint is split across the bottom two rows; the
+// live gate at capture time still answered dismissable:false for it.
+func TestDialogsAt40Columns(t *testing.T) {
+	for _, c := range []struct {
+		file string
+		want screenWant
+	}{
+		{"size-40x24-ask-user-question.json", screenWant{dialog: "question", dismiss: true}},
+		{"size-40x24-permission-bash.json", screenWant{dialog: "permission", dismiss: true}},
+		{"size-40x24-permission-write-long-path.json", screenWant{dialog: "permission", dismiss: true}},
+		{"size-40x24-repl-boot-empty.json", screenWant{box: true}},
+		// Trust is a boot dialog: never dismissable, Escape exits Claude.
+		{"size-80x24-dialog-trust.json", screenWant{dialog: "trust"}},
+	} {
+		rows, cols := textScreen(t, c.file)
+		checkScreen(t, c.file, parseClaudeScreen(rows, cols), c.want)
+		if kind, dismiss := parseDialog(rows, cols); kind != c.want.dialog || dismiss != c.want.dismiss {
+			t.Errorf("%s: parseDialog = %q/%v, want %q/%v", c.file, kind, dismiss, c.want.dialog, c.want.dismiss)
+		}
+	}
+}
+
+// rewrapScreen re-lays a real text capture out at cols columns, the way a
+// narrower terminal would. A run of consecutive non-empty lines at the same
+// indent is one paragraph the wider capture soft-wrapped, so it is re-joined
+// first (re-wrapping each 80-column row on its own would strand a one-word
+// row after every one of them, which no terminal draws). Each paragraph keeps
+// its leading indent and its words are wrapped greedily at cols (a word longer
+// than the room stays whole); a rule row is re-drawn as cols runes of its own
+// rule rune; empty lines stay empty. Deterministic, and it adds no word the
+// capture did not hold.
+func rewrapScreen(lines []string, fromCols, cols int) []styledRow {
+	var out []string
+	indent, words := "", []string(nil)
+	flush := func() {
+		if words == nil {
+			return
+		}
+		room := cols - utf8.RuneCountInString(indent)
+		line := ""
+		for _, w := range words {
+			switch {
+			case line == "":
+				line = w
+			case utf8.RuneCountInString(line)+1+utf8.RuneCountInString(w) <= room:
+				line += " " + w
+			default:
+				out = append(out, indent+line)
+				line = w
+			}
+		}
+		out = append(out, indent+line)
+		words = nil
+	}
+	for _, l := range lines {
+		l = strings.TrimRight(l, " ")
+		if isRuleRow(l, fromCols) {
+			flush()
+			r, _ := utf8.DecodeRuneInString(strings.TrimLeft(l, " "))
+			out = append(out, strings.Repeat(string(r), cols))
+			continue
+		}
+		body := strings.TrimLeft(l, " ")
+		if body == "" {
+			flush()
+			out = append(out, "")
+			continue
+		}
+		if in := l[:len(l)-len(body)]; words == nil || in != indent {
+			flush()
+			indent = in
+		}
+		words = append(words, strings.Fields(body)...)
+	}
+	flush()
+	return textRows(out)
+}
+
+// TestTrustDialogAt40Columns: the trust marker (`Is this a project you
+// created or one you trust`, 46 runes) cannot fit one 40-column row under a
+// 1-space indent, so at 40 columns it is always split. No real 40-column trust
+// capture exists (making one means editing ~/.claude.json), so this screen is
+// a DERIVED re-wrap of the real 80x24 capture (size-80x24-dialog-trust.json)
+// by rewrapScreen — not a capture, and not hand-drawn: every word is the
+// capture's, in the capture's order. The api_key marker (45 runes) has the
+// same shape; no capture of it exists, so it is covered by the same rule
+// rather than by a screen.
+func TestTrustDialogAt40Columns(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(claudeScreensDir, "size-80x24-dialog-trust.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cap struct {
+		Cols  int      `json:"cols"`
+		Lines []string `json:"lines"`
+	}
+	if err := json.Unmarshal(b, &cap); err != nil {
+		t.Fatal(err)
+	}
+	rows := rewrapScreen(cap.Lines, cap.Cols, 40)
+	const marker = "Is this a project you created or one you trust"
+	joined := make([]string, len(rows))
+	for i, r := range rows {
+		if n := utf8.RuneCountInString(r.Text); n > 40 {
+			t.Fatalf("re-wrap left a %d-rune row: %q", n, r.Text)
+		}
+		if strings.Contains(r.Text, marker) {
+			t.Fatalf("the derived screen did not split the marker: row %d %q", i, r.Text)
+		}
+		joined[i] = strings.TrimSpace(r.Text)
+	}
+	if !strings.Contains(strings.Join(joined, " "), marker) {
+		t.Fatalf("the derived screen lost the marker")
+	}
+	if kind, dismiss := parseDialog(rows, 40); kind != "trust" || dismiss {
+		t.Errorf("parseDialog = %q/%v, want trust/false", kind, dismiss)
+		for _, r := range rows {
+			t.Logf("|%s", r.Text)
+		}
+	}
+	checkScreen(t, "trust-rewrapped-40", parseClaudeScreen(rows, 40), screenWant{dialog: "trust"})
+}
+
+// TestDialogRegionStopsAtTheRule: dialog text in HISTORY, above the first rule
+// row, is never a dialog — flattened or not. s1's assistant reply quotes
+// `Do you want to proceed?` and `Esc to cancel` (and a `❯` row) above the box;
+// the 40x24 question capture holds a `❯` prompt entry above its dialog rule.
+// parseDialog is called directly, so the box check in parseClaudeScreen cannot
+// be what hides it.
+func TestDialogRegionStopsAtTheRule(t *testing.T) {
+	v := claudePaneAt(t, "s1-box-history", "assistant-quotes-prompt-glyph-and-dialog").tailView(0)
+	var text []string
+	for _, r := range v.Rows {
+		text = append(text, plain(r))
+	}
+	all := strings.Join(text, "\n")
+	if !strings.Contains(all, "Do you want to proceed?") || !strings.Contains(all, "Esc to cancel") {
+		t.Fatalf("capture shape changed: the quoted dialog text is gone")
+	}
+	if kind, _ := parseDialog(v.Rows, v.Cols); kind != "" {
+		t.Errorf("history above the rule named a dialog: %q", kind)
+	}
+}
+
+// TestDialogKindsOnEveryRealScreen is the cross-row guard: parseDialog,
+// called directly (no box check in front of it), gives the SAME answer on
+// every real screen in testdata as it did before marker matching ran over the
+// flattened region. Recorded before that change; the one entry it changed is
+// size-40x24-ask-user-question (dismissable false → true, the wrapped
+// `Esc to cancel`). Every screen not listed has no dialog.
+func TestDialogKindsOnEveryRealScreen(t *testing.T) {
+	type got struct {
+		kind    string
+		dismiss bool
+	}
+	want := map[string]got{
+		"s2-permission/dialog-permission":            {"permission", true},
+		"s2-permission/dialog-question":              {"question", true},
+		"s5-insert-plan/dialog-plan":                 {"plan", true},
+		"claudish-2.1.290-dialog-bypass.json":        {"bypass", false},
+		"claudish-2.1.290-dialog-trust.json":         {"trust", false},
+		"size-40x24-ask-user-question.json":          {"question", true},
+		"size-40x24-permission-bash.json":            {"permission", true},
+		"size-40x24-permission-write-long-path.json": {"permission", true},
+		"size-80x24-dialog-trust.json":               {"trust", false},
+	}
+	screens := allRealClaudeScreens(t)
+	if len(screens) < 50 {
+		t.Fatalf("only %d real screens found", len(screens))
+	}
+	seen := 0
+	for _, s := range screens {
+		k, d := parseDialog(s.rows, s.cols)
+		w := want[s.name]
+		if _, ok := want[s.name]; ok {
+			seen++
+		}
+		if (got{k, d}) != w {
+			t.Errorf("%s: parseDialog = %q/%v, want %q/%v", s.name, k, d, w.kind, w.dismiss)
+		}
+	}
+	if seen != len(want) {
+		t.Errorf("%d of %d named screens found", seen, len(want))
 	}
 }

@@ -79,7 +79,9 @@ type promptEntry struct {
 
 const (
 	// dialogRegionMax bounds the dialog region in NON-EMPTY rows. In the
-	// 2.1.301 captures the permission marker is the 8th from the bottom.
+	// 2.1.301 captures the permission marker is the 8th from the bottom; a
+	// trust dialog re-wrapped to 40 columns ends its (split) marker on the
+	// 11th–12th. It bounds the region the flattened match runs over too.
 	dialogRegionMax = 14
 	// inputKeyMax bounds every comparison: a longer text is keyed on its first
 	// inputKeyMax bytes plus its non-space rune count.
@@ -121,19 +123,29 @@ var (
 // A kind matches only on its marker AND its anchor, both inside the dialog
 // region. Order matters: the boot dialogs carry the generic select footer
 // (`Enter to confirm · Esc to cancel`), so `select` is last.
+//
+// Markers run over the FLATTENED region (parseDialog), so one may span rows,
+// and the two with a gap in them are bounded and lazy (`.{0,300}?`, claudish's
+// bound) rather than `.*`: a lazy gap ends at the NEAREST `?` / `Esc to
+// cancel`, so a match can never stitch a marker's head to a tail several rows
+// further down when a nearer one exists, and 300 bytes is ~8 rows at 40
+// columns — room for a long wrapped file name and no more. A match that fit
+// one row before still fits: the gap only got an upper bound. No row-count
+// limit is added on top: the anchor already ties the match's END row to the
+// option, cursor or bottom rows, and the region itself stops at the rule.
 var claudeDialogMarkers = []struct {
 	kind   string
 	marker *regexp.Regexp
 	anchor dialogAnchor
 }{
-	{"permission", regexp.MustCompile(`Do you want to (proceed|create|make this edit to|overwrite|delete)\b.*\?`), anchorOptionBelow},
+	{"permission", regexp.MustCompile(`Do you want to (proceed|create|make this edit to|overwrite|delete)\b.{0,300}?\?`), anchorOptionBelow},
 	{"plan", regexp.MustCompile(`Would you like to proceed\?`), anchorOptionBelow},
 	{"question", regexp.MustCompile(`Enter to select · ↑/↓ to navigate`), anchorBottomRows},
 	{"trust", regexp.MustCompile(`Is this a project you created or one you trust`), anchorCursorRow},
 	{"bypass", regexp.MustCompile(`running in Bypass Permissions mode`), anchorCursorRow},
 	{"api_key", regexp.MustCompile(`Detected a custom API key in your environment`), anchorCursorRow},
 	{"onboarding", regexp.MustCompile(`Choose the text style`), anchorCursorRow},
-	{"select", regexp.MustCompile(`Enter to (confirm|select)\b.*Esc to cancel`), anchorBottomRows},
+	{"select", regexp.MustCompile(`Enter to (confirm|select)\b.{0,300}?Esc to cancel`), anchorBottomRows},
 }
 
 type dialogAnchor int
@@ -490,6 +502,17 @@ func continuesEntry(r styledRow) bool {
 // dialogRegionMax non-empty rows. Conversation history is above it by
 // construction, and the caller reads it only when no box is visible, so a
 // model writing "Do you want to proceed?" cannot produce a dialog.
+//
+// The markers are matched against the region FLATTENED (flattenRegion), not
+// row by row: at 40 columns Claude wraps them — the question footer as
+// `Enter to select · ↑/↓ to navigate · Esc` over `to cancel`, and the trust
+// and api_key markers (45–46 runes) cannot fit one row under the dialog's
+// 1-space indent at all. Flattening changes only what a marker can SEE; the
+// region boundary is the same rows as before, so it never reaches past the
+// rule into history. A match belongs to the row it ENDS on, and that row is
+// what the anchor is checked against; every match of a marker is tried, in
+// table order. The hint counts when an `Esc to cancel` ends on one of the
+// bottom two rows, which is where a footer wrapped once puts it.
 func parseDialog(rows []styledRow, cols int) (kind string, dismissable bool) {
 	var region []string // bottom-up, non-empty rows only
 	for i := len(rows) - 1; i >= 0 && len(region) < dialogRegionMax; i-- {
@@ -505,15 +528,16 @@ func parseDialog(rows []styledRow, cols int) (kind string, dismissable bool) {
 	if len(region) == 0 {
 		return "", false
 	}
+	fr := flattenRegion(region)
 	escHint := false
-	for i := 0; i < len(region) && i < 2; i++ {
-		if strings.Contains(region[i], "Esc to cancel") {
+	for _, m := range escHintRe.FindAllStringIndex(fr.text, -1) {
+		if fr.endRow(m) < 2 {
 			escHint = true
 		}
 	}
 	for _, d := range claudeDialogMarkers {
-		for i, t := range region {
-			if !d.marker.MatchString(t) || !anchored(d.anchor, region, i) {
+		for _, m := range d.marker.FindAllStringIndex(fr.text, -1) {
+			if !anchored(d.anchor, region, fr.endRow(m)) {
 				continue
 			}
 			return d.kind, dismissableDialogs[d.kind] && (escHint || dismissableWithoutHint[d.kind])
@@ -522,8 +546,50 @@ func parseDialog(rows []styledRow, cols int) (kind string, dismissable bool) {
 	return "", false
 }
 
-// anchored checks a marker found at region[i] (region is bottom-up, so the
-// rows BELOW the marker are region[i-1], region[i-2]).
+// escHintRe is the dismissal hint a dialog's footer carries.
+var escHintRe = regexp.MustCompile(`Esc to cancel`)
+
+// flatRegion is the dialog region read as ONE line of text, top-down: each
+// row trimmed, its whitespace runs collapsed to one space, the rows joined by
+// a single space — so a marker Claude wrapped at a narrow width reads exactly
+// as it does on one wide row. start[j] is the byte offset of top-down row j.
+type flatRegion struct {
+	text  string
+	start []int
+}
+
+func flattenRegion(region []string) flatRegion {
+	var fr flatRegion
+	var b strings.Builder
+	for j := len(region) - 1; j >= 0; j-- {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		fr.start = append(fr.start, b.Len())
+		b.WriteString(strings.Join(strings.Fields(region[j]), " "))
+	}
+	fr.text = b.String()
+	return fr
+}
+
+// endRow is the BOTTOM-UP region index of the row a match [start, end) ends
+// on: the row holding its last byte. Every marker ends on a non-space, so a
+// match never ends on a joining space.
+func (fr flatRegion) endRow(m []int) int {
+	last := max(m[1]-1, m[0])
+	td := 0
+	for j, s := range fr.start {
+		if s <= last {
+			td = j
+		}
+	}
+	return len(fr.start) - 1 - td
+}
+
+// anchored checks a marker whose match ENDS on region[i] (region is
+// bottom-up, so the rows BELOW that row are region[i-1], region[i-2]). The
+// anchors read the region's own rows, never the flattened text: an option or
+// cursor row is a row-shaped fact.
 func anchored(a dialogAnchor, region []string, i int) bool {
 	switch a {
 	case anchorOptionBelow:
