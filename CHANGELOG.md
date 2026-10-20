@@ -11,6 +11,8 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-10-21
+
 ### Fixed
 
 - **Dialog detection at 40 columns.** At 40 columns Claude Code wraps the
