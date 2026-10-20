@@ -927,9 +927,8 @@ try {
 // this — NO_BROWSER=1 NO_ATTACH=1 — so the demo is built in full, nothing
 // attaches, and the launcher process still owns the teardown. RC_DEMO_ID is
 // derived PER RUN, so this can collide neither with a demo a human is running
-// nor with a second copy of itself. RC_DEMO_STATE is forced under /tmp because
-// a worktree's own path plus two copies of that id can overrun the 100-byte
-// socket limit demo.sh refuses at (sockdir/sockdir.go: sunPathMax).
+// nor with a second copy of itself. RC_DEMO_STATE is a per-run directory under
+// /tmp.
 //
 // It is LAST for the same reason check 6 is last within the block above: it is
 // the only check that starts a second magmux, a second static server and a

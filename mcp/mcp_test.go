@@ -372,7 +372,8 @@ func TestProbeSocketReadsOneLine(t *testing.T) {
 
 // tempSockPath returns a short-lived socket path. t.TempDir() is not usable
 // here: on darwin it nests the test's own name under /var/folders/…, which
-// overruns sun_path's 104-byte limit and turns the test into a silent skip.
+// overruns sun_path's 104-byte limit, which this test's plain net.Listen
+// cannot bind, and turns the test into a silent skip.
 func tempSockPath(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "mmx")

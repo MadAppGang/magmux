@@ -14,6 +14,7 @@ import (
 	"github.com/MadAppGang/magmux/hub"
 	"github.com/MadAppGang/magmux/protocol"
 	"github.com/MadAppGang/magmux/sockdir"
+	"github.com/MadAppGang/magmux/unixsock"
 )
 
 // ── Unix Domain Socket IPC ──────────────────────────────────────────────────
@@ -159,30 +160,34 @@ func (m *Magmux) socketPath() string {
 	return filepath.Join(m.socketDir(), "magmux-"+id+".sock")
 }
 
-func (m *Magmux) socketServer() {
-	sockPath := m.socketPath()
-	m.sockPath = sockPath
-
-	// Set env so children inherit it
-	os.Setenv("MAGMUX_SOCK", sockPath)
+// listenSocket binds the IPC socket at m.sockPath, which the caller has set.
+// Main calls it SYNCHRONOUSLY, before any pane or plugin is forked, so a
+// magmux that cannot bind exits 1 instead of running with no socket while a
+// caller polls the path it was promised. On error nothing is left to tear
+// down, and markSocketDone has run so a shutdown never waits for a server
+// that never started.
+//
+// unixsock binds at any depth, so a deep --sock-dir is honoured. On a path
+// past sun_path its listener does not unlink on Close; serveSocket's teardown
+// and Main's exit path remove the file by its real path, which they do for
+// every socket anyway.
+func (m *Magmux) listenSocket() (*net.UnixListener, error) {
+	sockPath := m.sockPath
 
 	// Remove the sockets of magmuxes that died without cleaning up after
 	// themselves — SIGKILL, a panic, an OOM kill, power loss, and magmux's own
-	// second-signal hard exit. All of those skip the teardown below, so nothing
-	// else in the system ever removes those files; this sweep is the only
-	// recovery there is.
+	// second-signal hard exit. All of those skip the teardown in serveSocket,
+	// so nothing else in the system ever removes those files; this sweep is the
+	// only recovery there is.
 	//
-	// SYNCHRONOUS, on this goroutine, and BEFORE the bind. Not a goroutine: an
-	// untracked one can be outlived by a short run
-	// (`for i in $(seq 1 100); do magmux -w -e true; done`) and then the sweep
-	// simply never happens, silently, on exactly the workload that creates the
-	// most sockets. It is cheap enough to be synchronous — ~10ms against a
-	// 1500-entry directory, against a 50ms deadline — and main()'s 10ms sleep
-	// before forking children is explicitly "a delay, not a synchronisation
-	// primitive": MAGMUX_SOCK is published synchronously above, and clients
-	// retry.
+	// SYNCHRONOUS and BEFORE the bind. Not a goroutine: an untracked one can be
+	// outlived by a short run (`for i in $(seq 1 100); do magmux -w -e true;
+	// done`) and then the sweep simply never happens, silently, on exactly the
+	// workload that creates the most sockets. It is cheap enough to be
+	// synchronous — ~10ms against a 1500-entry directory, against a 50ms
+	// deadline.
 	//
-	// Before rather than after net.Listen so the sweep cannot observe our own
+	// Before rather than after the bind so the sweep cannot observe our own
 	// socket at all; that makes sockdir.ReapStale' path != self rule
 	// belt-and-braces rather than load-bearing, because a reaper whose safety
 	// depends on correctly recognising itself is one refactor away from
@@ -198,19 +203,22 @@ func (m *Magmux) socketServer() {
 	// Clean up stale socket
 	os.Remove(sockPath)
 
-	ln, err := net.Listen("unix", sockPath)
+	ln, err := unixsock.Listen(sockPath)
 	if err != nil {
-		// On stderr, not just dbgFile: until now a magmux that could not bind
-		// ran with NO socket and said nothing at all, so a caller polling the
-		// path it was promised simply hung. Unconditional — stderr is not the
-		// frame, and integrators read it.
-		fmt.Fprintf(os.Stderr, "magmux: socket %s: %v\n", sockPath, err)
 		if dbgFile != nil {
 			fmt.Fprintf(dbgFile, "socket listen error: %v\n", err)
 		}
 		m.markSocketDone() // nothing to tear down; don't make main wait
-		return
+		return nil, err
 	}
+	return ln, nil
+}
+
+// serveSocket accepts connections on ln until it is closed, and owns the
+// teardown that closes it. Main starts it on its own goroutine once
+// listenSocket has bound.
+func (m *Magmux) serveSocket(ln *net.UnixListener) {
+	sockPath := m.sockPath
 
 	// Cleanup on exit. The whole of the teardown ordering lives in
 	// shutdownSocket (sockconn.go): quiesce the work, build results, then

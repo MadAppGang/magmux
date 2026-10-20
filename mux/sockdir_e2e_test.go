@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/MadAppGang/magmux/pty"
+	"github.com/MadAppGang/magmux/unixsock/unixsocktest"
 )
 
 func TestSockDirFlagBindsElsewhere(t *testing.T) {
@@ -28,9 +29,8 @@ func TestSockDirFlagBindsElsewhere(t *testing.T) {
 	binPath := magmuxBinForTest(t)
 
 	// Not t.TempDir(): on darwin TMPDIR is ~80 bytes and the test name is part
-	// of the path, so the socket would overrun sun_path and net.Listen would
-	// fail with "invalid argument" — the exact failure --sock-dir's length
-	// check exists to report, and not the thing under test here.
+	// of the path, so the socket would overrun sun_path. Depth is
+	// TestSockDirFlagBindsDeepDir's subject, not this test's.
 	dir := sockTestDir(t)
 
 	master, slave, err := pty.Open()
@@ -94,59 +94,148 @@ func TestSockDirFlagBindsElsewhere(t *testing.T) {
 	}
 }
 
-// TestSockDirFlagFallsBackLoudly pins the never-fatal contract: a bad
-// --sock-dir costs the caller its chosen path and nothing else, and says so.
-// Silence here is the worst outcome — an agent polling the directory it asked
-// for would simply hang.
-func TestSockDirFlagFallsBackLoudly(t *testing.T) {
+// REGRESSION: G-10 deep socket paths (>= sun_path) refused or silently moved to /tmp — Fixed in /dev:fix session dev-fix-20261017-g10-socket
+//
+// TestSockDirFlagBindsDeepDir: a --sock-dir whose socket path is past sun_path
+// is honoured — magmux binds there, a pane sees it in MAGMUX_SOCK, and /tmp
+// gets nothing.
+func TestSockDirFlagBindsDeepDir(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		t.Skip("PTY/socket test requires darwin or linux")
+		t.Skip("subprocess test requires darwin or linux")
 	}
-	binPath := magmuxBinForTest(t)
+	bin := magmuxBinForTest(t)
 
-	master, slave, err := pty.Open()
-	if err != nil {
-		t.Fatalf("pty.Open: %v", err)
+	deep := unixsocktest.DeepDir(t, "magmux-1.sock", unixsocktest.DeepPathLen)
+	envFile := filepath.Join(deep, "env.txt")
+	h := spawnHeadlessMagmux(t, bin, deep, []string{"MAGMUX_SOCK_DIR="},
+		"--sock-dir", deep, "-w", "-e",
+		fmt.Sprintf(`sh -c 'printf "SOCK=%%s DIR=%%s\n" "$MAGMUX_SOCK" "$MAGMUX_SOCK_DIR" > %s; sleep 2'`, envFile))
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("magmux stderr: %s", h.stderr.String())
+		}
+	})
+	if len(h.sock) < unixsocktest.DeepPathLen {
+		t.Fatalf("the socket path is %d bytes, want >= %d: %s", len(h.sock), unixsocktest.DeepPathLen, h.sock)
 	}
-	defer master.Close()
-	defer slave.Close()
-	pty.SetWinSize(master, 24, 100)
 
+	dialASAP(t, h.sock, 10*time.Second)
+
+	if _, err := os.Lstat(fmt.Sprintf("/tmp/magmux-%d.sock", h.cmd.Process.Pid)); err == nil {
+		t.Errorf("/tmp/magmux-%d.sock exists; a deep --sock-dir must be honoured, not moved to /tmp", h.cmd.Process.Pid)
+	}
+
+	var got string
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(envFile); err == nil && len(b) > 0 {
+			got = string(b)
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(got, "SOCK="+h.sock+" ") {
+		t.Errorf("the pane reported %q; want MAGMUX_SOCK=%s", got, h.sock)
+	}
+}
+
+// requireRefusal asserts a loud refusal: magmux exits non-zero within 5s,
+// stderr names every string in wants, and no pid socket appeared in /tmp.
+func requireRefusal(t *testing.T, h *headlessMagmux, wants ...string) {
+	t.Helper()
+	code, exited := h.exitWithin(5 * time.Second)
+	// Checked before the cleanup stops a magmux that is still running: its
+	// teardown removes the socket.
+	tmpSock := fmt.Sprintf("/tmp/magmux-%d.sock", h.cmd.Process.Pid)
+	if _, err := os.Lstat(tmpSock); err == nil {
+		t.Errorf("%s exists: magmux fell back to /tmp instead of refusing", tmpSock)
+	}
+	stderr := h.stderr.String()
+	if !exited {
+		t.Fatalf("magmux is still running after 5s; want a non-zero exit\nstderr: %s", stderr)
+	}
+	if code == 0 {
+		t.Errorf("magmux exited 0; want non-zero\nstderr: %s", stderr)
+	}
+	for _, want := range wants {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr does not name %q; got %q", want, stderr)
+		}
+	}
+}
+
+// REGRESSION: G-10 deep socket paths (>= sun_path) refused or silently moved to /tmp — Fixed in /dev:fix session dev-fix-20261017-g10-socket
+//
+// TestSockDirFlagRefusedLoudly: an unusable --sock-dir is fatal. An agent
+// polling the directory it asked for must get an exit status, not a socket
+// somewhere else.
+func TestSockDirFlagRefusedLoudly(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("subprocess test requires darwin or linux")
+	}
+	bin := magmuxBinForTest(t)
 	missing := filepath.Join(sockTestDir(t), "definitely-not-here")
 
-	// stderr on its own pipe: on the PTY it would be tangled up in the frames.
-	cmd := exec.Command(binPath, "--sock-dir", missing, "-e", "true", "-w")
-	cmd.Stdin, cmd.Stdout = slave, slave
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start magmux: %v", err)
-	}
-	defer stopMagmux(t, cmd)
+	h := spawnHeadlessMagmux(t, bin, missing, []string{"MAGMUX_SOCK_DIR="},
+		"--sock-dir", missing, "-e", "sleep 30")
+	requireRefusal(t, h, "--sock-dir", missing, "cannot stat")
+}
 
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			if _, err := master.Read(buf); err != nil {
-				return
+// REGRESSION: G-10 deep socket paths (>= sun_path) refused or silently moved to /tmp — Fixed in /dev:fix session dev-fix-20261017-g10-socket
+//
+// TestSockDirEnvRefusedLoudly: the same rule for MAGMUX_SOCK_DIR. The env and
+// the flag go through one resolver, so they fail the same way.
+func TestSockDirEnvRefusedLoudly(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("subprocess test requires darwin or linux")
+	}
+	bin := magmuxBinForTest(t)
+	missing := filepath.Join(sockTestDir(t), "definitely-not-here")
+
+	h := spawnHeadlessMagmux(t, bin, missing, []string{"MAGMUX_SOCK_DIR=" + missing},
+		"-e", "sleep 30")
+	requireRefusal(t, h, "MAGMUX_SOCK_DIR", missing)
+}
+
+// REGRESSION: G-10 deep socket paths (>= sun_path) refused or silently moved to /tmp — Fixed in /dev:fix session dev-fix-20261017-g10-socket
+//
+// TestSockDirUnwritableExitsNonZero: a directory magmux cannot bind in is
+// fatal, whichever check catches it. Mode 0500 has no write bit at all, so the
+// directory check refuses it before any bind. Mode 0520 passes that check (a
+// write bit is set, for the group) and is still unwritable by its owner, so
+// only the bind can find out — and a bind error must end the process, not
+// leave it running with no socket.
+func TestSockDirUnwritableExitsNonZero(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("subprocess test requires darwin or linux")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root writes through any mode bits")
+	}
+	bin := magmuxBinForTest(t)
+
+	cases := []struct {
+		name  string
+		mode  os.FileMode
+		wants []string
+	}{
+		{"0500 refused by the directory check", 0o500, []string{"--sock-dir", "not writable"}},
+		{"0520 refused by the bind", 0o520, []string{"magmux: socket"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := filepath.Join(sockTestDir(t), "ro")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
 			}
-		}
-	}()
+			if err := os.Chmod(dir, c.mode); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(dir, 0o700) })
 
-	// It must still come up, on the default path.
-	fallback := fmt.Sprintf("/tmp/magmux-%d.sock", cmd.Process.Pid)
-	dialASAP(t, fallback, 10*time.Second)
-
-	buf := make([]byte, 4096)
-	n, _ := stderr.Read(buf)
-	msg := string(buf[:n])
-	if !strings.Contains(msg, "--sock-dir") {
-		t.Errorf("stderr did not mention the ignored --sock-dir; got %q", msg)
-	}
-	if !strings.Contains(msg, "/tmp") {
-		t.Errorf("stderr did not name the directory actually used; got %q", msg)
+			h := spawnHeadlessMagmux(t, bin, dir, []string{"MAGMUX_SOCK_DIR="},
+				"--sock-dir", dir, "-e", "sleep 30")
+			requireRefusal(t, h, append([]string{dir}, c.wants...)...)
+		})
 	}
 }

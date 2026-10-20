@@ -29,84 +29,74 @@ import (
 	"time"
 )
 
-// sockDirDefault is the historical, documented location and must stay
-// byte-for-byte what it was: README (×8), Taskfile (×7), test/ui/harness.ts and
-// twelve Go test sites build `/tmp/magmux-<pid>.sock` by formatting the string
-// themselves. A changed default breaks all of them SILENTLY — the wrong
-// directory is not an error, so the symptom is a dial timeout with no message.
-// Overriding is opt-in for exactly that reason.
+// sockDirDefault is the documented location and must stay byte-for-byte what
+// it is: README (×8), Taskfile (×7), test/ui/harness.ts and twelve Go test
+// sites build `/tmp/magmux-<pid>.sock` by formatting the string themselves. A
+// changed default breaks all of them SILENTLY — the wrong directory is not an
+// error, so the symptom is a dial timeout with no message. Overriding is
+// opt-in for exactly that reason.
 const sockDirDefault = "/tmp"
 
-// Dir is where magmux binds and where `magmux mcp` looks. It used to be a
-// const in mcp_spawn.go; it is a var so an override reaches all four consumers
-// that do not have a *Magmux to ask — mcp_spawn.go's ReadDir and Join, and
-// mcp_tools.go's Sprintf and TrimPrefix.
+// Dir is where magmux binds and where `magmux mcp` looks. It is a var so an
+// override reaches the consumers that do not have a *Magmux to ask —
+// mcp_spawn.go's ReadDir and Join, and mcp_tools.go's Sprintf and TrimPrefix.
 //
-// Written once, in main(), before any goroutine exists — the same discipline as
-// Magmux.pendingInput. Never written by a test in production code paths; a test
+// It starts as the default and reads nothing at package init, so importing
+// this package can neither print nor fail. Each entry point (mux.Main,
+// mcp.Run) writes it once, from Resolve, before any goroutine exists. A test
 // that wants a different directory sets the Magmux.sockDir field instead.
-var Dir = resolveSockDirEnv()
+var Dir = sockDirDefault
 
-// resolveSockDirEnv runs at package init, when the pid is known but --id is
-// NOT, so it does only the checks that do not depend on the final name. The
-// sun_path LENGTH check needs the real id and therefore happens in main(), with
-// the bind's own error (now on stderr) as the final backstop.
+// Resolve returns the socket directory for this process: flag (the --sock-dir
+// value) when it is given, else MAGMUX_SOCK_DIR when it is set, else the
+// default.
 //
-// It NEVER prints. `magmux mcp` speaks JSON-RPC on stdout and one stray byte
-// desynchronises the client for the whole session, so an invalid
-// MAGMUX_SOCK_DIR degrades silently to /tmp here; the run then reports "no
-// sessions found", which is honest. The flag path in main() is where a human
-// gets told.
-func resolveSockDirEnv() string {
-	if v := os.Getenv("MAGMUX_SOCK_DIR"); v != "" {
-		if dir, ok, _ := ValidDir(v, ""); ok {
-			return dir
-		}
+// A given flag is the whole answer: the env is not consulted, so a stale
+// MAGMUX_SOCK_DIR cannot veto a correct flag. An unusable directory, from
+// either source, is an ERROR naming the source, the directory and the reason.
+// There is no fallback: a caller polling the directory it asked for must be
+// told, not handed a socket somewhere else.
+func Resolve(flag string) (string, error) {
+	src, v := "--sock-dir", flag
+	if v == "" {
+		src, v = "MAGMUX_SOCK_DIR", os.Getenv("MAGMUX_SOCK_DIR")
 	}
-	return sockDirDefault
+	if v == "" {
+		return sockDirDefault, nil
+	}
+	dir, err := ValidDir(v)
+	if err != nil {
+		return "", fmt.Errorf("%s %q: %w", src, v, err)
+	}
+	return dir, nil
 }
 
-// sunPathMax bounds the socket path. The real limit is sizeof(sun_path) — 104
-// on darwin, 108 on linux — and net.Listen reports overrunning it as the
-// unhelpful "invalid argument". 100 keeps a margin under the smaller of the
-// two. ValidSocketID's 64-char cap was sized against /tmp
-// (`/tmp/magmux-` + 64 + `.sock` = 81); a custom directory blows that without
-// this check, which is why the check is made against the REAL final path.
-const sunPathMax = 100
-
-// ValidDir returns the directory to use, whether the request was honoured,
-// and why not. Never fatal: a bad --sock-dir costs the caller its chosen path
-// and nothing else, exactly as a bad --id does.
+// ValidDir returns dir cleaned, or an error naming why it cannot hold the
+// socket: it is empty, it cannot be stat'ed (the stat error is included), it
+// is not a directory, or nobody can write it.
 //
-// id is the id that will REALLY be bound — the --id name if there is one, else
-// the pid as a string. Passing "" (as resolveSockDirEnv does at package init,
-// where --id has not been parsed yet) skips only the length check.
+// Depth is no reason to refuse: unixsock binds and dials a socket whatever the
+// length of its path.
 //
 // Writability is checked only NEGATIVELY, by mode: a directory nobody can write
 // is certainly wrong, but "the owner bit is set" says nothing about us. The
-// definitive answer is the bind, whose error now reaches stderr.
-func ValidDir(dir, id string) (string, bool, string) {
+// definitive answer is the bind, and a failed bind is fatal too.
+func ValidDir(dir string) (string, error) {
 	if dir == "" {
-		return sockDirDefault, false, "empty"
+		return "", errors.New("empty")
 	}
 	clean := filepath.Clean(dir)
 	fi, err := os.Stat(clean)
 	if err != nil {
-		return sockDirDefault, false, "cannot stat it"
+		return "", fmt.Errorf("cannot stat it: %w", err)
 	}
 	if !fi.IsDir() {
-		return sockDirDefault, false, "not a directory"
+		return "", errors.New("not a directory")
 	}
 	if fi.Mode().Perm()&0o222 == 0 {
-		return sockDirDefault, false, "not writable by anyone"
+		return "", errors.New("not writable by anyone")
 	}
-	if id != "" {
-		p := filepath.Join(clean, "magmux-"+id+".sock")
-		if len(p) >= sunPathMax {
-			return sockDirDefault, false, fmt.Sprintf("%q is %d bytes, over the %d-byte unix socket path limit", p, len(p), sunPathMax)
-		}
-	}
-	return clean, true, ""
+	return clean, nil
 }
 
 // pidSockPattern gates DELETION and is deliberately NARROWER than
@@ -232,7 +222,7 @@ func killErrMeansGone(err error) bool {
 //
 // Rules 1-2 are the --id protection: a non-numeric name has no liveness oracle,
 // and it does not accumulate anyway, because --id rebinds one fixed path that
-// socketServer already removes before binding.
+// listenSocket already removes before binding.
 //
 // Rule 5 is deliberately ONE call. It used to be two identical adjacent calls
 // with nothing between them, on the theory that a re-check "immediately before
@@ -310,7 +300,7 @@ func ReapStale(dir, self string, deadline time.Duration) int {
 		}
 		path := filepath.Join(dir, name)
 		if path == self {
-			// Belt-and-braces: the sweep runs BEFORE net.Listen, so it never
+			// Belt-and-braces: the sweep runs BEFORE the bind, so it never
 			// sees our own socket at all. A reaper whose safety depends on
 			// correctly recognising itself is one refactor away from deleting
 			// its own socket, so the check exists but is not load-bearing.
@@ -389,9 +379,10 @@ func reapToken(dir, name string, e fs.DirEntry) bool {
 // socket path. Restricted to [A-Za-z0-9_-]+ so a name can carry no path
 // separator and no "..": the socket is created with this process's own
 // privileges, and `--id ../../home/me/.ssh/agent` must not be able to reach
-// out of /tmp and unlink something. The length cap keeps the result inside the
-// ~104-byte sun_path limit on darwin — sized against /tmp, which is why
-// --sock-dir re-checks the length against the real final path (ValidDir).
+// out of /tmp and unlink something. The length cap bounds the FILE NAME:
+// `magmux-` + 64 + `.sock` is 76 bytes, which fits the short address unixsock
+// uses for a socket in a deep directory (the bare name on darwin,
+// /proc/self/fd/N/<name> on linux), so any --sock-dir depth still binds.
 //
 // A purely NUMERIC name is rejected, and that is a deliberate, documented
 // restriction on the flag's alphabet rather than an oversight. The startup

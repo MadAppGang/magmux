@@ -11,6 +11,34 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-20
+
+### Added
+
+- **Deep socket directories.** `--sock-dir` and `MAGMUX_SOCK_DIR` are honoured
+  at any depth: magmux binds, and `magmux mcp` and the Go `client` package
+  dial, a socket whose path is longer than the OS's address limit (104 bytes
+  on macOS, 108 on Linux). On macOS the socket is addressed by its name from a
+  per-thread working directory, on a thread used for that one call and then
+  discarded; on Linux through `/proc/self/fd`. No process-wide working
+  directory changes, so panes, plugins and concurrent dials never see it.
+  The new leaf package `unixsock` does both, for any program that imports
+  `client`.
+
+### Changed
+
+- **BREAKING: an unusable `--sock-dir` or `MAGMUX_SOCK_DIR` is fatal.** A
+  directory that is missing, is not a directory or is not writable makes
+  magmux exit 1 with `magmux: --sock-dir "DIR": REASON` (or
+  `MAGMUX_SOCK_DIR "DIR"`) on stderr, and `magmux mcp` exit 1 with the same
+  reason on stderr and nothing on stdout. Neither falls back to `/tmp`: a
+  caller polling the directory it asked for now gets an exit status instead
+  of a socket somewhere else. A given `--sock-dir` is the whole answer, so a
+  stale `MAGMUX_SOCK_DIR` cannot veto a correct flag.
+- **BREAKING: a socket that cannot be bound exits 1.** magmux binds before it
+  starts any pane or plugin, and a failed bind prints
+  `magmux: socket PATH: ERROR` and exits 1 instead of running with no socket.
+
 ## [0.17.0] - 2026-10-20
 
 ### Added

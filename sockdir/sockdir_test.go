@@ -11,31 +11,13 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/MadAppGang/magmux/unixsock/unixsocktest"
 )
 
-// ── Phase 3: ValidDir ───────────────────────────────────────────────────
+// ── Phase 3: ValidDir and Resolve ───────────────────────────────────────────
 
-// dirOfLength makes a directory whose absolute path is exactly n bytes.
-//
-// It lives under /tmp rather than t.TempDir() deliberately: on darwin TMPDIR is
-// already ~80 bytes, which is over the sun_path budget before the fixture adds
-// anything, so a temp-rooted fixture cannot express "fine for a pid, too long
-// for a 64-char --id" — the exact case this check exists for.
-func dirOfLength(t *testing.T, n int) string {
-	t.Helper()
-	name := fmt.Sprintf("magmux-sockdirtest-%d-", os.Getpid())
-	dir := filepath.Join("/tmp", name)
-	if len(dir) > n {
-		t.Fatalf("cannot build a %d-byte directory: the fixture prefix is already %d", n, len(dir))
-	}
-	dir += strings.Repeat("d", n-len(dir))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
-}
-
+// REGRESSION: G-10 deep socket paths (>= sun_path) refused or silently moved to /tmp — Fixed in /dev:fix session dev-fix-20261017-g10-socket
 func TestValidSockDir(t *testing.T) {
 	good := t.TempDir()
 
@@ -43,42 +25,43 @@ func TestValidSockDir(t *testing.T) {
 	if err := os.WriteFile(regular, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	readOnly := filepath.Join(good, "readonly")
+	if err := os.Mkdir(readOnly, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(readOnly, 0o700) })
 
-	// A directory that is fine for a 5-digit pid and too long for a 64-char
-	// --id. This is the case rev 1's empty probe could not see, which is why
-	// ValidDir takes the id that will REALLY be bound.
-	longDir := dirOfLength(t, 40)
-	id64 := strings.Repeat("i", 64)
+	// A directory whose pid socket is past sun_path. unixsock binds at any
+	// depth, so depth is no reason to refuse a directory.
+	deep := unixsocktest.DeepDir(t, "magmux-1.sock", unixsocktest.DeepPathLen)
 
 	cases := []struct {
 		name string
 		dir  string
-		id   string
-		ok   bool
+		why  string // "" = accepted; else a substring the error must contain
 	}{
-		{"good", good, "12345", true},
-		{"good/no-id", good, "", true},
-		{"empty", "", "12345", false},
-		{"missing", filepath.Join(good, "nope"), "12345", false},
-		{"regular file", regular, "12345", false},
-		{"tmp cleaned", "/tmp/", "12345", true},
-		{"long dir, short id", longDir, "12345", true},
-		{"long dir, 64-char id", longDir, id64, false},
+		{"good", good, ""},
+		{"tmp cleaned", "/tmp/", ""},
+		{"deep", deep, ""},
+		{"empty", "", "empty"},
+		{"missing", filepath.Join(good, "nope"), "cannot stat"},
+		{"regular file", regular, "not a directory"},
+		{"not writable", readOnly, "not writable"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, ok, why := ValidDir(c.dir, c.id)
-			if ok != c.ok {
-				t.Fatalf("ValidDir(%q, %q) ok=%v why=%q, want ok=%v", c.dir, c.id, ok, why, c.ok)
-			}
-			if !ok {
-				if why == "" {
-					t.Errorf("a refusal must say why")
+			got, err := ValidDir(c.dir)
+			if c.why != "" {
+				if err == nil {
+					t.Fatalf("ValidDir(%q) = %q, nil; want an error containing %q", c.dir, got, c.why)
 				}
-				if got != sockDirDefault {
-					t.Errorf("a refusal must fall back to %q, got %q", sockDirDefault, got)
+				if !strings.Contains(err.Error(), c.why) {
+					t.Errorf("ValidDir(%q) error %q does not name the reason %q", c.dir, err, c.why)
 				}
 				return
+			}
+			if err != nil {
+				t.Fatalf("ValidDir(%q): %v; want it accepted", c.dir, err)
 			}
 			if got != filepath.Clean(c.dir) {
 				t.Errorf("ValidDir returned %q, want the cleaned %q", got, filepath.Clean(c.dir))
@@ -87,35 +70,62 @@ func TestValidSockDir(t *testing.T) {
 	}
 }
 
-// TestValidSockDirLengthIsCheckedAgainstTheRealPath states the property the
-// table above encodes, so a future edit that reintroduces the empty probe fails
-// with a message that explains itself.
-func TestValidSockDirLengthIsCheckedAgainstTheRealPath(t *testing.T) {
-	dir := dirOfLength(t, 40)
-	if _, ok, _ := ValidDir(dir, ""); !ok {
-		t.Fatalf("with no id the length check must not fire (dir is %d bytes)", len(dir))
-	}
-	if _, ok, why := ValidDir(dir, strings.Repeat("i", 64)); ok {
-		t.Fatalf("a 64-char --id under a %d-byte directory overruns sun_path and must be refused (why=%q)", len(dir), why)
-	}
-}
+// REGRESSION: G-10 deep socket paths (>= sun_path) refused or silently moved to /tmp — Fixed in /dev:fix session dev-fix-20261017-g10-socket
+//
+// TestResolve pins the one resolver for --sock-dir and MAGMUX_SOCK_DIR: an
+// unusable directory is an error naming its source and the directory, never a
+// quiet move to /tmp.
+func TestResolve(t *testing.T) {
+	good := t.TempDir()
+	other := t.TempDir()
+	missing := filepath.Join(good, "does-not-exist")
 
-func TestResolveSockDirEnv(t *testing.T) {
-	t.Setenv("MAGMUX_SOCK_DIR", "")
-	if got := resolveSockDirEnv(); got != sockDirDefault {
-		t.Errorf("unset MAGMUX_SOCK_DIR = %q, want %q", got, sockDirDefault)
-	}
-	dir := t.TempDir()
-	t.Setenv("MAGMUX_SOCK_DIR", dir)
-	if got := resolveSockDirEnv(); got != dir {
-		t.Errorf("MAGMUX_SOCK_DIR=%q resolved to %q", dir, got)
-	}
-	// An invalid value degrades SILENTLY to the default: `magmux mcp` speaks
-	// JSON-RPC on stdout and one stray byte desynchronises the client.
-	t.Setenv("MAGMUX_SOCK_DIR", filepath.Join(dir, "does-not-exist"))
-	if got := resolveSockDirEnv(); got != sockDirDefault {
-		t.Errorf("an invalid MAGMUX_SOCK_DIR = %q, want a silent fallback to %q", got, sockDirDefault)
-	}
+	t.Run("unset is the default", func(t *testing.T) {
+		t.Setenv("MAGMUX_SOCK_DIR", "")
+		got, err := Resolve("")
+		if err != nil || got != sockDirDefault {
+			t.Errorf("Resolve(\"\") with no env = %q, %v; want %q, nil", got, err, sockDirDefault)
+		}
+	})
+	t.Run("valid env", func(t *testing.T) {
+		t.Setenv("MAGMUX_SOCK_DIR", good)
+		got, err := Resolve("")
+		if err != nil || got != good {
+			t.Errorf("Resolve(\"\") with MAGMUX_SOCK_DIR=%q = %q, %v; want %q, nil", good, got, err, good)
+		}
+	})
+	t.Run("invalid env is an error", func(t *testing.T) {
+		t.Setenv("MAGMUX_SOCK_DIR", missing)
+		got, err := Resolve("")
+		if err == nil {
+			t.Fatalf("Resolve(\"\") with MAGMUX_SOCK_DIR=%q = %q, nil; want an error, not a fallback", missing, got)
+		}
+		for _, want := range []string{"MAGMUX_SOCK_DIR", missing} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		}
+	})
+	t.Run("valid flag wins over an invalid env", func(t *testing.T) {
+		t.Setenv("MAGMUX_SOCK_DIR", missing)
+		got, err := Resolve(other)
+		if err != nil || got != other {
+			t.Errorf("Resolve(%q) with a bad MAGMUX_SOCK_DIR = %q, %v; want %q, nil — the env must not veto a correct flag",
+				other, got, err, other)
+		}
+	})
+	t.Run("invalid flag is an error", func(t *testing.T) {
+		t.Setenv("MAGMUX_SOCK_DIR", "")
+		got, err := Resolve(missing)
+		if err == nil {
+			t.Fatalf("Resolve(%q) = %q, nil; want an error, not a fallback", missing, got)
+		}
+		for _, want := range []string{"--sock-dir", missing} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		}
+	})
 }
 
 // ── Phase 1: the reaper ─────────────────────────────────────────────────────
@@ -140,12 +150,10 @@ func deadPid(t *testing.T) int {
 //
 // NOT t.TempDir(), and this is not a style choice. On darwin TMPDIR is ~80
 // bytes and the test's own name is part of the path, so
-// `t.TempDir() + "/magmux-<pid>.sock"` runs past sun_path and net.Listen fails
-// with "bind: invalid argument" — measured here, at 111 bytes. That is exactly
-// the failure ValidDir's length check exists to catch, and it makes
-// t.TempDir() unusable for any fixture that must create a real socket inode.
-// It is also the reason the headless harness must not use t.TempDir() for
-// --sock-dir.
+// `t.TempDir() + "/magmux-<pid>.sock"` runs past sun_path — measured here, at
+// 111 bytes — and these fixtures create their socket inodes with plain
+// net.Listen, which refuses such a path with "bind: invalid argument". Deep
+// paths are unixsock's business and are tested there.
 func sockTestDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "magmux-reap-")
@@ -307,7 +315,7 @@ func TestReapStaleSockets(t *testing.T) {
 }
 
 // TestReapStaleSocketsIgnoresMissingDir pins that an unreadable or absent
-// directory is not fatal — socketServer calls this unconditionally, before the
+// directory is not fatal — listenSocket calls this unconditionally, before the
 // bind, on every start.
 func TestReapStaleSocketsIgnoresMissingDir(t *testing.T) {
 	if n := ReapStale(filepath.Join(t.TempDir(), "nope"), "", ReapDeadline); n != 0 {

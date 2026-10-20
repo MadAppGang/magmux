@@ -31,10 +31,12 @@ import (
 	"time"
 
 	"github.com/MadAppGang/magmux/sockdir"
+	"github.com/MadAppGang/magmux/unixsock"
 )
 
-// sockdir.Dir lives in sockdir.go now, alongside --sock-dir / MAGMUX_SOCK_DIR and
-// the startup reaper; the path itself is minted by Magmux.socketPath.
+// sockdir.Dir lives in sockdir.go, alongside --sock-dir / MAGMUX_SOCK_DIR and
+// the startup reaper; Run sets it from sockdir.Resolve, and the path itself is
+// minted by Magmux.socketPath.
 
 // sockNamePattern matches both shapes: the pid default and a --id name. The
 // name half is deliberately permissive — it is whatever the human typed.
@@ -160,8 +162,9 @@ func probeSocket(ctx context.Context, path string, timeout time.Duration) ([]map
 	if timeout <= 0 {
 		timeout = time.Second
 	}
-	d := net.Dialer{Timeout: timeout}
-	conn, err := d.DialContext(ctx, "unix", path)
+	// unixsock reaches a socket at any depth and wraps its errors with %w, so
+	// discoverSessions' errors.Is classification still sees the errno.
+	conn, err := unixsock.Dial(ctx, &net.Dialer{Timeout: timeout}, path)
 	if err != nil {
 		return nil, err
 	}
