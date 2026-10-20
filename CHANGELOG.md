@@ -11,6 +11,17 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dialog detection at 40 columns.** At 40 columns Claude Code wraps the
+  AskUserQuestion footer to `… · Esc` / `to cancel`, so the gate named
+  `dialog:question` but did not mark it `dismissable`. A send with
+  `dismissDialogs:true` then pressed no Escape. The dialog region is now matched
+  as one flattened line, so a wrapped hint or marker is still found. The trust
+  and API-key boot markers are longer than a 40-column row and could not be
+  named there before. The region still stops at the first rule row, so
+  conversation history above it is never read as a dialog.
+
 ## [0.18.0] - 2026-10-20
 
 ### Added
