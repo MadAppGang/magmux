@@ -168,6 +168,20 @@ func Start(cfg Config) (*Watcher, error) {
 // Budget is what this watcher was given (or what RuntimeBudget computed).
 func (w *Watcher) Budget() Budget { return w.cfg.Budget }
 
+// Holds reports whether path is held NOW: armed by the last Arm that admitted
+// it, and kept by every Verify since. A target whose identity changed and
+// whose re-arm failed is no longer held, and neither is anything once the
+// watcher has stopped. This, not an earlier Arm's report, is what a read
+// "under a watch" may rely on (review r2 #4). Caller's goroutine only, like
+// Arm and Verify.
+func (w *Watcher) Holds(path string) bool {
+	if w.stopped() {
+		return false
+	}
+	_, ok := w.held[path]
+	return ok
+}
+
 // Events yields coalesced reports. It is closed when the watcher stops.
 func (w *Watcher) Events() <-chan Event { return w.events }
 

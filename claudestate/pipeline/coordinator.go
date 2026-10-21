@@ -287,24 +287,27 @@ func (c *coordinator) agentsFinished(d agentsDone) {
 
 // cycleState is one cycle's working set. It lives for one call of cycle.
 type cycleState struct {
-	problems  []model.Problem
-	arm       watch.ArmReport
-	spine     []model.WatchTarget
-	jobsAbs   bool
-	jobDirs   []string
-	jobArmed  map[string]bool
-	jobPull   map[string]bool
-	notConv   bool
-	reg       source.RegistryResult
-	jobsRes   source.JobsResult
-	jobsList  source.Listing
-	sessions  []model.Session
-	locator   ports.PaneLocator
-	locs      map[model.Key]model.Location
-	targets   map[model.Key][]model.WatchTarget
-	over      map[string]bool
-	failed    map[string]bool
-	shed      map[string]bool
+	problems []model.Problem
+	arm      watch.ArmReport
+	spine    []model.WatchTarget
+	jobsAbs  bool
+	jobDirs  []string
+	jobArmed map[string]bool
+	jobPull  map[string]bool
+	notConv  bool
+	reg      source.RegistryResult
+	jobsRes  source.JobsResult
+	jobsList source.Listing
+	sessions []model.Session
+	locator  ports.PaneLocator
+	locs     map[model.Key]model.Location
+	targets  map[model.Key][]model.WatchTarget
+	over     map[string]bool
+	failed   map[string]bool
+	shed     map[string]bool
+	// unarmed counts the targets this cycle asked to read under a watch that
+	// were not held when the read was granted: their arm or re-arm failed.
+	unarmed   int
 	published []model.Session
 	effects   []EffectItem
 	doc       model.Fleet
@@ -446,7 +449,21 @@ func (c *coordinator) verifyIdentity(cs *cycleState) {
 func (c *coordinator) readSources(cs *cycleState) {
 	cs.reg = c.registry.Read()
 	unwatched := !c.watching()
-	permit := func(dir string) bool { return unwatched || cs.jobArmed[dir] || cs.jobPull[dir] }
+	// Armed means HELD after the verify that just ran, not "armJobDirs armed
+	// it": a directory replaced in between whose re-arm failed is not watched,
+	// and its record waits for the next cycle (review r2 #4).
+	permit := func(dir string) bool {
+		switch {
+		case unwatched || cs.jobPull[dir]:
+			return true
+		case !cs.jobArmed[dir]:
+			return false
+		case c.watcher.Holds(filepath.Join(c.cfg.Root.Jobs.Dir, dir)):
+			return true
+		}
+		cs.unarmed++
+		return false
+	}
 	if c.cfg.Root.Jobs.Dir == "" {
 		permit = func(string) bool { return true } // a tree that cannot be armed is read as a pull
 	}
@@ -630,7 +647,11 @@ func (c *coordinator) armTargets(cs *cycleState) {
 	}
 }
 
-// grant hands each actor what it may read.
+// grant hands each actor what it may read. Armed is what the watcher HOLDS
+// after the second verifyIdentity, not what armTargets reported: a target
+// replaced in between whose re-arm failed is no longer covered, and granting
+// it would read a file no watch covers (review r2 #4). Either way an
+// unarmed target is not read, and the Watch row says so.
 func (c *coordinator) grant(cs *cycleState) map[model.Key]stage.Grant {
 	out := map[model.Key]stage.Grant{}
 	for _, s := range cs.sessions {
@@ -640,8 +661,10 @@ func (c *coordinator) grant(cs *cycleState) map[model.Key]stage.Grant {
 			case g.Unwatched:
 			case cs.over[t.Path]:
 				g.Pull = append(g.Pull, t)
-			case !cs.failed[t.Path]:
+			case !cs.failed[t.Path] && c.watcher.Holds(t.Path):
 				g.Armed = append(g.Armed, t)
+			default:
+				cs.unarmed++
 			}
 		}
 		out[s.Key] = g
@@ -711,8 +734,15 @@ func (c *coordinator) sources(cs *cycleState) []model.SourceReport {
 	switch {
 	case c.watcher == nil:
 		w.State = model.SourceOff
-	case c.onDemand || len(cs.arm.Over) > 0 || len(cs.arm.Shed) > 0 || cs.notConv:
-		w.State, w.Detail = model.SourceDegraded, degradedDetail(cs.arm, c.onDemand)
+	case c.onDemand || len(cs.arm.Over) > 0 || len(cs.arm.Shed) > 0 || cs.notConv || cs.unarmed > 0:
+		var parts []string
+		if c.onDemand || len(cs.arm.Over) > 0 || len(cs.arm.Shed) > 0 || cs.notConv {
+			parts = append(parts, degradedDetail(cs.arm, c.onDemand))
+		}
+		if cs.unarmed > 0 {
+			parts = append(parts, fmt.Sprintf("%d targets could not be armed and were not read", cs.unarmed))
+		}
+		w.State, w.Detail = model.SourceDegraded, strings.Join(parts, ", ")
 	default:
 		w.State = model.SourceOK
 	}
