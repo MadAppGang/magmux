@@ -350,7 +350,7 @@ func (a *obsActions) announce(ctx context.Context, n notify.Note, published mode
 		// state of a magmux built without a port. An OUTCOME rather than a
 		// silence: an attempt with no outcome beside it means "we do not know
 		// what happened", and we know exactly what happened.
-		return a.finish(written, base, false, "", "nothing in this process can deliver a notification")
+		return a.undelivered(key, written, base, "nothing in this process can deliver a notification")
 	}
 	if ctx.Err() != nil {
 		// The batch's budget went on earlier notes. Recorded as not sent, and
@@ -365,9 +365,24 @@ func (a *obsActions) announce(ctx context.Context, n notify.Note, published mode
 	}
 	a.stats.Notifications++
 	if sendErr := a.port.Send(ctx, n); sendErr != nil {
-		return a.finish(written, base, false, "", sendErr.Error())
+		return a.undelivered(key, written, base, sendErr.Error())
 	}
 	return a.finish(written, base, true, fmt.Sprintf("notified: %s — %s", n.Title(), n.Body()), "")
+}
+
+// undelivered records a not-done outcome for a notification that was decided
+// and recorded and then not delivered, and returns the problem every sink
+// sees. The trail alone is not enough: the stage has latched the episode, so
+// the session is never announced again in it, and a person who is not
+// reading the trail would never learn the banner did not come (review r2 #5).
+// A failure to write the outcome is the problem returned instead, because it
+// says more: the trail itself is broken.
+func (a *obsActions) undelivered(key model.Key, attempt, base act.Record, why string) *model.Problem {
+	if p := a.finish(attempt, base, false, "", why); p != nil {
+		return p
+	}
+	p := hostProblem(key, fmt.Sprintf("a notification for session %s was not delivered: %s", key.SessionID, why))
+	return &p
 }
 
 // finish writes the outcome line that refers back to the attempt.

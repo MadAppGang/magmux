@@ -74,4 +74,15 @@ func TestANotificationBurstIsBoundedAsABatch(t *testing.T) {
 	if budgeted != 2 {
 		t.Errorf("%d problems name the budget, want 2 (the notes it cut off): %v", budgeted, problems)
 	}
+	// The delivery that SPENT the budget was not delivered either, and it is
+	// a problem like the two it starved (review r2 #5).
+	undelivered := 0
+	for _, p := range problems {
+		if p.Scope == model.ScopeHost && strings.Contains(p.Detail, "was not delivered") {
+			undelivered++
+		}
+	}
+	if undelivered != 1 {
+		t.Errorf("%d problems say the first note was not delivered, want 1: %v", undelivered, problems)
+	}
 }
