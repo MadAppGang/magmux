@@ -344,6 +344,90 @@ func TestIncompleteRecordsArePublishedNotDropped(t *testing.T) {
 	}
 }
 
+// D11 x FR15: a registry record with a pid and no sessionId, and a listing
+// entry naming that pid with an id, are ONE process, so they are one session.
+// The session takes the listing's id, keeps the record's facts and records the
+// listing's corroboration; the record is still incomplete, so the decoder's
+// D11 problem stands. A record with an id is unaffected.
+func TestAnIDLessRecordTakesTheIDTheListingGivesItsPID(t *testing.T) {
+	raw := []byte(`{"pid":2196,"cwd":"/rec/cwd","name":"from-record","version":"2.1.273","tmux":"t:@1.%2",` +
+		`"messagingSocketPath":"/tmp/2196.sock","kind":"interactive","status":"busy","statusUpdatedAt":1789699206204}`)
+	r, dps, err := claude.DecodeRecord("2196.json", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := problemOf(dps, model.ProblemMissingField); p == nil || p.Field != claude.KeySessionID || p.Scope != model.ScopeRecord {
+		t.Fatalf("the record is incomplete and the decoder says so: %v", dps)
+	}
+	e := entry("listed-id", 2196)
+	e.Name, e.CWD = "from-listing", "/listing/cwd"
+	other := entry("unrelated", 4242)
+	ss, ps := Build(Inputs{Records: []claude.Record{r, reg("7.json", 7, "has-id", "idle")},
+		Agents: listing(e, other, entry("other-id", 7)), Alive: oracle()})
+
+	got := map[string]model.Session{}
+	for _, s := range ss {
+		got[s.Key.String()] = s
+	}
+	if k := strings.Join(keys(ss), " "); k != "has-id/pid:7 listed-id/pid:2196 unrelated/pid:4242" {
+		t.Fatalf("one session per process: %s", k)
+	}
+	s := got["listed-id/pid:2196"]
+	if s.PID != 2196 || s.Name != "from-record" || s.CWD != "/rec/cwd" || s.Tmux == nil || s.Tmux.Raw != "t:@1.%2" ||
+		s.MessagingSocketPath == nil || *s.MessagingSocketPath != "/tmp/2196.sock" || s.Version != "2.1.273" || s.Status != model.StatusBusy ||
+		s.StatusFrom != model.SourceRegistry || s.Registry == nil || s.Registry.File != "2196.json" ||
+		!slices.Equal(s.Claimants, []int{2196}) || s.ProcessAlive != model.LivenessYes {
+		t.Fatalf("the record's facts are kept: %+v", s)
+	}
+	if !slices.Equal(s.ListedBy, []model.SourceID{model.SourceRegistry, model.SourceAgents}) {
+		t.Fatalf("the listing's corroboration is recorded: %v", s.ListedBy)
+	}
+	if len(ps) != 0 {
+		t.Fatalf("a single claimant raises no join problem: %v", ps)
+	}
+	if r.SessionID != "" {
+		t.Fatal("the record itself is not rewritten")
+	}
+	// A record WITH an id keeps it, even when the listing names its pid
+	// under another (a listing older than a /clear).
+	if s := got["has-id/pid:7"]; s.Registry == nil || slices.Contains(s.ListedBy, model.SourceAgents) {
+		t.Fatalf("an id-bearing record is unaffected: %+v", s)
+	}
+	// Input order never matters.
+	ss2, _ := Build(Inputs{Records: []claude.Record{reg("7.json", 7, "has-id", "idle"), r},
+		Agents: listing(entry("other-id", 7), other, e), Alive: oracle()})
+	if a, b := strings.Join(keys(ss), " "), strings.Join(keys(ss2), " "); a != b {
+		t.Fatalf("%s against %s", a, b)
+	}
+}
+
+// Two listing entries naming one id-less record's pid under two ids: the
+// listing contradicts itself, so the join chooses neither. The id-less row is
+// kept as it was, neither entry is admitted (the pid is on a record), and a
+// Problem on that row names both ids.
+func TestTwoListingClaimantsOnAnIDLessPIDAreNotJoined(t *testing.T) {
+	ss, ps := Build(Inputs{Records: []claude.Record{reg("2196.json", 2196, "", "idle")},
+		Agents: listing(entry("id-b", 2196), entry("id-a", 2196)), Alive: oracle()})
+	s := only(t, ss)
+	if s.Key != (model.Key{PID: 2196}) || s.Registry == nil || !slices.Equal(s.ListedBy, []model.SourceID{model.SourceRegistry}) {
+		t.Fatalf("the id-less row is kept: %+v", s)
+	}
+	if len(ps) != 1 {
+		t.Fatalf("one problem, got %v", ps)
+	}
+	p := ps[0]
+	if p.Scope != model.ScopeRecord || p.Kind != model.ProblemDuplicateKey || p.Key == nil || *p.Key != s.Key ||
+		!slices.Equal(p.PIDs, []int{2196}) || !strings.Contains(p.Detail, "id-a, id-b") {
+		t.Fatalf("the refusal is said: %+v", p)
+	}
+	// The same id twice is one claim, not two.
+	ss, ps = Build(Inputs{Records: []claude.Record{reg("2196.json", 2196, "", "idle")},
+		Agents: listing(entry("id-a", 2196), entry("id-a", 2196)), Alive: oracle()})
+	if s := only(t, ss); s.Key != (model.Key{SessionID: "id-a", PID: 2196}) || len(ps) != 0 {
+		t.Fatalf("one id named twice joins: %v %v", keys(ss), ps)
+	}
+}
+
 // The join is deterministic: input order never matters, and the output shares
 // nothing with the input.
 func TestBuildIsDeterministicAndSharesNothing(t *testing.T) {

@@ -9,6 +9,16 @@
 //	    and an admitted interactive agents entry            -> {SessionID, PID}
 //	K4  a registry record with neither                      -> {Orphan: file base name}
 //
+// Rule 1's one exception (D11 x FR15): a K3 record with a pid and NO
+// sessionId, whose pid the agents listing names under exactly one id, is
+// keyed {listing id, PID}. The listing is the only other witness to that
+// process's id, and leaving it unused would publish one process twice (the
+// record's row and the listing's) or hide the id. The record's facts and its
+// decoder's D11 problem stand: the record itself is still incomplete. Two ids
+// on the pid are refused with ProblemDuplicateKey on the id-less key. The key
+// therefore changes when the listing starts or stops naming the pid, which is
+// a new actor, as a restart is (ADR-D12). A record with an id is never re-keyed.
+//
 // Rule 2, records that produce the same key are ONE session: nothing is
 // re-keyed and nothing is published twice. The join chooses speakers among a
 // key's claimants each cycle, and the key never depends on which one speaks.
@@ -70,6 +80,9 @@ type group struct {
 	regs  []claude.Record
 	jobs  []claude.Job
 	agent *claude.AgentsEntry
+	// contested is every id the listing gives this id-less key's pid, when
+	// it gives two or more (sorted); nil otherwise.
+	contested []string
 }
 
 // Build is §3.4 in full. It returns one session per key, sorted by key, and
@@ -96,8 +109,27 @@ func Build(in Inputs) ([]model.Session, []model.Problem) {
 		return g
 	}
 	claimedIDs, claimedPIDs := map[string]bool{}, map[int]bool{}
+	listed := listedIDsByPID(in.Agents)
 	for _, r := range in.Records {
-		g := at(RegistryKey(r))
+		k := RegistryKey(r)
+		// D11 x FR15: an id-less record with a pid takes the id the listing
+		// gives that pid, when the listing gives exactly one. Two ids on one
+		// pid is the listing contradicting itself: neither is taken, and the
+		// row says so.
+		var contested []string
+		if r.SessionID == "" && r.PID > 0 {
+			switch ids := listed[r.PID]; {
+			case len(ids) == 1:
+				k.SessionID = ids[0]
+				claimedIDs[ids[0]] = true
+			case len(ids) > 1:
+				contested = ids
+			}
+		}
+		g := at(k)
+		if contested != nil {
+			g.contested = contested
+		}
 		g.regs = append(g.regs, r)
 		if r.SessionID != "" {
 			claimedIDs[r.SessionID] = true
@@ -159,6 +191,13 @@ func build(g *group, listing *claude.AgentsListing, live func(int) model.Livenes
 	if regProblem != nil {
 		regProblem.Key = keyRef()
 		problems = append(problems, *regProblem)
+	}
+	if len(g.contested) > 0 {
+		problems = append(problems, model.Problem{
+			Scope: model.ScopeRecord, Kind: model.ProblemDuplicateKey, Key: keyRef(), PIDs: []int{key.PID},
+			Detail: fmt.Sprintf("%d agents listing entries name pid %d: %s; the record has no session id and takes neither",
+				len(g.contested), key.PID, strings.Join(g.contested, ", ")),
+		})
 	}
 	job, jobProblem := jobSpeaker(g)
 	if jobProblem != nil {
@@ -344,4 +383,25 @@ func jobFacts(j claude.Job, twin, conflict bool) *model.JobFacts {
 		ResumeSessionID: j.ResumeSessionID, LinkScanPath: j.LinkScanPath, CLIVersion: j.CLIVersion,
 		Twin: twin, Conflict: conflict,
 	}
+}
+
+// listedIDsByPID maps every pid an interactive listing entry names to the
+// distinct session ids named on it, sorted. One id named twice is one claim.
+func listedIDsByPID(l *claude.AgentsListing) map[int][]string {
+	out := map[int][]string{}
+	if l == nil {
+		return out
+	}
+	for _, e := range l.Entries {
+		if e.PID == nil || *e.PID <= 0 || e.SessionID == "" || !claude.IsInteractiveEntry(e) {
+			continue
+		}
+		if ids := out[*e.PID]; !slices.Contains(ids, e.SessionID) {
+			out[*e.PID] = append(ids, e.SessionID)
+		}
+	}
+	for _, ids := range out {
+		slices.Sort(ids)
+	}
+	return out
 }

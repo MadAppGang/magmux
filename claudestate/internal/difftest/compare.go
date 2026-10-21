@@ -252,6 +252,21 @@ func fieldRules(d Diff, t, l Row, paired bool) []string {
 			out = append(out, D9b)
 		}
 	}
+	// D11 on a matched row: the library joined an id-less record to the
+	// listing entry naming its pid; tt dropped the record at parse and
+	// admitted the entry alone. Every conjunct: a matched K3 row with an id,
+	// a registry speaker and no job; the speaker's record has no sessionId;
+	// tt's row was listed by the agents listing ALONE; and the difference is
+	// either listedBy gaining exactly "registry", or a registry-speaker field
+	// on which the library has the record's value.
+	if !paired && joinedIDLess(l) && t.field(FieldListedBy) == listedByAgentsOnly {
+		switch {
+		case d.Field == FieldListedBy && d.Lib == listedByRegistryAndAgents:
+			out = append(out, D11)
+		case speakerDerived[d.Field] && !d.Lib.Null:
+			out = append(out, D11)
+		}
+	}
 	// D10: a window field.
 	if windowFields[d.Field] {
 		out = append(out, D10)
@@ -324,6 +339,28 @@ func (c *comparison) ttOnly(t Row) []string {
 		}
 	}
 	return nil
+}
+
+// The two listedBy values D11's matched-row predicate names.
+var (
+	listedByAgentsOnly        = list([]string{sourceWord(model.SourceAgents)})
+	listedByRegistryAndAgents = list([]string{sourceWord(model.SourceRegistry), sourceWord(model.SourceAgents)})
+)
+
+// joinedIDLess: a K3 library row carrying a session id, spoken for by a
+// registry record that has none (ProblemMissingField on sessionId), with no
+// job. Only join's D11 x FR15 rule makes one.
+func joinedIDLess(l Row) bool {
+	if l.Key.SessionID == "" || l.Key.PID <= 0 || l.Key.Job != "" || l.Key.Orphan != "" ||
+		!l.Lib.HasRegistry || l.Lib.HasJob {
+		return false
+	}
+	for _, p := range l.Lib.Problems {
+		if p.Kind == model.ProblemMissingField && p.Field == claude.KeySessionID && p.Path == l.Lib.RegistryFile {
+			return true
+		}
+	}
+	return false
 }
 
 func hasProblem(ps []model.Problem, k model.ProblemKind) bool {

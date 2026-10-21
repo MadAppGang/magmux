@@ -56,9 +56,6 @@ const (
 // set CI checks cannot shrink quietly.
 var notRecorded = map[string]string{
 	"k3-duplicate-99-100": "NOT VERIFIED by construction: an ascending pid map cannot keep 99.json/100.json's byte order (§8.2 step 4, §11)",
-	"tt-corpus.agents-real-37-with-waitingfor": "UNCITED, reported: tt admits the listing's c8d6e0df/pid 2196 because it drops the id-less " +
-		"registry record on that pid; the library keeps that record (D11), so FR15 refuses the entry. No D-row covers it",
-	"tt-corpus.agents-real-39": "UNCITED, reported: the same FR15 × D11 interaction as real-37-with-waitingfor",
 }
 
 type livenessOracle map[int]model.Liveness

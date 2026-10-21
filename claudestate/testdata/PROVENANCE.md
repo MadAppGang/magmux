@@ -167,19 +167,24 @@ driver had already reaped; nothing was signalled, and both sides probed with
 60011 for `magmux-corpus` (its `LIVE-PIDS.txt`) and 999001 for every
 `tt-corpus` scenario (tt's `dead-pid.json`).
 
-Three corpus scenarios have **no** reference, and the reference test lists each
-with its reason so the set cannot shrink quietly:
+One corpus scenario has **no** reference, and the reference test lists it with
+its reason so the set cannot shrink quietly:
 
 - `k3-duplicate-99-100`: NOT VERIFIED by construction. Canonically `100.json`
   speaks, byte-wise; any ascending map of two pids of one digit count reverses
   that, and the driver refuses to record a run whose speaker changed (§8.2
   step 4, §11).
-- `tt-corpus.agents-real-37-with-waitingfor` and `tt-corpus.agents-real-39`:
-  one UNCITED difference each, reported rather than recorded. tt drops the
-  id-less registry record `no-session-id.json` (pid 2196) at parse, so that pid
-  is unclaimed and tt admits the listing's interactive entry
-  `c8d6e0df-…/pid 2196`. The library keeps the record (D11), so FR15 finds the
-  pid on a record and refuses the entry. No D-row covers it.
+
+`tt-corpus.agents-real-37-with-waitingfor` and `tt-corpus.agents-real-39` were
+recorded later, on 2026-10-21, by the same command against the same tt tree,
+once `join` joined an id-less record to the listing entry naming its pid. tt
+drops `no-session-id.json` (pid 2196, no sessionId) at parse and publishes the
+listing's `c8d6e0df-…/pid 2196` alone; the library publishes the same key with
+the record's facts and the listing's corroboration. Every field difference on
+that row is cited D11 by its matched-row predicate (the library's speaker has no
+sessionId, tt's row is listed by `agents-cli` alone). The other nineteen
+references were left as first recorded: a re-record changed only instants, ages
+and spawn pids in them.
 
 ## Every file
 
@@ -378,6 +383,10 @@ with its reason so the set cannot shrink quietly:
 | `tt-reference/tt-corpus.agents-interactive-no-registry.liveness.json` | SYNTHETIC | magmux | the inputs `tt-corpus.agents-interactive-no-registry.json` was recorded against |
 | `tt-reference/tt-corpus.agents-malformed.json` | DERIVED | tt | tt 51ec374's answer for the `tt-corpus.agents-malformed` scenario |
 | `tt-reference/tt-corpus.agents-malformed.liveness.json` | SYNTHETIC | magmux | the inputs `tt-corpus.agents-malformed.json` was recorded against |
+| `tt-reference/tt-corpus.agents-real-37-with-waitingfor.json` | DERIVED | tt | tt 51ec374's answer for the `tt-corpus.agents-real-37-with-waitingfor` scenario |
+| `tt-reference/tt-corpus.agents-real-37-with-waitingfor.liveness.json` | SYNTHETIC | magmux | the inputs `tt-corpus.agents-real-37-with-waitingfor.json` was recorded against |
+| `tt-reference/tt-corpus.agents-real-39.json` | DERIVED | tt | tt 51ec374's answer for the `tt-corpus.agents-real-39` scenario |
+| `tt-reference/tt-corpus.agents-real-39.liveness.json` | SYNTHETIC | magmux | the inputs `tt-corpus.agents-real-39.json` was recorded against |
 | `tt-reference/tt-corpus.json` | DERIVED | tt | tt 51ec374's answer for the `tt-corpus` scenario |
 | `tt-reference/tt-corpus.liveness.json` | SYNTHETIC | magmux | the inputs `tt-corpus.json` was recorded against |
 | `tt-reference/twin-dead-blocked.json` | DERIVED | tt | tt 51ec374's answer for the `twin-dead-blocked` scenario |

@@ -265,6 +265,56 @@ func TestD11D12aD12b(t *testing.T) {
 	}
 }
 
+// D11 on a MATCHED row: the library joined an id-less record to the listing
+// entry naming its pid (join's D11 x FR15 rule), tt dropped the record at
+// parse and admitted the entry alone. The row's differences are the record's
+// facts, which only the library has.
+func TestD11OnARecordJoinedToItsListingEntry(t *testing.T) {
+	s := interactive("listed", 2196)
+	s.Name, s.CWD, s.Version = "from-record", "/rec", "2.1.273"
+	s.ListedBy = []model.SourceID{model.SourceRegistry, model.SourceAgents}
+	missing := model.Problem{Scope: model.ScopeRecord, Kind: model.ProblemMissingField, Path: "2196.json", Field: claude.KeySessionID}
+	fromListing := map[string]Value{FieldName: {S: "from-listing"}, FieldCWD: {S: "/listing"}, FieldClaudeVersion: null,
+		FieldListedBy: {S: `["agents-cli"]`}}
+	compare := func(s model.Session, override map[string]Value, ps ...model.Problem) []Diff {
+		l := libRow(s)
+		return Compare([]Row{ttRow(lk(s), l, override)}, []Row{l}, ps)
+	}
+	d := compare(s, fromListing, missing)
+	if len(d) != 4 {
+		t.Fatalf("%v", formatAll(d))
+	}
+	for _, x := range d {
+		if x.Cited != D11 {
+			t.Errorf("%s", x.Format())
+		}
+	}
+
+	uncited := func(name string, d []Diff) {
+		t.Helper()
+		if len(d) == 0 {
+			t.Fatalf("%s: no difference at all", name)
+		}
+		for _, x := range d {
+			if x.Cited != "" {
+				t.Errorf("%s: %s", name, x.Format())
+			}
+		}
+	}
+	uncited("no missing-field problem", compare(s, fromListing))
+	pidMissing := missing
+	pidMissing.Field = claude.KeyPID
+	uncited("the record lacks its pid, not its id", compare(s, fromListing, pidMissing))
+	uncited("tt's row did not come from the listing alone", compare(s, map[string]Value{FieldName: {S: "from-listing"}}, missing))
+	noID := s
+	noID.Key.SessionID = ""
+	uncited("the library row has no id: nothing was joined", compare(noID, fromListing, missing))
+	unnamed := s
+	unnamed.Name = ""
+	uncited("the library lacks the fact tt has", except(compare(unnamed, map[string]Value{FieldName: {S: "from-listing"}, FieldListedBy: {S: `["agents-cli"]`}}, missing), FieldListedBy))
+	uncited("a field no registry speaker decides", except(compare(s, map[string]Value{FieldModel: {S: "opus"}, FieldListedBy: {S: `["agents-cli"]`}}, missing), FieldListedBy))
+}
+
 func TestD12c(t *testing.T) {
 	job := bgSession("s", "j", 10, 11)
 	job.Job = &model.JobFacts{Dir: "j", Short: "j"}
@@ -476,4 +526,9 @@ func TestEveryCorpusScenarioHasARoot(t *testing.T) {
 	if _, err := DecodeRecorded([]byte(`{"liveness":{"1":"maybe"}}`)); err == nil {
 		t.Fatal("a liveness word outside alive|dead must refuse")
 	}
+}
+
+// except drops the differences on one field.
+func except(d []Diff, field string) []Diff {
+	return slices.DeleteFunc(slices.Clone(d), func(x Diff) bool { return x.Field == field })
 }
