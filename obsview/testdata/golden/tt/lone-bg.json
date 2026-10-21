@@ -1,0 +1,28 @@
+{
+  "epoch": "2026-09-18T02:40:11.204Z",
+  "sessions": [
+    {
+      "id": "857ef435-aa77-46f9-bb28-ca9c5374be9d",
+      "pid": 65863,
+      "paneId": null,
+      "name": "flock-setup",
+      "status": "waiting",
+      "statusRaw": "waiting",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-22T01:05:14.899Z",
+      "waitingOn": "input",
+      "waitingOnRaw": "input needed",
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": true,
+        "reason": "it is waiting for you to type something, for -94h 25m"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    }
+  ]
+}

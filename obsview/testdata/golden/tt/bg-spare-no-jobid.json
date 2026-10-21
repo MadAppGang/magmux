@@ -1,0 +1,27 @@
+{
+  "epoch": "2026-09-18T02:40:11.204Z",
+  "sessions": [
+    {
+      "id": "30000000-0000-4000-8000-000000000041",
+      "pid": 70041,
+      "paneId": null,
+      "name": "synthetic-session",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 5.0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    }
+  ]
+}

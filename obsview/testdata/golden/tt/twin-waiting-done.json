@@ -1,0 +1,28 @@
+{
+  "epoch": "2026-09-18T02:40:11.204Z",
+  "sessions": [
+    {
+      "id": "20000000-0000-4000-8000-000000000003",
+      "pid": 70002,
+      "paneId": null,
+      "name": "synthetic-session",
+      "status": "waiting",
+      "statusRaw": "waiting",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": "input",
+      "waitingOnRaw": "input needed",
+      "processAlive": "no",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its process has exited"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    }
+  ]
+}
