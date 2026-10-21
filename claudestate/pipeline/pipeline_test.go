@@ -607,7 +607,10 @@ func TestADocumentWithNoProjectsTreeReadsNoTranscript(t *testing.T) {
 // about something that was done (review r1 #6b). It gets fn's own answer if
 // that is ready, and otherwise ErrOutcomeUnknown (review r2 #2, which
 // replaced r1's "wait for fn whatever happens"). Here fn ignores the cancel
-// for 50ms, so the unknown outcome is what comes back.
+// for 50ms, so the unknown outcome is what USUALLY comes back, but which of
+// the two arrives is scheduling this test does not control, and it asserts
+// only that a bare cancellation never does. The unknown outcome itself is
+// pinned deterministically in outcome_test.go.
 func TestAnExecThatRanIsNeverReportedAsCancelled(t *testing.T) {
 	h := start(t, Config{Root: ports.Root{Sessions: mapTree("/s", fstest.MapFS{})}})
 	sentinel := errors.New("fn's own answer")

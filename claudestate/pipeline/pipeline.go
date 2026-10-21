@@ -67,7 +67,11 @@ var (
 	// context ended AFTER the work was accepted and before its result came
 	// back. The work may have run, may be running and may yet complete: it is
 	// neither a success nor a refusal, and a host that records outcomes (an
-	// audit trail) must record it as unknown, never as "not done". It always
+	// audit trail) should record it as unknown rather than as "not done". That
+	// is advice, not a contract the library can hold a host to: magmux's audit
+	// trail files it as done:false with this error's text ("may have run") in
+	// the line, a limitation it pins in TestAnOutcomeUnknownWearsANotDoneShape,
+	// because an unknown outcome is a schema change to its trail. It always
 	// wraps the context's own error, so errors.Is(err, context.Canceled) and
 	// errors.Is(err, context.DeadlineExceeded) still answer which.
 	ErrOutcomeUnknown = errors.New("pipeline: accepted, and the caller stopped waiting before the outcome was known; it may have run")
@@ -137,12 +141,22 @@ type Ops interface {
 	// Call runs fn on k's actor goroutine. find looks a stage up by Name().
 	// fn must return promptly: the actor serves nothing else while it runs.
 	//
-	// ctx follows Exec's acceptance rule, one level down. Before the actor
-	// has fn, an ended ctx is ctx.Err() and fn never runs; once it has fn, an
+	// ctx follows Exec's acceptance rule, one level down, where the line is
+	// ENQUEUED rather than accepted: the actor's inbox is buffered, so fn may
+	// be queued behind the cycle's own messages when ctx ends. Before fn is
+	// enqueued, an ended ctx is ctx.Err() and fn never runs; once it is, an
 	// answer already given wins, and a ctx that ends first is
-	// ErrOutcomeUnknown wrapping ctx.Err() — fn may be completing (a focus
-	// that moves the keyboard) and must not be reported as not done. An actor
+	// ErrOutcomeUnknown wrapping ctx.Err() — fn may be running, may be
+	// completing (a focus that moves the keyboard) or may yet run, with that
+	// ended ctx in its closure, and must not be reported as not done. An actor
 	// that is gone is ErrNoSuchKey.
+	//
+	// Precedence: a key the coordinator has no actor for is ErrNoSuchKey
+	// before ctx is looked at. For a key it has, a ctx already ended when Call
+	// is made is ctx.Err(), even if that actor's loop has exited. When ctx
+	// ends AND the loop exits during the wait, either answer may come back,
+	// and neither claims fn ran: an actor answers every message it took before
+	// it exits, so an exited actor with no answer never ran fn.
 	Call(ctx context.Context, k model.Key, fn func(s model.Session, find func(name string) (stage.Stage, bool)) error) error
 }
 
@@ -404,8 +418,9 @@ func (p *Pipeline) RefreshSources(ctx context.Context, ids []model.SourceID) (Re
 //   - accepted, and ctx ended first: ErrOutcomeUnknown wrapping ctx.Err(),
 //     at once. fn has run, is running or will finish; Exec does not wait for
 //     it, so a fn that ignores ctx cannot hold the caller. A host recording
-//     outcomes records this one as unknown — never as "not done" — and reads
-//     its own record (the audit trail) for what happened.
+//     outcomes should record this one as unknown rather than "not done", and
+//     read its own record (the audit trail) for what happened; see
+//     ErrOutcomeUnknown for the host that does not yet.
 //
 // Exec never blocks for ever: it returns on fn's answer, ctx ending, or Stop.
 func (p *Pipeline) Exec(ctx context.Context, fn func(context.Context, Ops) error) error {

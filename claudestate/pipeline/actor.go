@@ -241,11 +241,18 @@ func (g *paneGate) Observe(s model.Session) model.Session {
 	return s
 }
 
-// callOn runs fn on k's actor and waits, under Ops.Call's acceptance rule:
-// before the actor takes fn an ended ctx is a plain refusal, after it a reply
-// already sent wins and an ended ctx is ErrOutcomeUnknown (review r2 #3). The
-// actor answers a message it took before it handles another, so a reply that
-// is ready is always the answer.
+// callOn runs fn on k's actor and waits, under Ops.Call's acceptance rule.
+// The line is the ENQUEUE, not the actor taking fn: a.in is buffered
+// (actorBacklog), so fn can sit behind the cycle's own messages. Before the
+// send completes an ended ctx is a plain refusal; after it a reply already
+// sent wins and an ended ctx is ErrOutcomeUnknown (review r2 #3), because fn
+// may yet run, with the ended ctx in its closure. The actor answers a message
+// it took before it handles another, so a reply that is ready is always the
+// answer, and a retired actor with no reply never ran fn.
+//
+// Precedence (review r3, LOW 8): ctx is checked first, so a ctx that has
+// already ended is ctx.Err() even when the actor's loop has exited. When both
+// happen during a wait, the select picks either, and neither claims fn ran.
 func callOn(ctx context.Context, a *actor, fn func(model.Session, func(string) (stage.Stage, bool)) error) error {
 	if err := ctx.Err(); err != nil {
 		return err // never offered: a ready send would win the select at random
