@@ -345,7 +345,17 @@ The SINKS — where a person sees the document without running a command:
   `mux/obsact.go`'s announcer on the coordinator's goroutine. Each delivery
   is bounded by the port, because the pipeline starts no timers, and the whole
   batch of one cycle by `notifyBatchBudget` (one port bound): a note the budget
-  cuts off is recorded as not sent and rides out as a `ScopeHost` problem.
+  cuts off is recorded as not sent and rides out as a `ScopeHost` problem, and
+  so does a note whose delivery failed or that no port could deliver. **Each of
+  those is FINAL for its episode.** The stage latches the episode when it emits
+  the Note, not when the banner appears, so the session is not announced again
+  until it leaves the waiting state and comes back. The panel's problem is
+  the only notice. One delivery that runs to its timeout spends the whole
+  budget, so a burst behind a hung `osascript` loses every banner after the
+  first. This is deliberate: un-latching needs the announcer to reach the
+  session's actor, and `OnEffects` cannot `Exec` (its context is reentrant).
+  A larger budget would undo the stall bound. Coalescing a burst into one
+  banner is a product decision nobody has taken (review round 2, #6).
   Before review round 1, a startup burst cost one bound per waiting session,
   back to back, on the goroutine that serves every cycle and every
   `agents focus`.

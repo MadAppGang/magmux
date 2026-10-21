@@ -286,6 +286,11 @@ func hostProblem(k model.Key, detail string) model.Problem {
 // written BEFORE the port is called, and if it cannot be written the
 // notification DOES NOT HAPPEN.
 //
+// So an attempt line does not mean the port was called. A note the batch
+// budget cut off gets an attempt and a "not sent" outcome although nothing
+// was handed to the port at all, and so does a note with no port to hand it
+// to. Only a done:true outcome says a delivery happened.
+//
 // # Suppressing an unrecordable notification, and why the latch stays set
 //
 // That choice has a real cost — an unwritable state directory silences
