@@ -150,7 +150,7 @@ func obsFocus(cfg obsFocusConfig) int {
 	if cfg.AuditPath != "" {
 		w, err := act.NewWriter(act.WriterConfig{Path: cfg.AuditPath})
 		if err != nil {
-			fmt.Fprintf(errw, "magmux agents focus: %v\n", err)
+			focusLine(errw, "magmux agents focus: %v", err)
 			return 1
 		}
 		auditor = w
@@ -182,13 +182,13 @@ func obsFocus(cfg obsFocusConfig) int {
 	if binds {
 		d, err := obsFocusDocument(cfg, locator)
 		if err != nil {
-			fmt.Fprintf(errw, "magmux agents focus: %v\n", err)
+			focusLine(errw, "magmux agents focus: %v", err)
 			return 1
 		}
 		named, err := resolveObsTarget(d.Doc, cfg.Target)
 		if err != nil {
 			writeFocusProblems(errw, d)
-			fmt.Fprintf(errw, "magmux agents focus: %v\n", explainNotFound(cfg, err))
+			focusLine(errw, "magmux agents focus: %v", explainNotFound(cfg, err))
 			return 1
 		}
 		targetKey = named.Key
@@ -208,7 +208,7 @@ func obsFocus(cfg obsFocusConfig) int {
 	// made of a pane's own traffic and the socket carries none of it.
 	p, d, err := obsFocusPipeline(cfg, locator, focuser)
 	if err != nil {
-		fmt.Fprintf(errw, "magmux agents focus: %v\n", err)
+		focusLine(errw, "magmux agents focus: %v", err)
 		return 1
 	}
 	defer p.Stop()
@@ -224,13 +224,13 @@ func obsFocus(cfg obsFocusConfig) int {
 			}
 		}
 		if !found {
-			fmt.Fprintf(errw, "magmux agents focus: session %s is no longer observed\n", targetKey)
+			focusLine(errw, "magmux agents focus: session %s is no longer observed", targetKey)
 			return 1
 		}
 	} else {
 		target, err = resolveObsTarget(d.Doc, cfg.Target)
 		if err != nil {
-			fmt.Fprintf(errw, "magmux agents focus: %v\n", explainNotFound(cfg, err))
+			focusLine(errw, "magmux agents focus: %v", explainNotFound(cfg, err))
 			return 1
 		}
 	}
@@ -248,7 +248,7 @@ func obsFocus(cfg obsFocusConfig) int {
 	}
 	if auditor != nil {
 		if w, isWriter := auditor.(*act.Writer); isWriter {
-			fmt.Fprintf(out, "audit trail: %s\n", w.Path())
+			focusLine(out, "audit trail: %s", w.Path())
 		}
 	}
 	if doErr != nil {
@@ -256,7 +256,7 @@ func obsFocus(cfg obsFocusConfig) int {
 		// something and got exit 0 without it happening cannot tell that from
 		// success — the same rule the gate applies to its own return value,
 		// applied to the process's.
-		fmt.Fprintf(errw, "magmux agents focus: %v\n", doErr)
+		focusLine(errw, "magmux agents focus: %v", doErr)
 		return 1
 	}
 	return 0
@@ -265,7 +265,7 @@ func obsFocus(cfg obsFocusConfig) int {
 // writeFocusProblems prints a document's problems, through the display rule.
 func writeFocusProblems(w io.Writer, d pipeline.Delivery) {
 	for _, pr := range d.Problems {
-		fmt.Fprintf(w, "magmux agents focus: %s\n", obsview.DisplaySafe(pr.Error()))
+		focusLine(w, "magmux agents focus: %s", pr.Error())
 	}
 }
 
@@ -451,34 +451,33 @@ func writeFocusReport(out io.Writer, target model.Session, report act.Report) {
 	if target.Key.Job != "" {
 		job = ", job " + target.Key.Job
 	}
-	fmt.Fprintf(out, "session %s (pid %d%s%s)\n", target.Key.SessionID, target.PID, job, focusPaneText(target))
+	focusLine(out, "session %s (pid %d%s%s)", target.Key.SessionID, target.PID, job, focusPaneText(target))
 	if report.Decision.Rule != "" {
-		fmt.Fprintf(out, "policy: %s\n", report.Decision.Rule)
+		focusLine(out, "policy: %s", report.Decision.Rule)
 	}
 	if report.Result.Done {
-		fmt.Fprintf(out, "done: %s\n", report.Result.Detail)
+		focusLine(out, "done: %s", report.Result.Detail)
 	}
 	for _, r := range report.Records {
-		fmt.Fprintf(out, "audit: %s\n", auditLineText(r))
+		focusLine(out, "audit: %s", auditLineText(r))
 	}
 }
 
 // auditLineText is one audit record in one line of prose. The JSON is the
 // record; this is the reading of it.
 func auditLineText(r act.Record) string {
-	b := &strings.Builder{}
-	fmt.Fprintf(b, "#%d %s %s/%s", r.Seq, r.Event, r.Tier, r.Verb)
+	s := fmt.Sprintf("#%d %s %s/%s", r.Seq, r.Event, r.Tier, r.Verb)
 	if r.Outcome != nil {
 		switch {
 		case r.Outcome.Refused:
-			fmt.Fprintf(b, " — refused: %s", r.Outcome.Error)
+			s += " — refused: " + r.Outcome.Error
 		case r.Outcome.Error != "":
-			fmt.Fprintf(b, " — failed: %s", r.Outcome.Error)
+			s += " — failed: " + r.Outcome.Error
 		case r.Outcome.Detail != "":
-			fmt.Fprintf(b, " — %s", r.Outcome.Detail)
+			s += " — " + r.Outcome.Detail
 		}
 	}
-	return b.String()
+	return s
 }
 
 // writeAuditJSON emits the records, one whole object per line, which is the
@@ -493,11 +492,11 @@ func writeAuditJSON(out io.Writer, records []act.Record) {
 	for _, r := range records {
 		buf.Reset()
 		if err := enc.Encode(r); err != nil {
-			fmt.Fprintf(os.Stderr, "magmux agents focus: encoding an audit record: %v\n", err)
+			focusLine(os.Stderr, "magmux agents focus: encoding an audit record: %v", err)
 			continue
 		}
 		if _, err := out.Write(obsview.TerminalSafeJSON(buf.Bytes())); err != nil {
-			fmt.Fprintf(os.Stderr, "magmux agents focus: writing an audit record: %v\n", err)
+			focusLine(os.Stderr, "magmux agents focus: writing an audit record: %v", err)
 			return
 		}
 	}
@@ -570,4 +569,16 @@ Exit status is 0 only when the action happened. A refusal exits 1: a caller
 that asked for something and got exit 0 without it happening cannot tell that
 from success.
 `)
+}
+
+// focusLine prints ONE line of this command's output, through
+// obsview.DisplaySafe, the one rule for registry text reaching a person
+// (review r1 #7). Every line goes through it, because almost every line
+// carries registry text: a session id (which the decoder does not validate),
+// a job short, a candidate list in an ambiguity refusal, an outcome that can
+// quote a remote magmux's socket error. DisplaySafe also turns a newline into
+// a space, so a hostile value cannot forge a line of its own.
+// TestEveryAgentsFocusLineGoesThroughTheDisplayRule keeps it the only way.
+func focusLine(w io.Writer, format string, args ...any) {
+	fmt.Fprintln(w, obsview.DisplaySafe(fmt.Sprintf(format, args...)))
 }
