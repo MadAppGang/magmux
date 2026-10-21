@@ -17,7 +17,11 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # "Pin is current" reads the history of claudestate/, which a shallow
+      # clone does not have.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -33,6 +37,31 @@ jobs:
             exit 1
           fi
 
+      # The root requires claudestate by VERSION (architecture §7). A replace
+      # or a committed workspace would build the in-tree copy here and the
+      # pinned one for everybody who installs magmux, so neither may land.
+      - name: No replace and no committed go.work
+        run: |
+          if grep -qE '^[[:space:]]*replace([[:space:]]|\()' go.mod claudestate/go.mod; then echo "::error::replace directive in a go.mod"; exit 1; fi
+          if [ -n "$(git ls-files go.work go.work.sum)" ]; then echo "::error::go.work is committed"; exit 1; fi
+
+      # Before claudestate's first tag the root pins a pseudo-version of the
+      # last commit that touches claudestate/. This step is what makes a
+      # GOWORK=off build of the root compile exactly the in-tree library: a
+      # library commit without its re-pin turns the PR tip red until the
+      # re-pin lands (architecture §7.2). A tagged pin is the release gate's.
+      - name: Pin is current
+        run: |
+          pin=$(awk '$1=="github.com/MadAppGang/magmux/claudestate"{print $2}' go.mod)
+          if [ -n "$pin" ]; then
+            want=$(git log -1 --format=%H -- claudestate/ | cut -c1-12)
+            case "$pin" in
+              *-"$want") ;;
+              v0.0.0-*) echo "::error::claudestate is pinned at $pin, but the last commit touching claudestate/ is $want; re-pin (architecture §7.2)"; exit 1 ;;
+              *) ;;  # a tagged version; the release gate owns that case
+            esac
+          fi
+
       - name: Build
         run: go build -v ./...
 
@@ -43,6 +72,19 @@ jobs:
       # so they only run on darwin/linux — which is exactly the matrix here.
       - name: Test
         run: go test -race ./...
+
+      # The root's pin test (cmd/magmux/deps_test.go) is only meaningful if
+      # go.mod is exactly what tidy writes; the status check also catches a
+      # go.sum line tidy ADDED, which git diff alone would not show as new.
+      - name: Root go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          if [ -n "$(git status --porcelain -- go.mod go.sum)" ]; then
+            echo "::error::go mod tidy changed go.mod or go.sum"
+            git status --porcelain -- go.mod go.sum
+            exit 1
+          fi
 
       # claudestate/ is a nested module, so the root's ./... never descends
       # into it (`go help packages`). It gets its own steps. _probe and _diff

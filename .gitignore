@@ -47,3 +47,9 @@ ai-docs/sessions/
 .claude/.magus-backups/
 .claude/settings.json
 .mcp.json
+
+# A local workspace over the root and claudestate/ (architecture §7.2) is a
+# developer's own setup and is never committed: the root requires claudestate
+# by version, and CI refuses a committed go.work.
+go.work
+go.work.sum
