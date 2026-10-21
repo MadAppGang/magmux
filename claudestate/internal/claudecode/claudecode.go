@@ -217,8 +217,11 @@ type decoding struct {
 //     mtime is older than any tick a later write can share, every later
 //     write moves it. A nil Now keeps no key at all.
 //
-// Everything else stays per cycle: the read permit, the subagent count and
-// the implausible-instant Problem.
+// Everything else stays per cycle: the read permit and the subagent count.
+// The implausible-instant Problem is raised every cycle too, but only because
+// what it is raised FROM (ImplausibleInstants and ImplausibleField) rides in
+// the cached Facts and Timing: a cache that kept less than the whole decoded
+// values would drop it silently (review r2 #7).
 func (st *Stage) decoded(path string) (decoding, error) {
 	info, serr := fs.Stat(st.cfg.Projects.FS, path)
 	if m := st.last; serr == nil && m.path == path && !m.mod.IsZero() &&
