@@ -1,0 +1,11 @@
+[
+  {
+    "pid": 987654,
+    "cwd": "/Users/user/dev/epsilonapp/epsilonapp-backend/.claude/worktrees/kilo",
+    "kind": "interactive",
+    "startedAt": 1789536674178,
+    "sessionId": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+    "name": "listed-but-unregistered",
+    "status": "idle"
+  }
+]

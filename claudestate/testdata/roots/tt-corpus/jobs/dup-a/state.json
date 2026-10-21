@@ -1,0 +1,27 @@
+{
+  "state": "blocked",
+  "detail": "SYNTHETIC detail",
+  "tempo": "blocked",
+  "inFlight": {
+    "kinds": [],
+    "queued": 0,
+    "tasks": 0
+  },
+  "tokens": 47104,
+  "children": null,
+  "linkScanOffset": 2101161,
+  "linkScanPath": "",
+  "template": "bg",
+  "bgIsolation": "none",
+  "name": "SYNTHETIC name",
+  "nameSource": "auto",
+  "sessionId": "77777777-7777-4777-8777-777777777777",
+  "resumeSessionId": "77777777-7777-4777-8777-777777777777",
+  "daemonShort": "dup-a",
+  "cliVersion": "2.1.233",
+  "cwd": "/Users/user/dotfiles",
+  "createdAt": "2026-08-17T07:34:10.528Z",
+  "updatedAt": "2026-08-17T08:09:36.697Z",
+  "firstTerminalAt": "2026-08-17T07:47:08.443Z",
+  "backend": "daemon"
+}

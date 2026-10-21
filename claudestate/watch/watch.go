@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,6 +38,10 @@ type Config struct {
 	Window time.Duration // 0 => DefaultWindow
 	Budget Budget        // zero => RuntimeBudget()
 	Buffer int           // 0 => DefaultBuffer
+	// Never lists absolute directories no directory target may equal or lie
+	// under: the projects tree, whose directories are never armed (C11, D15).
+	// The watcher knows no Claude layout, so the coordinator names the tree.
+	Never []string
 }
 
 // Event is one coalesced report: something under these paths changed.
@@ -236,7 +241,7 @@ func compareStrings(a, b string) int {
 }
 
 // refusal says why a target may never be armed, or "".
-func refusal(t model.WatchTarget) string {
+func (w *Watcher) refusal(t model.WatchTarget) string {
 	switch {
 	case t.Path == "" || !filepath.IsAbs(t.Path):
 		return "a watch target must be an absolute path"
@@ -244,8 +249,8 @@ func refusal(t model.WatchTarget) string {
 		return "a watch target must have a known kind"
 	case t.Dir && t.Kind != model.TargetSpine && t.Kind != model.TargetJobDir:
 		return "only the spine and job directories are armed as directories; a transcript is armed as a FILE (C11)"
-	case t.Dir && (filepath.Base(t.Path) == "projects" || filepath.Base(t.Path) == "subagents"):
-		return "a projects or subagents directory is never armed (C11, D15)"
+	case t.Dir && w.underNever(t.Path):
+		return "a directory of the projects tree is never armed (C11, D15)"
 	}
 	return ""
 }
@@ -335,7 +340,7 @@ func (w *Watcher) Arm(targets []model.WatchTarget) ArmReport {
 			continue
 		}
 		seen[t.Path] = true
-		if why := refusal(t); why != "" {
+		if why := w.refusal(t); why != "" {
 			rep.Failed = append(rep.Failed, watchProblem(model.ProblemWatchArm, t.Path, why))
 			continue
 		}
@@ -625,4 +630,16 @@ func (w *Watcher) loop() {
 			pending, inSet = nil, map[string]bool{}
 		}
 	}
+}
+
+// underNever reports a path equal to or inside one of Config.Never.
+func (w *Watcher) underNever(p string) bool {
+	p = filepath.Clean(p)
+	for _, n := range w.cfg.Never {
+		n = filepath.Clean(n)
+		if p == n || strings.HasPrefix(p, n+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }

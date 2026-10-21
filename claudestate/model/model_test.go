@@ -236,7 +236,7 @@ func TestAttachToolResultPairsByIDThenByTheOpenCall(t *testing.T) {
 	if i := model.AttachToolResult(turns, "t1", "ok"); i != 0 || turns[0].Tools[0].Result != "ok" {
 		t.Fatalf("by id: landed in %d, result %q", i, turns[0].Tools[0].Result)
 	}
-	if i := model.AttachToolResult(turns, "", "done"); i != 1 || turns[1].Tools[0].Result != "done" {
+	if i := model.AttachToolResult(turns, "", "finished"); i != 1 || turns[1].Tools[0].Result != "finished" {
 		t.Fatalf("id-less: landed in %d, result %q", i, turns[1].Tools[0].Result)
 	}
 	if i := model.AttachToolResult(turns, "nope", "x"); i != -1 {

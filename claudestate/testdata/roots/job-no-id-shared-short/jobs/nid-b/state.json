@@ -1,0 +1,19 @@
+{
+  "state": "working",
+  "detail": "SYNTHETIC detail",
+  "tempo": "working",
+  "tokens": 47104,
+  "children": null,
+  "linkScanOffset": 0,
+  "linkScanPath": "",
+  "template": "bg",
+  "name": "SYNTHETIC name",
+  "nameSource": "auto",
+  "daemonShort": "nidshare",
+  "cliVersion": "2.1.233",
+  "cwd": "/Users/user/dev/sample",
+  "createdAt": "2026-09-18T02:00:00.000Z",
+  "updatedAt": "2026-09-18T02:39:00.000Z",
+  "firstTerminalAt": "2026-09-18T02:10:00.000Z",
+  "backend": "daemon"
+}

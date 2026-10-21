@@ -1,0 +1,353 @@
+[
+  {
+    "id": "ea780079",
+    "cwd": "/Users/user/mag/proxyapp/.claude/worktrees/resume-message",
+    "kind": "background",
+    "startedAt": 1786175947462,
+    "sessionId": "ea780079-5a4c-444f-a80c-c6a7b29bf62c",
+    "name": "s01-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "state": "blocked"
+  },
+  {
+    "id": "7a324a6d",
+    "cwd": "/Users/user/dotfiles",
+    "kind": "background",
+    "startedAt": 1786952050528,
+    "sessionId": "7a324a6d-27ec-4431-b17b-70ab8ac764c7",
+    "name": "s02-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "state": "blocked"
+  },
+  {
+    "id": "97030e53",
+    "cwd": "/Users/user/mag/omega/chatserver-test/chatserver/webapp",
+    "kind": "background",
+    "startedAt": 1787581120044,
+    "sessionId": "97030e53-528c-4452-bbae-535400039def",
+    "name": "s03-xxxxxxxxx",
+    "state": "blocked"
+  },
+  {
+    "pid": 98049,
+    "cwd": "/Users/user/dev/epsilonapp/epsilonapp-backend/.claude/worktrees/kilo",
+    "kind": "interactive",
+    "startedAt": 1789536674178,
+    "sessionId": "63dabf2c-f911-4aea-94e9-a9d872ceb0c6",
+    "name": "s04-xxx",
+    "status": "idle"
+  },
+  {
+    "pid": 98106,
+    "cwd": "/Users/user/dev/alpha/alphamini/.claude/worktrees/variants1-demo",
+    "kind": "interactive",
+    "startedAt": 1789536674352,
+    "sessionId": "c5c389a4-6f02-41e1-94fd-fad6c2fcecab",
+    "name": "s05-xxxxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 98134,
+    "cwd": "/Users/user/dev/alpha/betaworks-integration-services/.claude/worktrees/zetadbx-shadow-databse",
+    "kind": "interactive",
+    "startedAt": 1789536674479,
+    "sessionId": "6971db46-f4e1-435c-9744-8e8b51ae387d",
+    "name": "s06-xxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 98167,
+    "cwd": "/Users/user/mag/deltax/.claude/worktrees/ssm-issue2",
+    "kind": "interactive",
+    "startedAt": 1789536674580,
+    "sessionId": "4c400317-e027-4aab-a08a-388d9e8f0a5e",
+    "name": "s07-xxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 98077,
+    "cwd": "/Users/user/dev/alpha/alphamini/.claude/worktrees/task3",
+    "kind": "interactive",
+    "startedAt": 1789536674628,
+    "sessionId": "e1cfa5e1-7bd5-4084-a7b3-200a52ecc9a4",
+    "name": "s08-xxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 98198,
+    "cwd": "/Users/user/dev/alpha/betaworks-data-engine-demo/.claude/worktrees/init",
+    "kind": "interactive",
+    "startedAt": 1789536674915,
+    "sessionId": "c874de20-33c1-480a-ba90-8ae3f2f332c4",
+    "name": "s09-xxx",
+    "status": "idle"
+  },
+  {
+    "pid": 98234,
+    "cwd": "/Users/user/mag/proxyapp/.claude/worktrees/nok3",
+    "kind": "interactive",
+    "startedAt": 1789536674975,
+    "sessionId": "957591cc-8cc9-4991-8c44-38354830f771",
+    "name": "s10-xxxxxxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 98325,
+    "cwd": "/Users/user/mag/proxyapp/.claude/worktrees/tui",
+    "kind": "interactive",
+    "startedAt": 1789536675114,
+    "sessionId": "9e5d6b5c-3bc9-4b64-bc75-f4e2752121d5",
+    "name": "s11-xx",
+    "status": "idle"
+  },
+  {
+    "pid": 98650,
+    "cwd": "/Users/user/mag/omega/agent-twin",
+    "kind": "interactive",
+    "startedAt": 1789536675317,
+    "sessionId": "14994211-008a-45a6-a2dc-51fb7bdba785",
+    "name": "s12-xxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 98693,
+    "cwd": "/Users/user/dotfiles",
+    "kind": "interactive",
+    "startedAt": 1789536675405,
+    "sessionId": "d1f05570-4e47-4517-b4c5-9bda85d3bd6d",
+    "name": "s13-xxxxxxxxxxxxxxxx",
+    "status": "busy"
+  },
+  {
+    "pid": 98361,
+    "cwd": "/Users/user/mag/proxyapp/.claude/worktrees/recover",
+    "kind": "interactive",
+    "startedAt": 1789536675570,
+    "sessionId": "5ea44449-884c-45a6-99c5-67b0ee7d3998",
+    "name": "s14-xxxxxxxxxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 98463,
+    "cwd": "/Users/user/mag/proxyapp/.claude/worktrees/multi-subscriptin",
+    "kind": "interactive",
+    "startedAt": 1789536675771,
+    "sessionId": "e64b6677-4e9f-4b1a-9ae7-e2163071c1ed",
+    "name": "s15-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 98558,
+    "cwd": "/Users/user/mag/proxyapp/.claude/worktrees/comparte",
+    "kind": "interactive",
+    "startedAt": 1789536676361,
+    "sessionId": "441af1f4-d089-45e9-bf08-3261eee149c8",
+    "name": "s18-xxx",
+    "status": "idle"
+  },
+  {
+    "pid": 1613,
+    "cwd": "/Users/user/mag/memidx",
+    "kind": "interactive",
+    "startedAt": 1789536679029,
+    "sessionId": "c93aae01-32b3-4138-81da-4318e682246e",
+    "name": "s20-xxxxxxxxxxxxxxxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 1061,
+    "cwd": "/Users/user/.other/worktrees/d872/deltax",
+    "kind": "interactive",
+    "startedAt": 1789536679708,
+    "sessionId": "6ae3c8cb-426b-4d4c-a218-ca04fe0b5402",
+    "name": "s21-xxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 2279,
+    "cwd": "/Users/user/mag/gammaapp/gammaapp-cloud",
+    "kind": "interactive",
+    "startedAt": 1789536679850,
+    "sessionId": "ef85b4f5-8304-4560-b38d-f3a4320b1d1d",
+    "name": "s22-xxxxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 2196,
+    "cwd": "/Users/user/mag/gammaapp/gammaapp-react-sdk",
+    "kind": "interactive",
+    "startedAt": 1789536679867,
+    "sessionId": "c8d6e0df-71b3-479e-878c-d8b54add5f61",
+    "name": "s23-xxxxxxxxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 2391,
+    "cwd": "/Users/user/mag/gammaapp/gammaapp-cloud",
+    "kind": "interactive",
+    "startedAt": 1789536680111,
+    "sessionId": "6fb5230e-1b03-4894-b7e0-7920ca8cbd1c",
+    "name": "s24-xxxxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 1971,
+    "cwd": "/Users/user/mag/gammaapp/gammaapp/.claude/worktrees/qr",
+    "kind": "interactive",
+    "startedAt": 1789536680211,
+    "sessionId": "e428a554-3fc3-4506-b07c-b8f57d034568",
+    "name": "s25-x",
+    "status": "idle"
+  },
+  {
+    "pid": 1828,
+    "cwd": "/Users/user/mag/memidx/.claude/worktrees/mutlilayer-support",
+    "kind": "interactive",
+    "startedAt": 1789536680473,
+    "sessionId": "5c31bd32-94fa-4832-b162-89ae323bd568",
+    "name": "s26-xxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 1724,
+    "cwd": "/Users/user/mag/kappa/kappa-src/.claude/worktrees/upgraders-update",
+    "kind": "interactive",
+    "startedAt": 1789536680730,
+    "sessionId": "36f34cff-7afd-4536-bee3-5d3f9e693f0d",
+    "name": "s27-xxxxxxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 2063,
+    "cwd": "/Users/user/mag/gammaapp/gammaapp/.claude/worktrees/qr-task",
+    "kind": "interactive",
+    "startedAt": 1789536680774,
+    "sessionId": "ed77ffcb-2b44-45ec-a3f0-50aa093614e6",
+    "name": "s28-xxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 1926,
+    "cwd": "/Users/user/mag/gammaapp/gammaapp/.claude/worktrees/2fa",
+    "kind": "interactive",
+    "startedAt": 1789536680892,
+    "sessionId": "8c5f68cf-005a-48e3-bf25-27e046e5f879",
+    "name": "s29-xx",
+    "status": "idle"
+  },
+  {
+    "pid": 46799,
+    "cwd": "/Users/user/mag/models-index/.claude/worktrees/new-subscriptin-model",
+    "kind": "interactive",
+    "startedAt": 1789541424115,
+    "sessionId": "0a180476-fe5f-4e29-b117-e10dbca60839",
+    "name": "s36-xxxxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 15775,
+    "cwd": "/Users/user/mag/magmux/.claude/worktrees/claude-session-control",
+    "kind": "interactive",
+    "startedAt": 1789543210619,
+    "sessionId": "dc036c8b-7f08-4be1-9e6e-390f4adfd504",
+    "name": "s31-xxxxxxxxxxxxxxxxxx",
+    "status": "busy"
+  },
+  {
+    "pid": 83966,
+    "cwd": "/Users/user/mag/proxyapp/.claude/worktrees/bugfix33",
+    "kind": "interactive",
+    "startedAt": 1789572670388,
+    "sessionId": "3042ba6f-2164-4d13-992b-7b58ae4377cf",
+    "name": "s32-xxxxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 87791,
+    "cwd": "/Users/user/mag/proxyapp/.claude/worktrees/qwen-token-plan",
+    "kind": "interactive",
+    "startedAt": 1789632536395,
+    "sessionId": "8aa74fa9-51aa-49a4-aa93-daa739b4a6f9",
+    "name": "s37-xxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 2348,
+    "cwd": "/Users/user/mag/proxyapp/.claude/worktrees/worktree-alias",
+    "kind": "interactive",
+    "startedAt": 1789633367802,
+    "sessionId": "ecce6937-8af1-4ca7-ae9e-996c09e10e81",
+    "name": "s38-xxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 44231,
+    "cwd": "/Users/user/mag/kappa/kappa-src/.claude/worktrees/proxyapq-monitor",
+    "kind": "interactive",
+    "startedAt": 1789660511703,
+    "sessionId": "371ebab5-6d54-4184-863e-103ba71f6ea9",
+    "name": "s39-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 98158,
+    "cwd": "/Users/user/mag/kappa/kappa-src/.claude/worktrees/benchapp",
+    "kind": "interactive",
+    "startedAt": 1789663633118,
+    "sessionId": "9cde7134-679b-46a6-ba3f-149332bdaa52",
+    "name": "s40-xxxxxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 78761,
+    "cwd": "/Users/user/mag/benchapp/.claude/worktrees/attachments-widget",
+    "kind": "interactive",
+    "startedAt": 1789685917417,
+    "sessionId": "f350c44d-d22a-4c47-b3ef-00021713db7f",
+    "name": "s41-xxxxxxxxxxxxx",
+    "status": "busy"
+  },
+  {
+    "pid": 86188,
+    "cwd": "/Users/user/mag/benchapp/.claude/worktrees/user-dialog",
+    "kind": "interactive",
+    "startedAt": 1789691392211,
+    "sessionId": "9f955a47-6ede-4fce-976f-fce95fb71cd5",
+    "name": "s42-xxxxxxx",
+    "status": "busy"
+  },
+  {
+    "pid": 25983,
+    "cwd": "/Users/user/dotfiles/.claude/worktrees/ssh-agent",
+    "kind": "interactive",
+    "startedAt": 1789697203205,
+    "sessionId": "d39bd6f3-4334-469a-b863-aa17443d43a5",
+    "name": "s43-xxxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 5026,
+    "cwd": "/private/tmp/drvp/mspane",
+    "kind": "interactive",
+    "startedAt": 1789707043621,
+    "sessionId": "18f9a8bc-b0c3-4505-9419-56413af2f39d",
+    "name": "s44-xxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 92533,
+    "cwd": "/Users/user/dotfiles",
+    "kind": "interactive",
+    "startedAt": 1789709883776,
+    "sessionId": "7134b8cc-3795-4b90-83e1-c5607ae23cb1",
+    "name": "s45-xxxxxxx",
+    "status": "idle"
+  },
+  {
+    "pid": 4724,
+    "cwd": "/Users/user/mag/benchapp/.claude/worktrees/claude-plugin-eval",
+    "kind": "interactive",
+    "startedAt": 1789709970431,
+    "sessionId": "e9c21455-c6ea-4d21-98ff-4a0dda3f8798",
+    "name": "s46-xxxxxxxxxxxxxx",
+    "status": "busy"
+  }
+]

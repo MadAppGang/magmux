@@ -1,0 +1,26 @@
+{
+  "pid": 25983,
+  "sessionId": "a4c07f15-3d6b-42e8-8f19-0c5b7e2a91d6",
+  "cwd": "/Users/user/mag/omega",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.275",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "omega:@52.%108",
+  "messagingSocketPath": "/tmp/cc-socks/25983.sock",
+  "name": "omega-tooling",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789697111204,
+  "status": "waiting",
+  "statusUpdatedAt": 1789697111204,
+  "waitingFor": "permission prompt"
+}

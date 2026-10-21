@@ -1,0 +1,4 @@
+{"type":"user","uuid":"u-2026-09-18T02:30:00.000Z","sessionId":"30000000-0000-4000-8000-000000000021","timestamp":"2026-09-18T02:30:00.000Z","version":"2.1.278","cwd":"/Users/user/dev/sample","userType":"external"}
+{"type":"user","uuid":"u-2026-09-18T02:35:12.345Z","sessionId":"30000000-0000-4000-8000-000000000021","timestamp":"2026-09-18T02:35:12.345Z","version":"2.1.278","cwd":"/Users/user/dev/sample","userType":"external"}
+{"type":"last-prompt","sessionId":"30000000-0000-4000-8000-000000000021"}
+{"type":"agent-color","agentColor":"teal","sessionId":"30000000-0000-4000-8000-000000000021"}

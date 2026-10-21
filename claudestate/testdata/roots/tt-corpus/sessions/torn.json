@@ -1,0 +1,16 @@
+{
+  "pid": 2279,
+  "sessionId": "7f0a4e26-1b53-4c98-a0d7-6e2b5c31f849",
+  "cwd": "/Users/user/mag/gammaapp",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.275",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": 

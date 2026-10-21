@@ -1,0 +1,25 @@
+{
+  "pid": 56526,
+  "sessionId": "8c3d5b71-0f92-4a68-b41e-9d27c6e0a853",
+  "cwd": "/Users/user/mag/pinned",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.263",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "pinned:@3.%3",
+  "messagingSocketPath": "/tmp/cc-socks/56526.sock",
+  "name": "pinned-regression",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789699206204,
+  "status": "idle",
+  "statusUpdatedAt": 1789699206204
+}

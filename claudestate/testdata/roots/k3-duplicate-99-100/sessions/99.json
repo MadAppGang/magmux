@@ -1,0 +1,22 @@
+{
+  "pid": 200,
+  "sessionId": "60000000-0000-4000-8000-000000000099",
+  "cwd": "/Users/user/dev/sample",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.278",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "messagingSocketPath": "/tmp/cc-socks/200.sock",
+  "name": "ninety-nine",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789699206204,
+  "status": "busy",
+  "statusUpdatedAt": 1789699206204
+}

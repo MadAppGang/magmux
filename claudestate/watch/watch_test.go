@@ -627,13 +627,19 @@ func TestTTsCeilingsApplyWithinTheClaim(t *testing.T) {
 
 // --- refusals and failures --------------------------------------------------
 
-// C11: a projects, project or subagents directory is never Added.
+// C11: a projects, project or subagents directory is never Added. The
+// watcher knows no layout: the coordinator names the projects tree in Never.
 func TestNoDirectoryButTheSpineAndJobDirsIsEverAdded(t *testing.T) {
 	root := tempDir(t)
 	projects := mkdir(t, filepath.Join(root, "projects"))
 	project := mkdir(t, filepath.Join(projects, "-x"))
 	sub := mkdir(t, filepath.Join(project, "id", "subagents"))
-	w, _ := start(t, roomy)
+	clk := ports.NewFakeClock(base)
+	w, err := Start(Config{Clock: clk, Budget: roomy, Never: []string{projects}})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(w.Stop)
 	var added []string
 	w.add = func(p string) error { added = append(added, p); return nil }
 

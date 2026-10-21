@@ -1,0 +1,25 @@
+{
+  "pid": 1061,
+  "sessionId": "6ae3c8cb-426b-4d4c-a218-ca04fe0b5402",
+  "cwd": "/Users/user/.other/worktrees/d872/deltax",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.273",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "deltax:@22.%35",
+  "messagingSocketPath": "/tmp/cc-socks/1061.sock",
+  "name": "deltax-1e",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789440011204,
+  "status": "idle",
+  "statusUpdatedAt": 1789440011204
+}

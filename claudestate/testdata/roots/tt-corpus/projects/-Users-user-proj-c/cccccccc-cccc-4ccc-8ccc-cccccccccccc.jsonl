@@ -1,0 +1,7 @@
+{"parentUuid":null,"isSidechain":false,"type":"user","uuid":"c0000001-0000-4000-8000-000000000001","timestamp":"2026-09-18T02:00:00.000Z","userType":"external","cwd":"/Users/user/proj-c","sessionId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","version":"2.1.275","gitBranch":"main"}
+{"type":"agent-color","agentColor":"blue","sessionId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}
+{"type":"agent-name","agentName":"dev:reviewer","color":"red","sessionId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}
+{"parentUuid":null,"isSidechain":false,"type":"assistant","uuid":"c0000002-0000-4000-8000-000000000002","timestamp":"2026-09-18T02:00:09.000Z","userType":"external","cwd":"/Users/user/proj-c","sessionId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","version":"2.1.275","gitBranch":"main","color":"pink"}
+{"type":"agent-color","agentColor":"green","sessionId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}
+{"parentUuid":null,"isSidechain":false,"type":"assistant","uuid":"c0000003-0000-4000-8000-000000000003","timestamp":"2026-09-18T02:01:30.000Z","userType":"external","cwd":"/Users/user/proj-c","sessionId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","version":"2.1.275","gitBranch":"main","slug":"agent-color","agentColor":"orange"}
+{"type":"last-prompt","sessionId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}
