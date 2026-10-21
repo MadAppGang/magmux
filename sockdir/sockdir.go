@@ -183,6 +183,13 @@ func killErrMeansGone(err error) bool {
 	return errors.Is(err, syscall.ESRCH)
 }
 
+// KillErrMeansGone is killErrMeansGone for the one other caller that needs the
+// same errno rule: the session-observation layer's liveness oracle
+// (mux/obscmd.go), which asks kill(pid, 0) about a Claude Code session and
+// must read EPERM as alive exactly as the reaper does. One rule, so the
+// load-bearing branch TestKillErrMeansGone pins is the oracle's too.
+func KillErrMeansGone(err error) bool { return killErrMeansGone(err) }
+
 // ReapStale removes the files in dir that a dead magmux left behind — its
 // socket, and the remote-control token it generated — and returns how many it
 // removed. self is this magmux's own socket path.

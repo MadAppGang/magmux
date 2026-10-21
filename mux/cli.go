@@ -47,6 +47,10 @@ func Main(args []string) int {
 			fmt.Println("       magmux -e 'bun test' --label tests -e 'bun dev' --label server")
 			fmt.Println("       magmux -g gridfile.txt")
 			fmt.Println()
+			fmt.Println("Subcommands (each has its own --help):")
+			fmt.Println("  mcp       run magmux as an MCP server over stdio")
+			fmt.Println("  agents    what every Claude Code session on this machine is doing")
+			fmt.Println()
 			fmt.Println("Options:")
 			fmt.Println("  -g FILE   Grid file (one command per line, overrides -e)")
 			fmt.Println("  -e CMD    Run CMD in a pane (can be repeated)")
@@ -158,6 +162,8 @@ func Main(args []string) int {
 			fmt.Println("                typing into a finished turn is how you drive it by hand.")
 			fmt.Println("  Ctrl-G Tab    Switch focus to next pane")
 			fmt.Println("  Ctrl-G p      Show / hide the control panel (keeps its history)")
+			fmt.Println("  Ctrl-G a      Show the control panel on its attention view (MAGMUX_AGENTS);")
+			fmt.Println("                v on the focused panel switches between its two views")
 			fmt.Println("  Ctrl-G s      Show / hide the status bar")
 			fmt.Println("  Ctrl-G r      Return to the terminal's size after a client resize")
 			fmt.Println("  Ctrl-G [      Scroll the focused pane back through its scrollback.")
@@ -249,6 +255,10 @@ func Main(args []string) int {
 			fmt.Println("  MAGMUX_SCROLLBACK  Lines of history kept per pane (default: 1000, 0 off).")
 			fmt.Println("                  Only the primary screen records; the ring fills lazily,")
 			fmt.Println("                  so a pane that never scrolls costs nothing.")
+			fmt.Println("  MAGMUX_AGENTS   1 to observe Claude Code's session registry while magmux")
+			fmt.Println("                  runs, matching each session to the pane it is in. Off by")
+			fmt.Println("                  default, and READ-ONLY when on. `magmux agents` is the same")
+			fmt.Println("                  layer as a standalone command.")
 			fmt.Println("  MAGMUX_SOCK_DIR Directory for the IPC socket (default: /tmp). --sock-dir")
 			fmt.Println("                  wins over it, and then it is not checked. Fatal if it is")
 			fmt.Println("                  unusable, like the flag. Set this in an MCP client's own")
@@ -781,6 +791,18 @@ func Main(args []string) int {
 	// change state, not a layout still being wired up.
 	mux.markLayoutReady()
 
+	// The session-observation pipeline. HERE and not in init(): pane ids are
+	// final only now — the panel takes the last one — and init() returns early
+	// when headless, which is the mode this most needs to work in. Opt-in; see
+	// startObservationIfEnabled.
+	//
+	// The signal oracle is passed IN, and this is one of only two places in
+	// the program that names it — the other is `magmux agents` (obscmd.go). It
+	// is a parameter rather than a default so that no test can reach
+	// kill(pid, 0) without naming obsOracle itself, which nothing under
+	// _test.go is allowed to do; see TestNoTestCanReachTheSignalOracle.
+	mux.startObservationIfEnabled(obsOracle{})
+
 	// The mirror subscribes HERE, on the same reasoning and one line later: its
 	// first write is the connect-time aggregate, and a mirror seeded from a
 	// half-built layout would show panes with no state until something moved.
@@ -821,6 +843,12 @@ func Main(args []string) int {
 	} else {
 		mux.inputLoop()
 	}
+
+	// The quit path, and not restore(): restore() returns early when headless,
+	// so stopping there would leak the pipeline's goroutines in exactly the
+	// mode it is most useful in. Stop is the shutdown barrier — it returns
+	// only once the watcher, every actor and the hub have finished.
+	mux.stopObservation()
 
 	// The socket server broadcasts the final `results` event and then closes
 	// each subscriber, giving it a clean EOF *after* that event. That happens

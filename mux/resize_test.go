@@ -364,14 +364,14 @@ func TestResizeKeyHint(t *testing.T) {
 		}
 		return false
 	}
-	on := keyHintItems(false, true, true, true)
+	on := keyHintItems(false, true, true, true, false)
 	if !has(on, "r auto") {
 		t.Fatalf("manual mode on, hints %v carry no \"r auto\"", on)
 	}
 	if !strings.Contains(hintFloor(on), "r auto") {
 		t.Fatalf("\"r auto\" is not in the hint floor %q", hintFloor(on))
 	}
-	if off := keyHintItems(false, true, true, false); has(off, "r auto") {
+	if off := keyHintItems(false, true, true, false, false); has(off, "r auto") {
 		t.Fatalf("manual mode off, hints %v still offer \"r auto\"", off)
 	}
 

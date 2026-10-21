@@ -22,6 +22,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/MadAppGang/magmux/hub"
+	"github.com/MadAppGang/magmux/internal/obs/pipeline"
 	"github.com/MadAppGang/magmux/plugin"
 	"github.com/MadAppGang/magmux/theme"
 	"github.com/MadAppGang/magmux/transport/firebase"
@@ -374,6 +375,37 @@ type Magmux struct {
 	// the connection's first Read, so a test can order the aggregate write's
 	// failure ahead of the reader deterministically instead of by load.
 	sockBeforeRead func(conn net.Conn)
+
+	// obs is the session-observation pipeline (internal/obs/pipeline), or nil
+	// when it was never started — which is the default. See
+	// startObservationIfEnabled in obspane.go for the switch and for why the
+	// switch exists.
+	//
+	// NOT guarded by treeMu, and it does not need to be: it is written and
+	// read on Main()'s goroutine only — started once the layout is final,
+	// stopped on the quit path — and nothing else in magmux refers to it. Same
+	// discipline as m.sockPath. The pipeline's own goroutines are handed a
+	// *Magmux for the pane port and never touch this field.
+	obs *pipeline.Pipeline
+
+	// obsDoc is the newest document the observation layer published, held for
+	// the surfaces that ANSWER A QUESTION rather than stream: the `agents`
+	// socket verb, and the MCP tool that translates it.
+	//
+	// It is a VALUE and not a pointer, and it is never assigned: a socket
+	// goroutine reads it while Main()'s goroutine starts and stops the
+	// pipeline, so a field that could be nil would need its own
+	// synchronisation on top of the one inside it. It carries its own mutex
+	// and knows whether observation is running; see obsStore in obssink.go.
+	obsDoc obsStore
+
+	// obsSinkDone is closed by the chrome sink's goroutine when it ends, which
+	// happens when Pipeline.Stop closes its subscription. Waited on by
+	// stopObservation, so that no sink is mid-write when the process exits —
+	// the same shutdown barrier Pipeline.Stop is, extended over the one sink
+	// that lives on magmux's side of the hub. Main()'s goroutine only, like
+	// obs above.
+	obsSinkDone chan struct{}
 }
 
 // claimSession atomically attempts to mark `path` as owned by `p`. Returns
@@ -1458,6 +1490,14 @@ func (m *Magmux) inputLoop() {
 					m.focusNext()
 				case 'p':
 					m.togglePanel()
+				case 'a':
+					// Reveal the panel AND put it on the attention view, in
+					// one key. `p` then `v` does the same thing and stays; this
+					// exists because the observation layer's whole point is
+					// answering "which session needs me" without the person
+					// having to go looking, and two keys with a mode change
+					// between them is going looking.
+					m.showAttentionView()
 				case 's':
 					m.toggleStatusBar()
 				case 'r':

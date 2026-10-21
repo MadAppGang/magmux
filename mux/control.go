@@ -289,6 +289,21 @@ type ControlPanel struct {
 	// numbering beside the pane ids would be a bug factory.
 	filter int
 
+	// view is which frame this panel is painting. The zero value is the wire
+	// tap, which is the panel magmux has always had — every test builds a
+	// ControlPanel as a struct literal, so the zero value has to be the
+	// behaviour that predates the second view.
+	view ctrlView
+
+	// attention is the observation layer's newest document, reduced to what
+	// the second view paints. Written by the obs sink's goroutine through
+	// setAttention, read here under cp.mu like every other field.
+	//
+	// It is NOT part of the controller↔session exchange the rest of this
+	// struct records, and nothing in it is ever counted into sent, observed,
+	// a route or the signal stream. See obspanel.go.
+	attention ctrlAttention
+
 	// focused is magmux's own focused pane, so the route table can mark which
 	// row the user is looking at.
 	focused int
@@ -296,9 +311,17 @@ type ControlPanel struct {
 	note    string // latest panel-level annotation (attach / finish / fail)
 	noteBad bool
 
-	// scroll is how many lines the exchange view is lifted off the bottom.
-	// Zero means "follow the newest", which is what a live panel should do
-	// until the user deliberately looks back.
+	// scroll is how far the view on screen has been moved from where it
+	// OPENS, and each view opens somewhere different:
+	//
+	//   - the exchange view opens at the BOTTOM, following the newest traffic,
+	//     so scroll is how many lines it is lifted off the bottom;
+	//   - the attention view opens at the TOP, where the sessions that need a
+	//     human are sorted, so scroll is how many SESSIONS it has moved down.
+	//
+	// Zero is therefore the right default for both, and setView / cycleView
+	// reset it on every change of view. scrollBy and scrollToBottom are where
+	// the two directions are reconciled with the keys; see scrollBy.
 	scroll int
 
 	// closeIn is the remaining auto-close countdown, refreshed by the render
@@ -446,16 +469,28 @@ func (cp *ControlPanel) soleRouteLocked() (int, bool) {
 	return -1, false
 }
 
-// scrollBy moves the exchange view. Positive scrolls back through history,
-// negative returns towards the newest. Returns true if anything moved, so the
-// caller can tell a consumed key from an ignored one.
+// scrollBy moves the view on screen UP by lines (negative moves it down).
+// Returns true if anything moved, so the caller can tell a consumed key from an
+// ignored one.
+//
+// Every caller passes "up" as positive — k, the up arrow, PageUp, Home and the
+// wheel alike — and that meaning is kept for both views. What differs is which
+// way "up" moves the offset: the exchange view is anchored at the bottom, so up
+// is further back through history; the attention list is anchored at the top,
+// so up is back towards the sessions that need a human. Without the second
+// case j/k did nothing in the attention view — fix round 1, item 4 — while its
+// footer advertised them.
 func (cp *ControlPanel) scrollBy(lines int) bool {
 	if cp == nil {
 		return false
 	}
 	cp.mu.Lock()
 	prev := cp.scroll
-	cp.scroll += lines
+	if cp.view == viewAttention {
+		cp.scroll -= lines
+	} else {
+		cp.scroll += lines
+	}
 	if cp.scroll < 0 {
 		cp.scroll = 0
 	}
@@ -500,15 +535,23 @@ func (cp *ControlPanel) cancelClose() {
 	cp.mu.Unlock()
 }
 
-// scrollToBottom resumes following the newest exchange.
+// scrollToBottom goes to the BOTTOM of the view on screen: the newest exchange,
+// which the exchange view then follows, or the last session in the attention
+// list. The attention offset is set past the end and clamped by the next paint,
+// which is the only place the list's length in lines is known — the same
+// arrangement scrollBy relies on for the exchange view's top.
 func (cp *ControlPanel) scrollToBottom() {
 	if cp == nil {
 		return
 	}
 	cp.mu.Lock()
-	moved := cp.scroll != 0
-	cp.scroll = 0
-	cp.needsPaint = cp.needsPaint || moved
+	prev := cp.scroll
+	if cp.view == viewAttention {
+		cp.scroll = ctrlMaxScroll
+	} else {
+		cp.scroll = 0
+	}
+	cp.needsPaint = cp.needsPaint || cp.scroll != prev
 	cp.mu.Unlock()
 }
 
@@ -1136,6 +1179,13 @@ type ctrlFrameState struct {
 	filter  int
 	focused int
 
+	// view and attention belong to the second view; see obspanel.go. They are
+	// copied here for the same reason everything else is — the frame is built
+	// with cp.mu released, and holding it across rendering is how the
+	// documented treeMu -> cp.mu order turns into a stall.
+	view      ctrlView
+	attention ctrlAttention
+
 	// legacySteps is the ledger the single-route fast path renders. Carried
 	// here so render() does not have to decide which route it came from twice.
 	legacySteps []ctrlStep
@@ -1166,6 +1216,12 @@ func (cp *ControlPanel) snapshotLocked() ctrlFrameState {
 		closeIn:   cp.closeIn,
 		filter:    cp.filter,
 		focused:   cp.focused,
+		view:      cp.view,
+		// The rows slice is shared with the panel's own copy and never
+		// mutated in place: setAttention replaces the whole value, exactly as
+		// the actor replaces a whole fact set. Cloning it would be one copy
+		// per frame of a list that changes only when a record on disk does.
+		attention: cp.attention,
 	}
 	for _, pane := range cp.routeOrder {
 		r := cp.routes[pane]
@@ -1299,6 +1355,12 @@ func applyRouteToState(s *ctrlFrameState, r ctrlRoute) {
 // A filter is the same thing arrived at deliberately: the user asked for one
 // lane, and one lane is literally today's layout.
 func (cp *ControlPanel) frame(s ctrlFrameState, steps []ctrlStep, w, h int) []string {
+	// The second view first and unconditionally: it is a different SUBJECT,
+	// not a different arrangement of the exchange, so none of the route
+	// selection below applies to it. See obspanel.go.
+	if s.view == viewAttention {
+		return cp.frameAttention(s, w, h)
+	}
 	if s.filter >= 0 {
 		for _, r := range s.routes {
 			if r.pane != s.filter {

@@ -659,6 +659,14 @@ func (m *Magmux) consumeControlKey(buf []byte) int {
 	case ']':
 		m.control.cycleFilter(1)
 		return 1
+	case 'v':
+		// Cycle the panel's VIEWS — the wire tap and the attention list. It
+		// costs nothing to claim: this handler runs only when the focused pane
+		// isControl, and that pane has no PTY, so a `v` is silently dropped
+		// otherwise. `[` and `]` stay the ROUTE cycle, because a route is a
+		// narrowing of one view rather than a different subject.
+		m.control.cycleView(1)
+		return 1
 	}
 	// Digits filter the panel to one PANE INDEX — deliberately the pane's own
 	// number and not the Nth route, because a second numbering beside the ids

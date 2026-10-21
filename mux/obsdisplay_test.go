@@ -1,8 +1,11 @@
 package mux
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +14,7 @@ import (
 	"github.com/MadAppGang/magmux/internal/obs"
 	"github.com/MadAppGang/magmux/internal/obs/act"
 	"github.com/MadAppGang/magmux/internal/obs/notify"
+	"github.com/MadAppGang/magmux/internal/obs/pipeline"
 	"github.com/MadAppGang/magmux/obsview"
 )
 
@@ -26,9 +30,10 @@ import (
 // panel's own parser. The notifier already neutralised it, but only for C0 and
 // DEL; an 8-bit CSI (U+009B) went through.
 //
-// The rule itself, and the table and --json subtests, live with the renderer
-// in obsview/display_test.go. The subtests here are the ones that need a mux
-// surface.
+// The rule itself, the table subtest and the `magmux agents --json` subtest
+// live with the renderer, in obsview/display_test.go, under the same test
+// names. The subtests here are the ones that need a mux surface: the attention
+// panel, the notifier, and `magmux agents focus --json`.
 //
 // Nothing here reads ~/.claude, probes a pid, or runs osascript.
 
@@ -77,6 +82,30 @@ func hexRune(r rune) string {
 	return string([]byte{digits[(r>>12)&0xf], digits[(r>>8)&0xf], digits[(r>>4)&0xf], digits[r&0xf]})
 }
 
+// jsonEscaped is the six characters JSON writes for r: a backslash, a u and
+// four hex digits. Built rather than typed, so that this file holds no escape
+// sequence that could be turned into the control character it names.
+func jsonEscaped(r rune) string { return string(rune(92)) + "u" + hexRune(r) }
+
+// magmuxSGR is the ONLY escape the panel's own painting emits: a colour or
+// attribute, ESC [ digits m. It is stripped before the frame is checked, and
+// nothing else is. A stripper that also ate CSI 2J or an OSC would hide the
+// defect this test exists to catch — which is why obssink_test's stripANSI,
+// which stops at any 'm', 'H' or 'J', is not used here.
+var magmuxSGR = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// attentionFrame paints the attention view for a fleet, exactly as the panel
+// would, and returns it with magmux's own SGR removed.
+func attentionFrame(fleet obs.Fleet) string {
+	cp := newControlPanel()
+	cp.setAttention(attentionOf(fleet, obsEpoch, pipeline.Delivery{}))
+	cp.mu.Lock()
+	snap := cp.snapshotLocked()
+	cp.mu.Unlock()
+	frame := strings.Join(cp.frameAttention(snap, 200, 40), "\n")
+	return magmuxSGR.ReplaceAllString(frame, "")
+}
+
 // hostileSession is one session whose every registry-derived string is
 // hostile: its name, its raw status and waiting words, the reason the verdict
 // wrote (which embeds a transcript's own error text), and a conflict detail.
@@ -121,6 +150,32 @@ func cleanFleet() obs.Fleet {
 // one hostile session through all three human-facing renderers, and none of
 // the control bytes survive any of them.
 func TestRegistryTextReachesNoTerminalWithItsControlsIntact(t *testing.T) {
+	t.Run("the attention panel", func(t *testing.T) {
+		if got := controlsIn(attentionFrame(cleanFleet()), true); len(got) != 0 {
+			t.Fatalf("the panel's own frame carries %v once its SGR is removed; the check is "+
+				"miscalibrated", got)
+		}
+		// Where registry text ENTERS the panel. An injected SGR would survive
+		// the frame check below, because it looks like magmux's own; it cannot
+		// survive this one.
+		for _, r := range attentionOf(hostileFleet(), obsEpoch, pipeline.Delivery{}).rows {
+			for field, v := range map[string]string{
+				"name": r.name, "status": r.status, "waiting": r.waiting, "reason": r.reason,
+			} {
+				if got := controlsIn(v, false); len(got) != 0 {
+					t.Errorf("the panel's %s carries %v: %q", field, got, v)
+				}
+			}
+		}
+		frame := attentionFrame(hostileFleet())
+		if got := controlsIn(frame, true); len(got) != 0 {
+			t.Errorf("the attention view painted %v into the panel's parser:\n%q", got, frame)
+		}
+		if !strings.Contains(frame, inertRemnant) {
+			t.Errorf("the panel dropped the name rather than neutralising it:\n%s", frame)
+		}
+	})
+
 	t.Run("the notification", func(t *testing.T) {
 		var script string
 		n := &osaNotifier{run: func(_ context.Context, s string) error {
@@ -141,6 +196,46 @@ func TestRegistryTextReachesNoTerminalWithItsControlsIntact(t *testing.T) {
 		// for the title, and no quote from the name ends either early.
 		if strings.Count(script, `"`)-strings.Count(script, `\"`) != 4 {
 			t.Errorf("the script is not two well-formed literals: %q", script)
+		}
+	})
+}
+
+// TestJSONCarriesRegistryTextExactAndEscaped is the other half of the rule:
+// --json must NOT neutralise, because it is the document and a consumer is
+// owed the exact bytes the tool wrote — and it must not put a control on the
+// terminal either.
+//
+// The brief for this round said encoding/json already escapes control
+// characters and asked for a test to assert it rather than assume it. The
+// assertion found the assumption half true: encoding/json escapes C0 (ESC and
+// BEL become six-character \u00XX escapes) but writes DEL and C1 RAW, so `magmux agents
+// --json` put U+009B, an 8-bit CSI, on the terminal. Escaping those two
+// classes as \u00XX changes no decoded value, which is what this asserts.
+func TestJSONCarriesRegistryTextExactAndEscaped(t *testing.T) {
+	check := func(t *testing.T, out string) {
+		t.Helper()
+		if got := controlsIn(out, true); len(got) != 0 {
+			t.Errorf("--json wrote %v raw:\n%q", got, out)
+		}
+		if !strings.Contains(out, jsonEscaped(0x1b)+`]52;c;aGVsbG8=`+jsonEscaped(0x07)) {
+			t.Errorf("the OSC 52 sequence is not escaped in the JSON:\n%s", out)
+		}
+	}
+
+	t.Run("magmux agents focus --json", func(t *testing.T) {
+		var b bytes.Buffer
+		writeAuditJSON(&b, []act.Record{{
+			Verb:   act.VerbFocus,
+			Tier:   act.TierNavigate,
+			Target: act.Target{SessionID: "id-a", PID: 4242, Name: hostileText},
+		}})
+		check(t, b.String())
+		var back act.Record
+		if err := json.Unmarshal(b.Bytes(), &back); err != nil {
+			t.Fatalf("the output is not a record: %v", err)
+		}
+		if back.Target.Name != hostileText {
+			t.Errorf("the audit record's name came back as %q, want %q", back.Target.Name, hostileText)
 		}
 	})
 }

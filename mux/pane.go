@@ -129,7 +129,42 @@ type Pane struct {
 	// instantly. That is what keeps every existing Pane{dead:true} test literal
 	// behaving exactly as it does today. A test that wants to exercise the race
 	// must set deadAt: time.Now() explicitly.
-	deadAt       time.Time
+	deadAt time.Time
+	// lastOutputAt is when BYTES LAST ARRIVED FROM THE CHILD, and it is the
+	// instant the observation layer's staleness cascade is armed from
+	// (internal/obs/termev). It is stamped in exactly ONE place — readLoop,
+	// inside the p.mu it already holds — and the reasoning for that site is
+	// written there, where the next person will be looking.
+	//
+	// It is deliberately NOT a general "this pane changed" stamp. p.dirty is
+	// that, and p.dirty is the wrong thing entirely: see readLoop. Nor is it
+	// frameGen, which the frame streamer bumps on a resize as well as on
+	// output.
+	//
+	// Zero means the child has produced nothing yet, which is a real state and
+	// is why this is a time.Time rather than a counter — a pane that has never
+	// printed is the most interesting staleness there is, and Cascade.Activity
+	// refuses the zero instant rather than arming from the epoch. Guarded by
+	// mu, like every other content field.
+	lastOutputAt time.Time
+	// lastInputAt is when something was last pushed INTO this pane — a human
+	// keystroke through writePTY, or a controller's instruction through
+	// injectPTY. Input CANCELS the staleness cascade: a pane that has just
+	// been typed into is not a pane whose silence is its own to explain.
+	//
+	// Stamped in exactly one place too, clearCompletionLocked, which is
+	// already the one function both input paths share for exactly this reason
+	// ("send and a keystroke are the same act"). Guarded by mu.
+	lastInputAt time.Time
+	// shell is the GENERIC tier's per-pane state: what this pane's OSC 133
+	// marks last said, and how far its job-control latch has got. Its type,
+	// its parser and the syscall behind it are all in obsshell.go; pane.go
+	// holds the field because Pane is declared here and nothing else.
+	//
+	// Guarded by mu. Written by the VT parser inside readLoop's lock, and by
+	// the observation layer's actor goroutine, which is the only reason it
+	// needs one.
+	shell        shellObs
 	exitCode     int       // exit code of child process
 	startedAt    time.Time // when the child process was started (for exec duration)
 	tint         string    // "green", "red", "" — border/indicator color
@@ -490,6 +525,21 @@ func formatDuration(d time.Duration) string {
 //
 // Caller HOLDS p.mu.
 func (p *Pane) clearCompletionLocked() {
+	// THE ONE INPUT STAMP, and it is ABOVE the guard on purpose.
+	//
+	// This function is already the single place both input paths meet — that
+	// is why it exists, and why writePTY and injectPTY cannot drift about what
+	// "no longer done" means. The observation layer needs the same act
+	// recorded for a different reason: input CANCELS the staleness cascade
+	// (internal/obs/termev), because a pane somebody just typed into is not a
+	// pane whose silence is its own to explain.
+	//
+	// The guard below is about CHROME: a pane that was not marked done has no
+	// completion state to clear. Input happened either way, so a stamp under
+	// the guard would record only the keystrokes that landed on a finished
+	// turn — which is to say, it would miss every keystroke into a pane the
+	// human was typing into normally, the exact case the cancellation is for.
+	p.lastInputAt = time.Now()
 	if !p.inputReady {
 		return
 	}
@@ -586,6 +636,36 @@ func (p *Pane) replyLocked(data []byte) {
 	p.ptmx.Write(data)
 }
 
+// activity reads the two instants the observation layer's staleness cascade is
+// driven by: when the child last produced output, and when something was last
+// pushed into it.
+//
+// This is the SEAM, and it stayed one. Every session's actor has a
+// termev.Cascade — it lives in the verdict stage, under internal/obs/verdict —
+// and an earlier design had the actor replace this accessor with a PUSH, the
+// stamp sites signalling it directly. It did not, and should not: a channel
+// send per PTY read would put an instrument on the hottest path in the
+// program, and CLAUDE.md's rule is that a slow instrument may not slow down the
+// terminal it is instrumenting. The stamps stay two plain time.Time fields and
+// the observation layer PULLS them, once per observation, through
+// obs.PaneActivity (implemented in obspane.go).
+//
+// Pulling has one honest consequence, and it is the right trade: output that
+// arrives between two observations does not re-arm the actor's alarm, so an
+// alarm armed before it can come due early. The cycle that wakes then observes
+// again, reads the newer instant and re-arms correctly — one extra wake, never
+// a wrong answer.
+//
+// Nothing in mux calls this on a clock, and nothing may: a poll built on this
+// accessor would be a poll, which is the one thing the design rules out.
+//
+// Caller must NOT hold p.mu.
+func (p *Pane) activity() (lastOutput, lastInput time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastOutputAt, p.lastInputAt
+}
+
 func (p *Pane) readLoop(wg *sync.WaitGroup) {
 	defer wg.Done()
 	buf := make([]byte, 8192)
@@ -596,6 +676,23 @@ func (p *Pane) readLoop(wg *sync.WaitGroup) {
 			p.vt.write(buf[:n])
 			p.dirty = true
 			p.noteOutputLocked()
+			// THE ONE CONTENT STAMP. This is here, and not beside any of the
+			// other sites that set p.dirty, because nearly all of those are
+			// magmux repainting its OWN chrome — tint, the ✓ DONE overlay, a
+			// focus change, a resize, the status bar, the control panel. A
+			// stamp at those sites means "magmux drew something" and would be
+			// read as "the program is alive", so a five-minute staleness
+			// threshold could never fire: something repainted three seconds
+			// ago, always. This is the only place in magmux where bytes
+			// actually arrive from a child, which is the fact the observation
+			// layer is asking about. (noteOutputLocked above is the frame
+			// streamer's counter, which a resize bumps too.)
+			//
+			// It is inside the p.mu that was already taken above — no second
+			// lock, no wider critical section — and time.Now() does not
+			// allocate, which matters because this is the hottest path in the
+			// program.
+			p.lastOutputAt = time.Now()
 			p.mu.Unlock()
 		}
 		if err != nil {

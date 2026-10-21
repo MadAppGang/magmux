@@ -331,6 +331,12 @@ func (vt *VTParser) answerColorQuery(code string) {
 //
 // And answers the colour queries a child blocks on:
 //   - OSC 10;? / 11;? / 12;? — foreground / background / cursor colour
+//
+// And records, for the observation layer alone:
+//   - OSC 133;A/B/C/D — shell integration. Unlike every other sequence above
+//     it does NOT touch inputReady; obsshell.go's noteShellMark says why in
+//     full, and the short version is that pane idleness has two sources
+//     reconciled by applyTerminalIdle and this is not a third.
 func (vt *VTParser) handleOSC() {
 	if vt.nosc == 0 {
 		if dbgFile != nil {
@@ -371,6 +377,12 @@ func (vt *VTParser) handleOSC() {
 		} else if dbgFile != nil {
 			fmt.Fprintf(dbgFile, "[OSC] notification ignored (no TUI/controller): %q\n", osc)
 		}
+
+	// OSC 133 — shell integration. One prefix test on a path that runs once
+	// per OSC sequence, no allocation, and no write to any field magmux's own
+	// idle detection reads. See noteShellMark.
+	case strings.HasPrefix(osc, "133;"):
+		p.noteShellMark(osc[len("133;"):])
 
 	case strings.HasPrefix(osc, "0;"):
 		// Window title set. Claude Code uses title to signal state:
