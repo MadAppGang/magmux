@@ -32,6 +32,7 @@ var guardedPatterns = []string{
 	modulePath + "/mcp",
 	modulePath + "/sockdir",
 	modulePath + "/unixsock/...",
+	modulePath + "/internal/obs/...",
 }
 
 // goList runs `go list` and returns its non-empty stdout lines.

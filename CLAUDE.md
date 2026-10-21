@@ -39,9 +39,11 @@ of magmux with no API stability before v1. The two PUBLIC packages are
 the Go socket client (`Session`, `Dial`, `RunInstruction`) that `mcp` drives
 sessions through, formerly `mcp/mcp_client.go`. Everything else is package `mux` in
 `mux/`, and `go test` runs each package with cwd = its own directory, so
-`TestMain` builds `../cmd/magmux`. There is no `internal` directory, so the
-compiler no longer stops a lower package importing `mux`:
-`cmd/magmux/import_direction_test.go` (`TestImportDirection`) is that guard.
+`TestMain` builds `../cmd/magmux`. The one `internal` directory is
+`internal/obs/` (session observation, below); it holds no `mux` code, so the
+compiler does not stop a lower package importing `mux`:
+`cmd/magmux/import_direction_test.go` (`TestImportDirection`) is that guard,
+and `internal/obs/...` is one of its guarded patterns.
 `test/reorg/r3.sed` is the rename map for the identifiers that changed name
 when the leaves moved out; `test/reorg/r4.sed` is the same for `protocol` and
 `client`.
@@ -1747,9 +1749,44 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
 
 ## Dependencies
 
-Go: only `golang.org/x/sys` (PTY ioctls) and `golang.org/x/term` (raw mode).
-Zero third-party — the control panel is raw ANSI written through the pane's own
-VT parser rather than a TUI library, which is what keeps that true.
+Go: `golang.org/x/sys` (PTY ioctls), `golang.org/x/term` (raw mode), and
+`github.com/fsnotify/fsnotify` (directory watching, used only by
+`internal/obs`). The terminal core itself stays third-party-free — the control
+panel is raw ANSI written through the pane's own VT parser rather than a TUI
+library, which is what keeps that true.
+
+The zero-third-party rule was lifted once, deliberately, for fsnotify. On
+Darwin a kqueue watch on a directory does **not** fire when a file inside it
+changes content, and the records `internal/obs` watches are rewritten IN PLACE
+rather than replaced by a rename — so the only event that matters is the one
+the kernel does not deliver. fsnotify's kqueue backend compensates by opening a
+descriptor on every entry of a watched directory ("to mimic inotify"), which is
+measured behaviour of the library and not a documented promise. Hand-rolling it
+costs the same descriptors and owns the bug.
+
+That makes the dependency version-coupled, so three tests hold it:
+`TestFsnotifySeesInPlaceWrites` fails loudly if a future fsnotify stops adding
+per-entry watches (the alternative is a watcher that goes silent with no error
+anywhere), `TestRepeatedStartStopLeaksNoDescriptor` covers the second measured
+behaviour below, and `TestDependencySetIsExactlyWhatWasDecided` fails if a
+fourth module appears in `go.mod` or if the pinned version drifts from the one
+the regression tests name.
+
+- **`fsnotify.Watcher.Close()` alone LEAKS every descriptor it opened, and the
+  fix is to drain `Events` until it closes.** Measured against raw fsnotify with
+  no magmux code involved: 20 × (`NewWatcher`, `Add`, `Close`) on a
+  three-record directory takes the process's lowest free descriptor from 4 to
+  85, and three seconds later it has settled only to 81 — the descriptors are
+  not coming back. Draining `Events` until the channel closes releases every
+  one: the same 20 cycles move it by zero. The cost scales with directory
+  ENTRIES, because the kqueue backend opens one per entry, so the registry's 34
+  records make it ~34 per cycle against a macOS soft `RLIMIT_NOFILE` of 256 in a
+  process that already holds a descriptor per PTY. `closeAndDrain` in
+  `internal/obs/fswatch/watch.go` is the whole of the mitigation, and its 2 s
+  bound is deliberate: a future fsnotify that never closes the channel must cost
+  a pause, not a hung `Stop`. The failure this prevents is not a slow watcher —
+  it is magmux failing to open something else entirely, much later, for no
+  visible reason.
 
 The pilot is separate and out-of-process by design: it is TypeScript
 (`@earendil-works/pi-coding-agent`, run with bun), talks to magmux only over
