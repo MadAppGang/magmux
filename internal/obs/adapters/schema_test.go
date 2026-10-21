@@ -422,7 +422,8 @@ func stringLit(e ast.Expr) (string, bool) {
 }
 
 // TestOnlySchemaFileDecodesClaudeStrings is NFR6 made enforceable: no file
-// under internal/obs except schema.go may decode a string Claude Code owns.
+// under internal/obs except schema.go may decode a string Claude Code owns,
+// and no non-test file in mux/ may either.
 //
 // It replaces TestOnlySchemaFileNamesClaudeFields, which asked whether a word
 // appeared rather than who owned the value being read, and so could not tell
@@ -475,6 +476,74 @@ func TestOnlySchemaFileDecodesClaudeStrings(t *testing.T) {
 	if scanned < 4 {
 		t.Errorf("scanned only %d Go files under %s — the walk is not reaching the package tree", scanned, root)
 	}
+
+	// ── mux/, since phase 0 of the claudestate port ─────────────────────────
+	//
+	// magmux's pane controller (mux/controller_claude*.go, claude_binding.go)
+	// used to be a second decoder of Claude's files: its own project-directory
+	// encoder, its own turn parser, its own registry reader. They now go
+	// through this package, and the same detector holds them to it. Only
+	// NON-TEST files are scanned there: mux's tests build Claude records as
+	// their input, on purpose, and that is not a decoder.
+	muxScanned := 0
+	used := map[string]bool{}
+	err = filepath.WalkDir(muxRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != muxRoot {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		muxScanned++
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		for _, s := range claudeDecodeSites(file, claudeOnly, homograph) {
+			key := filepath.Base(path) + ":" + s.lit
+			if _, own := muxOwnWords[key]; own {
+				used[key] = true
+				continue
+			}
+			t.Errorf("%s: %s %q, which is Claude Code's. Claude's format is decoded in "+
+				"internal/obs/adapters (%s for the strings) and nowhere else; if this is magmux's OWN "+
+				"word, add it to muxOwnWords with the reason.", fset.Position(s.pos), s.how, s.lit, schemaFileName)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", muxRoot, err)
+	}
+	if muxScanned < 20 {
+		t.Errorf("scanned only %d Go files under %s — the walk is not reaching mux", muxScanned, muxRoot)
+	}
+	for key, why := range muxOwnWords {
+		if !used[key] {
+			t.Errorf("muxOwnWords lists %s (%s), and no such site exists any more; remove the entry", key, why)
+		}
+	}
+}
+
+// muxRoot is magmux's terminal core, seen from this package's directory.
+const muxRoot = "../../../mux"
+
+// muxOwnWords are the sites in mux/ the detector flags that are magmux's OWN
+// vocabulary rather than a reading of Claude's — homographs, in this file's
+// terms, keyed by file and literal. Each carries its reason, and an entry that
+// no longer matches anything is an error, so the list cannot outlive what it
+// excuses.
+var muxOwnWords = map[string]string{
+	"control.go:idle": "a control-panel route's state, magmux's own controller vocabulary (ctrlRoute.state)",
+	"socket.go:idle":  "the status word of magmux's own `agent` hook verb, which a hook script sends",
+	"grid.go:sessionId": "the `sessionId` member of magmux's own results/snapshot pane entry — magmux's socket " +
+		"schema, spelled the same as Claude's key",
 }
 
 // The detector is tested against source, which is the only way to know it

@@ -22,6 +22,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/MadAppGang/magmux/hub"
+	"github.com/MadAppGang/magmux/internal/obs/adapters"
 	"github.com/MadAppGang/magmux/internal/obs/pipeline"
 	"github.com/MadAppGang/magmux/plugin"
 	"github.com/MadAppGang/magmux/theme"
@@ -480,7 +481,7 @@ func (m *Magmux) declareSession(id string, p *Pane) bool {
 // declaredByOtherLocked reports whether path is <id>.jsonl for an id another
 // pane declared. Caller holds claimedMu.
 func (m *Magmux) declaredByOtherLocked(path string, p *Pane) bool {
-	owner, ok := m.declaredSessions[strings.TrimSuffix(filepath.Base(path), ".jsonl")]
+	owner, ok := m.declaredSessions[strings.TrimSuffix(filepath.Base(path), adapters.TranscriptSuffix)]
 	return ok && owner != p
 }
 

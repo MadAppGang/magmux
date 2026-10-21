@@ -195,6 +195,309 @@ packages can be tested against a bare hub with no terminal at all.
   and the committed HMAC vector.
 - `test/rc/*.ts` — the six end-to-end validation cases.
 
+Session observation (what every agent session on the machine is doing, whether
+or not magmux started it):
+
+- `internal/obs` — the vocabulary: `Session`, `Fleet`, `Liveness`, the `Clock`
+  port, and `PaneLocator`, the port through which magmux's pane model reaches a
+  layer that may not import `mux` (TestImportDirection guards `internal/obs/...`).
+- `internal/obs/{adapters,fswatch,registry}` — the decoders, the filesystem
+  watch (no polling, one-shot timers only) and the source that turns Claude
+  Code's `~/.claude/sessions` records into `obs.Session` values. **READ-ONLY**:
+  nothing there is created, written, renamed or removed, not even a temp file.
+- `internal/obs/pipeline` — the concurrency model: one actor goroutine per
+  session owning its own middleware chain, one hub that never blocks on a
+  sink, and the three freeze points. No mutexes and no atomics anywhere under
+  `internal/obs`; `TestNoTickerAnywhereInTheObservationLayer` reads the source
+  to prove there is no poll loop either.
+- `mux/obspane.go` — magmux's side: the `PaneLocator` implementation (ancestry —
+  the pane's pid is the SHELL's and a session's is the tool's, so they are
+  never equal), and the pipeline's start/stop. Opt-in via `MAGMUX_AGENTS=1`,
+  because the repository's own end-to-end tests spawn the real binary and may
+  not read a live registry or probe a live pid.
+- `mux/obscmd.go` — `magmux agents`, the same pipeline as a standalone command.
+
+Two magmux-side rules there are applications of invariants already below, and
+both were deliberately broken and caught: the ancestry walk snapshots pane pids
+under `treeMu.RLock` and does its syscalls with the lock RELEASED, and
+`PaneAlive` means `!closed` — a `dead` pane is alive (the process is the other
+gate) and a `hidden` pane is alive (hidden is a fact about chrome).
+
+A third, since fix round 2: **a REAPED pane contributes no pid to either pane
+table** — `panePIDs` skips `p.reaped`, and the socket table skips a pid-bearing
+entry whose `state` is `completed` or `failed`, which `buildPaneResultsLocked`
+only reports once the child is reaped. The pane keeps its id and stays alive;
+only its NUMBER goes, because after `cmd.Wait` the kernel may hand it to anyone,
+and a session under the new owner was being attributed to the finished pane (and
+focused there). The condition is `reaped`, not `dead`, for the reason the `-w`
+race section gives: a dead-but-unreaped child still holds its pid and may still
+be running. `TestAReapedPaneClaimsNoSessionThroughItsOldPID` fails with `dead`
+substituted in either table.
+
+The WRITE half — the only thing in that layer that changes anything:
+
+- `internal/obs/act` — the action vocabulary, the policy, the gate and the
+  audit trail. `Gate.Do` is the one path to an actuator: decide, record,
+  act, record.
+- `internal/obs/navigate` — the one live actuator. It focuses the pane a
+  session runs in and does nothing else.
+- `mux/obsfocus.go` — `magmux agents focus TARGET`, plus `Magmux.obsFocusSession`,
+  which is magmux's own entry to the same gate.
+- `mux/obssock.go` — the pane ports answered over the SOCKET, which is what lets
+  `magmux agents focus` work from outside any magmux. It needs no new verb: the
+  connect-time aggregate already carries every pane's id and its child's pid
+  (`buildPaneResults`), that pid is the SHELL's, and `focus` already takes a
+  pane id. `walkToPane` is the ONE ancestry walk both pane tables use. A pane
+  id is unique within one magmux and NOT across several (every magmux has a
+  pane 0), so the socket table keeps the socket beside every pane pid, and
+  `obsFocus` names the session first, narrows the table to the magmux its
+  ancestry reaches (`forSession`), and only then builds the pipeline that acts.
+  Until fix round 1 it flattened pid -> bare id and refused most sessions as
+  ambiguous on any machine running two magmuxes.
+
+The SINKS — where a person sees the document without running a command:
+
+- `mux/obssink.go` — the one hub subscriber magmux runs, the `obsStore` it keeps
+  for the surfaces that answer a question, and `fleetPayload`. The socket verb
+  is `agents` in `mux/sockrpc.go` — SOCKET-ONLY, not a hub op, so no view token
+  reaches it — and the MCP tool is `list_agents` (`mcp/mcp_agents.go`); both render
+  the SAME `obs.Fleet`, and `list_agents` calls `obsview.WriteFleetTable` — the
+  CLI's own renderer, below `mux` because `mcp` cannot import `mux` — so "one document, three renderings" is a property rather than a
+  promise. `TestTheThreeSurfacesAgree` walks one document through all three.
+- `mux/obspanel.go` — the panel's attention view (see the wire-tap invariants).
+- `obsview/display.go` — **the one rule for registry text reaching a person.**
+  `obsview.DisplaySafe` neutralises C0, DEL, C1 and invalid UTF-8 (whitespace to a
+  space, the rest to a VISIBLE U+FFFD), and the table, the panel and the
+  notifier all call it; `obsview.TerminalSafeJSON` escapes the DEL and C1 characters
+  `encoding/json` writes raw, which changes no decoded value. A session name can
+  be generated from conversation content, so it is attacker-influenced text.
+  Until fix round 2 only the notifier neutralised it — privately, and without
+  C1 — and `magmux agents` wrote an OSC 52 clipboard write in a name to the
+  terminal byte for byte. Apply it at the RENDERER, never at decode: the
+  document keeps what the tool wrote, and `StatusRaw` is the only truth for an
+  unrecognised status. `TestTheNotifierHasNoPrivateCopyOfTheRule` keeps the
+  second copy from coming back.
+- `internal/obs/notify` + `mux/obsnotify.go` — R4.4. The DECISION is a per-session
+  middleware that also implements `Waker`, so a `delay` is served by a one-shot
+  alarm rather than by a timer sweep, and the "announce once per EPISODE" latch
+  is per-session state in the actor. Delivery is `osascript`, on the
+  coordinator's goroutine, bounded by the port because the pipeline starts no
+  timers.
+
+**The control panel is ON-BOX ONLY for the life of a magmux started with
+`MAGMUX_AGENTS=1`** (claudestate architecture ADR-X5). Its attention view draws
+the document the `agents` verb keeps socket-only, so `Main` reads
+`MAGMUX_AGENTS` ONCE, writes it into `Magmux.panelPrivate` on the struct
+literal — before `init()`, the socket, the hub, the Streamer or the Firebase
+mirror exist — and passes the same value to `startObservationIfEnabled`. No
+transition exists to race and nothing ever needs evicting. `refusePanelOffBox`
+(`mux/obspane.go`) is the one refusal: `Streamer.Watch`, `sockCapture` and
+`sockTranscript` answer `panel_private` to any caller whose `Transport` is not
+`"socket"` (a zero `Caller` fails closed), and `watch_all` / a pane opened later
+reach it through `Sub.Watch`, so for them it is a skip. `startObservationWith`
+refuses a public panel (`errPanelPublic`), checked THIRD so the "already
+running" and missing-registry errors are unchanged. The zero value is today's
+public panel, so every struct-literal test is unaffected; a test that starts
+observation says `panelPrivate = true`. `TestNoReadOpServesThePanelOffBoxWhileObserving`
+fails when a `ClassRead` op that takes a pane is registered without a case.
+Note that a socket `call` reaches the hub with the Sub's own Caller (no
+per-message `Client`); only direct socket verbs carry `callerFor`'s `Client`.
+
+### Actuation invariants (`internal/obs/act`)
+
+- **Three of the four action tiers are HARD-DISABLED, and "nothing implements
+  it" is not disabled.** `approve` (R5.2), `send` (R5.3) and `lifecycle` (R5.4)
+  are named in the schema and refused by `Tier.Deferred` — which the gate
+  consults BEFORE any policy is read, and again against the verb's own
+  declaration. So a config saying `lifecycle = "always"`, a caller passing a
+  gentler tier, a matching rule and a middleware eagerly declaring the verb
+  under its own tier all fail to enable it, and
+  `TestEveryDeferredTierRefusesEvenWhenEverythingSaysAlways` proves it against
+  an actuator that declares and implements all four. A middleware declaring
+  the verb under a GENTLER tier is refused by the verb table (next bullet but
+  one), not by `Deferred`. The reason is §5's two incidents (16 sessions
+  destroyed twice over) and the fact that R5.4 is irreversible. Enabling a
+  tier is a deleted case in `Tier.Deferred`, an entry in `verbTier`, and an
+  actuator — one package and one reviewer.
+
+- **A refusal is a REFUSAL, never a silent no-op.** No path out of `Gate.Do`
+  declines and returns a nil error, `ask` included — it returns
+  `ErrNeedsConfirmation` to whoever asked, and THAT surface obtains consent,
+  because a background pipeline that can raise a prompt can be socially
+  engineered into raising one. A caller that asked for a restart and got
+  silence cannot tell it from a restart that happened.
+
+- **A verb's tier is MAGMUX's, in a closed table — not the actuator's and not
+  the caller's.** `verbTier` in `internal/obs/act/action.go` is a switch whose
+  only entry is `focus -> navigate`. The gate resolves the verb in the target's
+  own `Capabilities()`, then refuses a verb the table does not contain
+  (`ErrNotCapable`) and a declaration filing it under a different tier
+  (`ErrTierMismatch`), and only then holds the caller's tier to the same
+  table. Policy is evaluated against the table's tier. So an actuator cannot
+  escalate by declaring `restart` as navigate, and a caller cannot escalate by
+  naming a gentler tier. **This was documented before it was true:** until fix
+  round 1 the gate trusted the declared tier, and a `restart` declared as
+  navigate ran under the default posture while this file said it was refused.
+  `TestAnActuatorCannotRunADangerousVerbByFilingItUnderABenignTier` is the
+  direction that had never been tested. What the table does NOT do: it ties a
+  NAME to a tier, and cannot tell whether an actuator's `Do` does what the name
+  says — an actuator that sends a keystroke under the verb `focus` passes it.
+  Reviewing the actuator is that defence. Adding a verb is an edit to the
+  switch and to `TestTheVerbTableIsClosed`, deliberately. The audit line
+  records the table's tier for the same reason — a record that repeated the
+  caller's or the actuator's word would misreport exactly the case the check
+  exists for. **That was not true on every path until fix round 2:** a `focus`
+  requested under a deferred tier was refused at step 2, before the table was
+  read, and filed as a lifecycle action refused because R5.4 is deferred. The
+  table is now resolved on `Do`'s first line, every record carries its tier
+  when it knows the verb, and a known verb requested under any other tier is
+  `ErrTierMismatch` BEFORE the deferral check — shipping R5.4 would not make
+  "focus as lifecycle" runnable, so deferral was the wrong reason to give. A
+  verb the table does not know is still refused as deferred, under the
+  caller's tier, because there is no table entry to contradict it.
+  `TestARefusalOfAKnownVerbIsAuditedUnderTheTablesTier`.
+
+- **The zero value of everything here REFUSES, and that is the invariant most
+  easily lost.** Every unit test in this repository builds its structs as
+  literals, so a permissive `Stance(0)` would be invisible in all of them:
+  `act.Policy{}` appears wherever a caller says nothing about policy, and with
+  index 0 permissive every existing test keeps passing while an unconfigured
+  pipeline authorises actions. `act.Default()` — NOT the zero value — is
+  R6.1's "navigate freely, everything else asks", and a caller that wants it
+  says so. The same rule covers `Requester(0)`, which refuses because an action
+  whose surface cannot be named cannot be audited.
+
+- **The audit trail is NOT under `~/.claude/`, and cannot be pointed there.**
+  It is `${XDG_STATE_HOME:-~/.local/state}/magmux/sessions-audit.jsonl`, and
+  `act.NewWriter` refuses any path with a `.claude` element or under
+  `$CLAUDE_CONFIG_DIR` — checked on the ABSOLUTE path, with elements compared
+  case-blind, and the writer keeps the absolute path it checked. Both halves
+  were missing until fix round 1, so `--audit trail.jsonl` from a shell inside
+  `~/.claude` wrote there, and `~/.CLAUDE/…` passed on a Mac whose volume is
+  case-insensitive (the default). A relative `XDG_STATE_HOME` is ignored, as
+  the XDG spec requires. The guard reads no file and opens nothing; a RELATIVE
+  path costs `os.Getwd`, which stats `.` — a read of metadata, which NFR1 does
+  not forbid. `~/.claude/magmux/` was separately approved and is still the
+  wrong default: a log that needs an exception to a rule stated as absolute is
+  worse than one that does not.
+
+- **An action that cannot be recorded does not happen.** The attempt line is
+  written BEFORE the act, so a crash mid-action leaves a record with a null
+  outcome — "we tried this and do not know what happened", which is the state
+  an operator needs. An append-only trail cannot then be amended, so the
+  outcome is a SECOND line referring back by `ref`; sharing one `seq` was the
+  first shape and left a reader unable to say which line is seq 41. A failing
+  or absent auditor refuses the action (`ErrUnaudited`), which really does make
+  focusing a pane impossible on an unwritable state directory, and is the right
+  side of that trade.
+
+- **The config file is JSON on REVERSIBILITY grounds, not on merit.** R6
+  sketches it in TOML and TOML is the better format for a file whose purpose is
+  recording rules a human wrote and will want to annotate — JSON has no
+  comments, which cost the migrated test data its provenance headers. What
+  decided it is the dependency pin: a TOML library is the fourth module and
+  `TestDependencySetIsExactlyWhatWasDecided` exists so a fourth is a deliberate
+  decision in a diff that says so. JSON-now-TOML-later is one file
+  (`act.FileLoader`) against an unchanged `act.Policy`; a dependency added
+  without the decision has already defeated the gate. R6.3 stays a property of
+  `act.Load` — a nil loader and a failing one both yield `act.Default()`, the
+  failing one's value discarded ENTIRELY rather than partially applied — and
+  the file adds the two concrete cases: an ABSENT file is the default and NO
+  error, because that is an unconfigured machine; an UNPARSEABLE one is the
+  default WITH an error, because the user wrote something that is not in force.
+  `DisallowUnknownFields` is deliberate and is the quiet half: `"navigte"`
+  silently ignored is a rule that never applies and no way to find out. The
+  same reasoning covers a rule's PATTERN since fix round 2: R6 writes
+  `"cwd": "~/mag/**"`, a launch directory never contains a `~`, and the loader
+  stored it literally, so the spec's own rule could never match. `expandHome`
+  now expands a leading `~` at LOAD; no usable home (unset, or not absolute) is
+  a load error, and `~name/…` is refused rather than kept — both the
+  "discarded, default in force, said out loud" outcome, never a silent miss.
+  Matching (`matchPath`) still expands nothing, so a rule has one spelling in
+  memory and it is the absolute one. The parse errors' "write one of" hints are
+  built from the enums (`enumSpec.accepted`) since the same round; parseTier's
+  hand-typed one recommended `send_input` and `restart`, which it refuses.
+
+- **A notification is audited like an action and is NOT one.** `verb: "notify"`,
+  `tier: null` (it belongs to no action tier — it changes nothing on any
+  session and is aimed at the HUMAN) and `requestedBy: null` (nothing asked;
+  the policy did). Neither null is reachable on an action line reached from
+  OUTSIDE this process — `Gate.Do` refuses an unnamed requester at step 1 and
+  `TierUnknown` matches no capability — so the two kinds of line are
+  distinguishable without knowing how either was made. **One in-process path
+  collides, and this file said otherwise until it was measured:** `Gate.Do`
+  builds its record BEFORE step 1, so a caller passing the reserved verb with no
+  surface and no tier is refused at step 1 and writes verb `notify`, a null tier
+  and a null `requestedBy` — a suppressed notification's shape exactly, down to
+  `event: refused`, the two differing only in the prose of `policy.rule`. It
+  takes a programming error in magmux to reach, nothing outside the process can
+  reach `Gate.Do` at all, and `TestAReservedVerbWithNoSurfaceWearsANotificationsShape`
+  pins the limitation so that closing it FAILS a test rather than passing
+  unnoticed. Closing it means a structural discriminator — a dedicated requester
+  for the policy, a distinct event for a notice, or refusing the reserved verb
+  before the record is built — and each changes the trail's schema, so it is a
+  decision and not a tidy-up. The same rule applies as to an action: the attempt is
+  written BEFORE the port is called, and a notification that cannot be recorded
+  is NOT SENT. The episode stays latched when that happens, deliberately: an
+  unwritable state directory is a standing condition, and un-latching would
+  turn one broken directory into a notification storm caused by the failure to
+  record a notification. It rides out to every sink as a problem instead.
+
+### Generic-tier invariants (`tcgetpgrp`, OSC 133 — `mux/obsshell.go`)
+
+- **Foreground-group equality is worth NOTHING until the `jobControlProven`
+  latch has seen a flip.** `spawnPTY` runs `/bin/zsh -l -c '<cmd>'`, so every
+  `-e` pane is a NON-INTERACTIVE shell, and a non-interactive shell IS the
+  foreground process group for the entire run of every command it is given.
+  Measured: `zsh -l -c 'sleep 2'` reports `fg == leader` in every reading while
+  sleep runs. Without the latch every `-e` pane reports a permanently idle
+  shell, and a wrong "idle" is worse than "undetermined" because a user acts on
+  it. The latch sets on the FLIP — the foreground group leaving the session
+  leader and coming back — it is per pane (`Pane.shell`, under `p.mu`), it only
+  ever sets, and a pane that never flips stays undetermined forever. Do not
+  close that with a timeout: waiting longer does not make an ambiguous reading
+  unambiguous.
+
+- **`LivenessNo` means "the shell is not at a prompt", NOT "work is
+  happening".** vim, htop, a REPL and Claude Code itself hold a foreign
+  foreground group for hours while waiting for a human. Mapping it to
+  `StatusBusy` would report "no attention needed, it is working" about exactly
+  the session that needs someone; the tier answers UNKNOWN when the pane is
+  also silent and says which half it knows.
+
+- **OSC 133 is NOT a writer of `inputReady`, and that is a decision.** Pane
+  idleness has two sources reconciled by `applyTerminalIdle`, ordered so the
+  state cannot oscillate, and the OSC handlers beside it (OSC 9, `777;notify`,
+  `633;B`) are inputs to that merge. `133;A/B/C/D` feed the observation layer
+  through the pull port and nothing else. Wiring them into the merge is
+  defensible on its own terms — a shell at a prompt IS waiting for input — but
+  it is a change to magmux's existing behaviour for every shell pane, and `-w`
+  fires on `inputReady`, so a `-e` pane would be "done" the moment its shell
+  drew a prompt. `TestOSC133IsNotAThirdWriterOfInputReady` pins it, with
+  `633;B` as the positive control.
+
+- **The parser costs one prefix test and allocates nothing.** The case lives in
+  `handleOSC`, which is reached only at OSC TERMINATION — printable characters
+  never come near it — and `noteShellMark` slices the string `handleOSC` had
+  already built. The exit status is stored as `int` + `bool` on the pane and
+  materialised into the model's `*int` once per OBSERVATION, so no pointer is
+  allocated per finished command. Measured at 1 alloc/op against an ignored OSC
+  of the same length, which is the pre-existing `string(vt.oscbuf[:n])`. That
+  holds for a NON-numeric status too (`133;D;SIGINT`) only since fix round 1:
+  the status went through `strconv.Atoi`, whose rejection path allocates a
+  `*NumError`, and the only allocation test fed it a number. `parseExitStatus`
+  now scans digits by hand and `TestParseExitStatusAgreesWithAtoi` holds it to
+  exactly what Atoi accepts.
+
+- **Direct evidence can only ever WITHDRAW a conflict.** The conflict rule is
+  still "the record says busy and the pane has been silent for a full minute",
+  with one clause added: the inferred tier must actually have concluded idle. A
+  pane whose shell says a command is still running agrees with the record, so
+  there is nothing to publish. Raising a conflict FASTER on at-prompt evidence
+  was rejected — a shell back at its prompt while a record says busy means the
+  tool's process is gone, which the liveness gate reports directly and
+  attention rule 1 acts on first.
+
 ## Key Design Decisions
 
 - **TERM=screen-256color** — Apps self-limit to supported escape sequences. This eliminates the need to handle Kitty keyboard protocol, xterm extensions, etc.
@@ -284,14 +587,51 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   must never disagree — `results` reads `inputReady`, so a controller that
   ignores it will contradict itself (issue #2).
 
-- **`~/.claude/projects/<dir>` naming is an undocumented contract we don't own.**
+- **`~/.claude/projects/<dir>` naming is an undocumented contract we don't own,
+  and there is exactly ONE implementation of it.**
   Claude Code replaces **every** non-alphanumeric character with `-` (so `.`,
-  `_` and spaces too, not just `/`) — see `encodeProjectDir`. Because Claude
-  Code can change this at any time, and because a pane's real cwd may differ
-  from magmux's (`cd /foo && claude '...'`), the directory name is never the
-  only way in: discovery falls back to scanning every project directory and
-  matching on transcript content. Keep it that way — a wrong directory name
-  otherwise strands the controller in `starting` silently and forever.
+  `_` and spaces too, not just `/`), per UTF-16 CODE UNIT rather than per rune —
+  so an emoji is a surrogate pair and becomes TWO dashes — and truncates at 200
+  characters with a base36 hash suffix. That is
+  `internal/obs/adapters.EncodeProjectDir`, extracted verbatim from the bundle
+  and pinned against 20,019 generated vectors; `encodeProjectDir` in
+  `mux/controller_claude.go` is a one-line call to it and **must stay one**. It had
+  its own implementation until 2026-09-18 and that implementation was wrong in
+  both of those ways, silently, because a wrong name is a directory that does
+  not exist.
+
+  The INPUT is the **launch** directory, never the live one. Feeding a correct
+  encoder a session's live cwd resolves ~96% of sessions, and the 4% that miss
+  land in a directory that EXISTS holding another session's transcripts — so the
+  failure is "read the wrong session and believe it", not "file not found".
+  magmux is exempt only because it spawns what it observes and still holds the
+  value it passed to the child.
+
+  Because Claude Code can change the encoding at any time, and because a pane's
+  real cwd may differ from magmux's (`cd /foo && claude '...'`), the directory
+  name is never the only way in: discovery falls back to scanning every project
+  directory. Keep it that way — a wrong directory name otherwise strands the
+  controller in `starting` silently and forever. The observation layer's own
+  resolver does the same, and addresses the file by **session id**, which is
+  what makes a wrong directory a miss rather than a wrong answer.
+
+- **Every Claude decode in `mux/` goes through `internal/obs/adapters`, and the
+  schema guard holds it there.** The pane controller had its own encoder, its
+  own turn parser, its own registry reader (`json:"waitingFor"` tags,
+  `status == "waiting"`) and its own spelling of `.jsonl`, `stop_hook_summary`,
+  the queue records and the attachments. It now reads `adapters.DecodeLine`
+  (one transcript record, as a typed `Line`), `adapters.ParseTurns`,
+  `adapters.DecodeReadinessFields` (the three registry fields, refusing exactly
+  what the old `json.Unmarshal` refused, so the cache's "not found" is
+  unchanged), `adapters.DecodeStatus` for every status compare (`regStatusIs`),
+  `adapters.LooksLikePermission` and the path constants. `Turn` / `ToolCall` are
+  aliases of `obs.Turn` / `obs.ToolCall`. `TestOnlySchemaFileDecodesClaudeStrings`
+  (in `internal/obs/adapters`) scans `mux/`'s NON-TEST files with the same
+  decode-site detector; `muxOwnWords` beside it lists the three homograph sites
+  that are magmux's own vocabulary (route state `idle`, the `agent` hook's
+  `idle`, the results key `sessionId`), each with its reason, and fails when an
+  entry goes stale. mux's TESTS are not scanned: they build Claude records as
+  input on purpose.
 
 - **A DECLARED binding is the only way a wrapper pane reads the right
   transcript, so it must never fall back.** A wrapper shows no prompt, so
@@ -1340,6 +1680,40 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   with the Ctrl-G `q` chord once the event has landed
   (`TestSocketIDFlagBindsNamedSocket` and `TestSocketReaderAcceptsLargeLine` do
   the latter). This has now been diagnosed twice; it should not be a third time.
+
+- **The ATTENTION view is a second VIEW of the one panel, and it is not part of
+  the exchange.** architecture-v4 decision 8: there is exactly ONE panel pane
+  and ONE set of anchor fields, so a second panel would mean a second toggle, a
+  second anchor to keep valid across `removeLeafLocked` and a second refusal in
+  `splitFits`; a second view is a frame function and a key (`v` on the focused
+  panel, `Ctrl-G a` to reveal it and switch in one). It is its OWN view rather
+  than rows in the stream because an attention row is NEITHER direction of the
+  wire tap — nobody asked for it, and it is about sessions the controller may
+  never have touched, on panes that may not exist. Nothing in `mux/obspanel.go`
+  touches `sent`, `observed`, a route or the signal stream, which keeps the
+  grep-able invariant above hitting only `recordObserved` and `recordStart`.
+  The status bar is deliberately left alone for the same reason: its digest is
+  the panel's own two counters under the panel's own provenance rule, and an
+  attention count beside them would be a second, quieter model in the one place
+  a controlled run announces itself.
+
+- **The obs SINK may hold `cp.mu` and `treeMu` NEITHER across a channel receive
+  NOR in that order.** Both halves are live and both were watched failing.
+  architecture-v4 §2 — *the hub never blocks on a subscriber, which is what
+  makes it safe for a subscriber to block on the hub* — is what lets the sink
+  park on `for d := range sub.C()`; a lock held across that receive breaks the
+  rule from the other side, and cp.mu in particular stops every frame magmux
+  draws, because `renderLocked` takes it under `treeMu.RLock`. And `cp.mu` ->
+  `treeMu` is the documented order inverted, which is a silent HANG rather than
+  a race report. So: derive on the sink's goroutine holding nothing, take each
+  lock, copy, release. `TestTheSinkNeverTakesTreeMu` scans the AST for the
+  second rule, because an absence cannot be shown behaviourally —
+  **a lock inversion between two READ locks does not deadlock until a treeMu
+  WRITER queues between them**, so a concurrency test without one passes
+  against a broken build. Its behavioural twin,
+  `TestThePanelIsSafeUnderASinkAndARenderLoopAtOnce`, has a treeMu WRITER
+  goroutine for exactly that reason, and it was added after watching the
+  inversion pass without one.
 
 ### Hub invariants (`hub/`: the registry, the bus, the lanes, the teardown)
 

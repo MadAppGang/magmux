@@ -24,7 +24,6 @@ package mux
 // belongs to the render goroutine. No magmux lock is ever held here.
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,11 +31,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/internal/obs/adapters"
 	"github.com/MadAppGang/magmux/protocol"
 	"github.com/MadAppGang/magmux/pty"
 )
@@ -170,15 +172,14 @@ func (c *ClaudeCodeController) transcriptSeq() uint64 {
 // dequeued prompt becomes is dated by its enqueue (dequeuedAt), not by when
 // it ran: the run time of an older queued `continue` must never confirm a new
 // one (r3 internal M2).
-func (c *ClaudeCodeController) noteQueued(kind string, entry map[string]any) {
-	at := parseClaudeTimestamp(entry["timestamp"])
-	if kind == "attachment" {
-		a, _ := entry["attachment"].(map[string]any)
-		if t, _ := a["type"].(string); t != "queued_command" {
+func (c *ClaudeCodeController) noteQueued(l adapters.Line) {
+	at := l.Timestamp
+	if l.Kind == adapters.LineAttachment {
+		if !l.QueuedCommand {
 			return
 		}
-		prompt, _ := a["prompt"].(string)
-		if own := parseClaudeTimestamp(a["timestamp"]); !own.IsZero() {
+		prompt := l.QueuedPrompt
+		if own := l.QueuedAt; !own.IsZero() {
 			at = own
 		}
 		if prompt != "" {
@@ -189,10 +190,10 @@ func (c *ClaudeCodeController) noteQueued(kind string, entry map[string]any) {
 		}
 		return
 	}
-	content, _ := entry["content"].(string)
+	content := l.QueueContent
 	key := inputKey(content)
-	switch op, _ := entry["operation"].(string); op {
-	case "enqueue":
+	switch l.QueueOp {
+	case adapters.QueueOpEnqueue:
 		if content == "" {
 			return
 		}
@@ -201,17 +202,16 @@ func (c *ClaudeCodeController) noteQueued(kind string, entry map[string]any) {
 			c.queue = c.queue[1:]
 		}
 		c.queue = append(c.queue, queuedPrompt{key: key, at: at})
-	case "remove":
+	case adapters.QueueOpRemove:
 		// The oldest pending enqueue of this content; with no content, the
 		// oldest pending one of any — the conservative reading, since it
 		// makes a later user entry OLDER, never fresher. A prompt removed
 		// as absorbed_mid_turn (F11) reached the model inside the running
 		// turn and never becomes a user entry, so it is dropped rather than
 		// left to misdate the next identical send's own entry.
-		reason, _ := entry["reason"].(string)
 		for i := range c.queue {
 			if !c.queue[i].dequeued && (content == "" || c.queue[i].key == key) {
-				if reason == "absorbed_mid_turn" {
+				if l.QueueAbsorbed {
 					c.queue = slices.Delete(c.queue, i, i+1)
 				} else {
 					c.queue[i].dequeued = true
@@ -327,9 +327,9 @@ func decideReadiness(in readinessInput) InputReadiness {
 	case sc.Dialog != "":
 		r.Dismissable = sc.Dismissable
 		return refuse(protocol.ReasonDialogPrefix+sc.Dialog, "a "+sc.Dialog+" dialog is showing")
-	case !sc.BoxVisible && in.reg.Status == "waiting":
+	case !sc.BoxVisible && regStatusIs(in.reg.Status, obs.StatusWaiting):
 		kind := "question"
-		if strings.Contains(in.reg.WaitingFor, "permission") {
+		if adapters.LooksLikePermission(in.reg.WaitingFor) {
 			kind = "permission"
 		}
 		return refuse(protocol.ReasonDialogPrefix+kind,
@@ -445,8 +445,8 @@ func (c *ClaudeCodeController) InputReadiness(q ReadinessQuery) InputReadiness {
 	return r
 }
 
-// regBusy is the registry status of a session running a turn (F4).
-const regBusy = "busy"
+// A registry status of "busy" (obs.StatusBusy through adapters.DecodeStatus)
+// is a session running a turn (F4).
 
 // convChange reports what changed on sc since the pre-typing baseline pre
 // that a SUBMIT would have changed, or "" (r5 M1). A submit by any writer
@@ -465,7 +465,7 @@ func convChange(sc claudeScreen, pre AcceptBaseline, reg regEntry) string {
 		return "the conversation above the input box changed"
 	case sc.Working && !cd.working:
 		return "a turn started (Claude's spinner appeared above the input box)"
-	case reg.Status == regBusy && cd.regStatus != regBusy:
+	case regStatusIs(reg.Status, obs.StatusBusy) && !regStatusIs(cd.regStatus, obs.StatusBusy):
 		return "a turn started (Claude's session registry went busy)"
 	}
 	return ""
@@ -871,11 +871,20 @@ func writtenSince(written, at time.Time) bool {
 // screen did not recognise (rule c); it never makes a pane ready and is never
 // acceptance evidence.
 
-// regEntry is the part of a registry file readiness reads.
+// regEntry is the part of a registry file readiness reads, as the RAW words
+// the tool wrote. It is decoded by adapters.DecodeReadinessFields, and Status is
+// compared through adapters.DecodeStatus (regStatusIs), so nothing here spells
+// one of Claude's keys or values.
 type regEntry struct {
-	Status     string `json:"status"`
-	WaitingFor string `json:"waitingFor"`
-	SessionID  string `json:"sessionId"`
+	Status     string
+	WaitingFor string
+	SessionID  string
+}
+
+// regStatusIs reports whether a raw registry status word decodes to want.
+func regStatusIs(raw string, want obs.Status) bool {
+	s, ok := adapters.DecodeStatus(raw)
+	return ok && s == want
 }
 
 type regCached struct {
@@ -911,11 +920,11 @@ func (c *ClaudeCodeController) registry(now time.Time) regEntry {
 	if config == "" {
 		config = c.claudeConfigDir()
 	}
-	dir := filepath.Join(config, "sessions")
+	dir := filepath.Join(config, adapters.SessionsDirName)
 	var e regEntry
 	found := false
 	if p := c.pane; p != nil && p.cmd != nil && p.cmd.Process != nil {
-		e, found = readRegEntry(filepath.Join(dir, fmt.Sprintf("%d.json", p.cmd.Process.Pid)))
+		e, found = readRegEntry(filepath.Join(dir, strconv.Itoa(p.cmd.Process.Pid)+adapters.RecordSuffix))
 		// A declared session is the authority on whose entry this is: a pid
 		// file naming another session is not this pane's.
 		if found && c.bindID != "" && e.SessionID != c.bindID {
@@ -944,7 +953,7 @@ func (c *ClaudeCodeController) registrySessionID() string {
 		return c.bindID
 	}
 	if path := c.published.Load(); path != nil && *path != "" {
-		return strings.TrimSuffix(filepath.Base(*path), ".jsonl")
+		return strings.TrimSuffix(filepath.Base(*path), adapters.TranscriptSuffix)
 	}
 	return ""
 }
@@ -973,19 +982,22 @@ func (c *ClaudeCodeController) claudeConfigDir() string {
 const regFileMax = 64 << 10
 
 func readRegEntry(path string) (regEntry, bool) {
-	var e regEntry
 	f, err := os.Open(path)
 	if err != nil {
-		return e, false
+		return regEntry{}, false
 	}
 	defer f.Close()
 	// Whole, up to the bound: a short read cannot half-parse, and a file past
-	// regFileMax is cut and fails to unmarshal.
+	// regFileMax is cut and fails to decode.
 	b, err := io.ReadAll(io.LimitReader(f, regFileMax))
-	if err != nil || json.Unmarshal(b, &e) != nil {
+	if err != nil {
 		return regEntry{}, false
 	}
-	return e, true
+	fields, ok := adapters.DecodeReadinessFields(b)
+	if !ok {
+		return regEntry{}, false
+	}
+	return regEntry{Status: fields.Status, WaitingFor: fields.WaitingFor, SessionID: fields.SessionID}, true
 }
 
 func scanRegistry(dir, sessionID string) regEntry {
@@ -997,7 +1009,7 @@ func scanRegistry(dir, sessionID string) regEntry {
 		return regEntry{}
 	}
 	for _, de := range ents {
-		if !de.Type().IsRegular() || !strings.HasSuffix(de.Name(), ".json") {
+		if !de.Type().IsRegular() || !strings.HasSuffix(de.Name(), adapters.RecordSuffix) {
 			continue
 		}
 		if e, ok := readRegEntry(filepath.Join(dir, de.Name())); ok && e.SessionID == sessionID {

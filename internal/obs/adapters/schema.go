@@ -255,6 +255,70 @@ const (
 )
 
 // ---------------------------------------------------------------------------
+// The rest of the transcript, as magmux's PANE CONTROLLER reads it.
+//
+// The controller (mux/controller_claude*.go) tails a pane's transcript line by
+// line and acts on five record kinds; until phase 0 of the claudestate port it
+// spelled every one of them itself, which made it the second decoder of this
+// format that NFR6 forbids. These are those strings, and DecodeLine
+// (line.go) is the one reader of them.
+//
+// Measured on Claude Code 2.1.301 (research F11 for the queue records). The
+// shapes the controller depends on:
+//
+//	{"type":"system","subtype":"stop_hook_summary","timestamp":T}          the turn ended
+//	{"type":"queue-operation","operation":"enqueue","timestamp":T,"content":P}
+//	{"type":"queue-operation","operation":"remove","timestamp":T,"content":P,"reason":R}
+//	{"type":"attachment","attachment":{"type":"queued_command","prompt":P,"timestamp":T0}}
+//
+// and, on an assistant record, message.model.
+// ---------------------------------------------------------------------------
+
+const (
+	RecordTypeSystem         = "system"
+	RecordTypeQueueOperation = "queue-operation"
+	RecordTypeAttachment     = "attachment"
+
+	// KeySubtype on a system record, and the one subtype the controller acts
+	// on: a turn's Stop hook ran, so the turn is over. It exists only when the
+	// user has a Stop hook configured (CLAUDE.md, controller invariants).
+	KeySubtype             = "subtype"
+	SubtypeStopHookSummary = "stop_hook_summary"
+
+	// KeyModel on an assistant record's message.
+	KeyModel = "model"
+
+	// A queue-operation record: KeyOperation is OperationEnqueue or
+	// OperationRemove, KeyContent (above) carries the prompt, and a remove may
+	// carry KeyReason ReasonAbsorbedMidTurn — the prompt reached the model inside
+	// the running turn and will never become a user record.
+	KeyOperation          = "operation"
+	OperationEnqueue      = "enqueue"
+	OperationRemove       = "remove"
+	KeyReason             = "reason"
+	ReasonAbsorbedMidTurn = "absorbed_mid_turn"
+
+	// An attachment record carries KeyAttachment, whose own KeyRecordType is
+	// AttachmentQueuedCommand for a queued prompt, with KeyAttachmentPrompt and
+	// its ORIGINAL enqueue KeyTimestamp.
+	KeyAttachment           = "attachment"
+	AttachmentQueuedCommand = "queued_command"
+	KeyAttachmentPrompt     = "prompt"
+
+	// SessionsDirName and ProjectsDirName are the two trees under the Claude
+	// config directory: the registry (<pid>.json) and the transcripts
+	// (<encoded launch dir>/<session id>.jsonl).
+	SessionsDirName = "sessions"
+	ProjectsDirName = "projects"
+
+	// permissionWord is what a waitingFor value about a permission prompt
+	// contains. The controller's input gate has always asked "does it say
+	// permission" rather than matching one exact value, so a reworded
+	// permission prompt still names the dialog it is; see LooksLikePermission.
+	permissionWord = "permission"
+)
+
+// ---------------------------------------------------------------------------
 // Decoders.
 //
 // Each answers (value, ok). ok is false for anything Claude has added since
@@ -514,6 +578,10 @@ var claudeOwnedLiterals = []string{
 	BlockTypeToolUse,
 	BlockTypeToolResult,
 	KeyToolUseID,
+	SubtypeStopHookSummary,
+	RecordTypeQueueOperation,
+	ReasonAbsorbedMidTurn,
+	AttachmentQueuedCommand,
 	statusIdle,
 	statusBusy,
 	statusShell,

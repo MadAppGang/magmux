@@ -15,6 +15,7 @@ import (
 
 	"github.com/MadAppGang/magmux/internal/obs"
 	"github.com/MadAppGang/magmux/internal/obs/act"
+	"github.com/MadAppGang/magmux/internal/obs/adapters"
 	"github.com/MadAppGang/magmux/internal/obs/claudecode"
 	"github.com/MadAppGang/magmux/internal/obs/pipeline"
 	"github.com/MadAppGang/magmux/obsview"
@@ -292,14 +293,14 @@ func reportObsStats(w io.Writer, st pipeline.Stats) {
 // directory has moved it for everything that reads it.
 func defaultRegistryRoot() (string, error) {
 	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
-		return filepath.Join(dir, "sessions"), nil
+		return filepath.Join(dir, adapters.SessionsDirName), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot find your home directory, so cannot find the session "+
 			"registry; pass --root: %w", err)
 	}
-	return filepath.Join(home, ".claude", "sessions"), nil
+	return filepath.Join(home, ".claude", adapters.SessionsDirName), nil
 }
 
 // defaultProjectsRoot is where Claude Code keeps its transcripts, on the same
@@ -307,14 +308,14 @@ func defaultRegistryRoot() (string, error) {
 // moved the directory has moved it for everything that reads it.
 func defaultProjectsRoot() (string, error) {
 	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
-		return filepath.Join(dir, "projects"), nil
+		return filepath.Join(dir, adapters.ProjectsDirName), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot find your home directory, so cannot find the "+
 			"transcripts; pass --projects: %w", err)
 	}
-	return filepath.Join(home, ".claude", "projects"), nil
+	return filepath.Join(home, ".claude", adapters.ProjectsDirName), nil
 }
 
 func printObsHelp(w io.Writer) {

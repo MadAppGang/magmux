@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/MadAppGang/magmux/internal/obs/adapters"
 )
 
 // A DECLARED transcript binding: the caller names the Claude Code session a
@@ -59,14 +61,14 @@ func normalizeBinding(id, path string) (string, string, error) {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 			return "", "", fmt.Errorf("transcript must be a clean absolute path (got %q)", path)
 		}
-		if !strings.HasSuffix(path, ".jsonl") {
-			return "", "", fmt.Errorf("transcript must name a .jsonl file (got %q)", path)
+		if !strings.HasSuffix(path, adapters.TranscriptSuffix) {
+			return "", "", fmt.Errorf("transcript must name a %s file (got %q)", adapters.TranscriptSuffix, path)
 		}
-		base := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+		base := strings.TrimSuffix(filepath.Base(path), adapters.TranscriptSuffix)
 		if id == "" {
 			id = base
 		} else if id != base {
-			return "", "", fmt.Errorf("transcript %q is not session %q's file (want %s.jsonl)", path, id, id)
+			return "", "", fmt.Errorf("transcript %q is not session %q's file (want %s%s)", path, id, id, adapters.TranscriptSuffix)
 		}
 	}
 	if len(id) == 0 || len(id) > sessionIDMax {
@@ -112,7 +114,7 @@ func (c *ClaudeCodeController) findNamedSession() string {
 }
 
 func (c *ClaudeCodeController) namedPathByID() string {
-	name := c.bindID + ".jsonl"
+	name := c.bindID + adapters.TranscriptSuffix
 	if c.projectDir != "" {
 		p := filepath.Join(c.projectDir, name)
 		if _, err := os.Stat(p); err == nil {
@@ -141,7 +143,7 @@ func (c *ClaudeCodeController) namedPathByID() string {
 // shaped that way.
 func configDirOfTranscript(path string) string {
 	projects := filepath.Dir(filepath.Dir(path))
-	if filepath.Base(projects) != "projects" {
+	if filepath.Base(projects) != adapters.ProjectsDirName {
 		return ""
 	}
 	return filepath.Dir(projects)
@@ -165,5 +167,5 @@ func (c *ClaudeCodeController) Binding() (path, id, mode string, seen bool) {
 	if m := c.boundBy.Load(); m != nil {
 		mode = *m
 	}
-	return found, strings.TrimSuffix(filepath.Base(found), ".jsonl"), mode, true
+	return found, strings.TrimSuffix(filepath.Base(found), adapters.TranscriptSuffix), mode, true
 }
