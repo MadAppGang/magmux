@@ -467,6 +467,21 @@ per-message `Client`); only direct socket verbs carry `callerFor`'s `Client`.
   focusing a pane impossible on an unwritable state directory, and is the right
   side of that trade.
 
+- **An UNKNOWN outcome is recorded as `done: false`, and that is a known
+  limitation.** The library's acceptance rule (`pipeline.Exec`, `Ops.Call`):
+  once the actor has the focus, a caller whose context ends gets
+  `pipeline.ErrOutcomeUnknown`, because the focus may still complete. `Gate.Do`
+  files it like any other actuator error, as an outcome line with
+  `done: false` and the error text. Only that text says "it may have run", so
+  a reader keying on `done` reads "not done" about a focus that then moved the
+  keyboard. It is unreachable in production today: the one production caller,
+  `magmux agents focus` (`mux/obsfocus.go`), passes `context.Background()`,
+  so no caller's context ever ends. `obsFocusSession` takes a context, but
+  only tests call it. Closing it means giving the trail a third outcome,
+  which is a schema decision, and the decision so far is not to make it.
+  `TestAnOutcomeUnknownWearsANotDoneShape` pins the limitation, so closing it
+  FAILS a test instead of passing unnoticed.
+
 - **The config file is JSON on REVERSIBILITY grounds, not on merit.** R6
   sketches it in TOML and TOML is the better format for a file whose purpose is
   recording rules a human wrote and will want to annotate — JSON has no
