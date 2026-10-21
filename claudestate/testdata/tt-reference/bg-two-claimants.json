@@ -1,0 +1,292 @@
+{
+  "counts": {
+    "attention": 0,
+    "byKind": {
+      "background": 1,
+      "interactive": 1,
+      "unknown": 0
+    },
+    "byStatus": {
+      "blocked": 0,
+      "busy": 1,
+      "done": 0,
+      "failed": 0,
+      "idle": 0,
+      "shell": 0,
+      "unknown": 0,
+      "waiting": 0,
+      "working": 1
+    },
+    "dead": 0,
+    "live": 1,
+    "total": 2,
+    "unknown": 1
+  },
+  "notCapable": [
+    "time-transitions"
+  ],
+  "observedAt": "2026-10-21T09:35:05.141Z",
+  "schema": 1,
+  "sessions": [
+    {
+      "advisories": [
+        {
+          "code": "status-conflict",
+          "rawValues": [
+            "waiting",
+            "working/working"
+          ],
+          "sources": [
+            "registry",
+            "jobs"
+          ]
+        },
+        {
+          "code": "status-since-unverifiable",
+          "reason": "the record names no transcript"
+        },
+        {
+          "code": "beyond-transcript-retention",
+          "recordAgeMs": 2876165141,
+          "retentionMs": 2592000000
+        },
+        {
+          "code": "sessionid-cross-kind",
+          "other": "interactive"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.278",
+      "cwd": "/Users/user/dev/sample",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry",
+        "jobs"
+      ],
+      "live": null,
+      "liveReason": "job-beyond-transcript-retention",
+      "messagingSocketPath": "/tmp/cc-socks/70011.sock",
+      "name": "synthetic-session",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:05.141Z",
+      "paneAlive": null,
+      "pid": 70011,
+      "procAlive": false,
+      "rawKind": null,
+      "rawStatus": "working",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 2876165141,
+      "recordUpdatedAt": "2026-09-18T02:39:00.000Z",
+      "resumeSessionId": "20000000-0000-4000-8000-000000000011",
+      "sessionId": "20000000-0000-4000-8000-000000000011",
+      "shortId": "btc00001",
+      "sources": [
+        "registry",
+        "jobs"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "working",
+      "statusAgeMs": 2876165141,
+      "statusSince": "2026-09-18T02:39:00.000Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": "working",
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": null,
+      "transcriptCollected": false,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "status-suspect",
+          "statusAgeMs": 2876098937
+        },
+        {
+          "code": "sessionid-cross-kind",
+          "other": "background"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.278",
+      "cwd": "/Users/user/dev/sample",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": true,
+      "liveReason": "proc-only",
+      "messagingSocketPath": "/tmp/cc-socks/70012.sock",
+      "name": "synthetic-session",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:05.141Z",
+      "paneAlive": null,
+      "pid": 70012,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "busy",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "20000000-0000-4000-8000-000000000011",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "busy",
+      "statusAgeMs": 2876098937,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": null,
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    }
+  ],
+  "sources": {
+    "agents-cli": {
+      "advisories": [
+        {
+          "code": "source-not-ok",
+          "error": "claude agents --json: exit status 127",
+          "role": "corroboration",
+          "source": "agents-cli"
+        }
+      ],
+      "ageMs": null,
+      "counters": {
+        "background": 0,
+        "entries": 0,
+        "interactive": 0,
+        "lastSpawnMs": 31,
+        "spawns": 1,
+        "waitedMs": 0
+      },
+      "id": "agents-cli",
+      "labels": {
+        "agentsCache": "miss",
+        "backoffUntil": "2026-10-21T09:35:07.173Z",
+        "command": "claude agents --json",
+        "crossChecksSuppressed": "true",
+        "trigger": "startup"
+      },
+      "lastError": "claude agents --json: exit status 127",
+      "observedAt": null,
+      "ok": false,
+      "path": "",
+      "role": "corroboration",
+      "stale": false,
+      "staleAfterMs": 30000,
+      "watch": null
+    },
+    "jobs": {
+      "advisories": [],
+      "ageMs": 0,
+      "counters": {
+        "dirs": 1,
+        "entries": 1,
+        "failures": 0,
+        "nonTerminal": 1,
+        "parseErrors": 0,
+        "records": 1
+      },
+      "id": "jobs",
+      "labels": {},
+      "lastError": null,
+      "observedAt": "2026-10-21T09:35:05.142Z",
+      "ok": true,
+      "path": "/testdata/jobs",
+      "role": "authoritative",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    },
+    "registry": {
+      "advisories": [],
+      "ageMs": 0,
+      "counters": {
+        "failures": 0,
+        "ignoredKeyFiles": 0,
+        "parseErrors": 0,
+        "records": 2,
+        "retriesDeferred": 0
+      },
+      "id": "registry",
+      "labels": {},
+      "lastError": null,
+      "observedAt": "2026-10-21T09:35:05.141Z",
+      "ok": true,
+      "path": "/testdata/sessions",
+      "role": "authoritative",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    },
+    "transcripts": {
+      "advisories": [],
+      "ageMs": 0,
+      "counters": {
+        "ambiguous": 0,
+        "colorMisses": 0,
+        "enrichByGlob": 1,
+        "enrichByRecordPath": 0,
+        "enrichLocated": 0,
+        "enrichLookups": 1,
+        "enrichPathMisses": 0,
+        "enrichRefused": 0,
+        "enrichTimingCacheHits": 0,
+        "enrichTimingReads": 0,
+        "factsCacheHits": 0,
+        "factsReads": 0,
+        "globMisses": 1,
+        "tailBytesColor": 204800,
+        "tailBytesTiming": 65536
+      },
+      "id": "transcripts",
+      "labels": {
+        "pass": "enrichment"
+      },
+      "lastError": null,
+      "observedAt": "2026-10-21T09:35:05.141Z",
+      "ok": true,
+      "path": "/testdata/projects",
+      "role": "enrichment",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    }
+  },
+  "tt": "devel",
+  "warnings": [
+    {
+      "code": "source-not-ok",
+      "error": "claude agents --json: exit status 127",
+      "role": "corroboration",
+      "source": "agents-cli"
+    }
+  ]
+}

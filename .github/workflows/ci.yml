@@ -45,12 +45,14 @@ jobs:
         run: go test -race ./...
 
       # claudestate/ is a nested module, so the root's ./... never descends
-      # into it (`go help packages`). It gets its own steps. _probe begins with
-      # "_", which ./... skips, so it is named explicitly: it must build and
-      # vet, and it must never become a test.
+      # into it (`go help packages`). It gets its own steps. _probe and _diff
+      # begin with "_", which ./... skips, so they are named explicitly: they
+      # must build and vet, and they must never become tests. _diff is RUN by
+      # hand only (it builds tt and spawns children); CI replays its recorded
+      # references in internal/difftest instead.
       - name: claudestate build, vet, test
         working-directory: claudestate
-        run: go build ./... ./_probe && go vet ./... ./_probe && go test -race ./...
+        run: go build ./... ./_probe ./_diff && go vet ./... ./_probe ./_diff && go test -race ./...
 
       # The library's dependency pin (internal/audit G10) is only meaningful
       # if go.mod is exactly what tidy writes. The status check also catches a

@@ -137,6 +137,50 @@ part of the scenario:
 | `k2-duplicate-different-transcripts` | — | job directories `a` and `b`, one id and short, two transcripts: `a` speaks |
 | `k3-duplicate-99-100` | — | `99.json` and `100.json`, body pid 200: `100.json` speaks, byte-wise |
 
+## `tt-reference/`: tt's recorded answers (§8.1, §8.2), for the CI differential
+
+`<scenario>.json` is the output of `tt sessions --json --all` from tt's
+**unmodified** observer, commit `51ec374` of the tt repository
+(`51ec374adc744a063b22d48b94ecb05f40a23bee`), read with `git archive 51ec374
+tools/tt` from the tt repository and built inside a fresh sandbox by
+`go run ./_diff -tt-src <that tree> -all-corpus -record`, on darwin (macOS,
+Darwin 27.0.0, arm64), 2026-10-21. Each is **DERIVED, origin tt**: tt wrote
+every byte, over a scenario root of this corpus, and `_diff` then mapped it back
+to canonical form:
+
+- every sandbox pid is the canonical pid again (the inverse of the run's map);
+- every string that began with the sandbox's Claude root begins with
+  `/testdata` instead, so `transcript.path` reads `/testdata/projects/…`, and
+  anything else under the scenario's sandbox directory begins with `/sandbox`;
+- the JSON was re-encoded, indented, with keys sorted. No value changed.
+
+A recorded reference never names a sandbox path; `_diff` refuses to write one
+that does, and `internal/difftest`'s reference test checks again.
+
+`<scenario>.liveness.json` is **SYNTHETIC, origin magmux**: `_diff` wrote it.
+It records what tt was run against, in canonical pids: the scenario root, the
+agents listing tt's `claude` stub printed (none means the stub exited 127), and
+every pid the scenario names with the answer it gave. In the sandbox an alive
+pid was a `/bin/cat` child the driver held open and a dead one was a child the
+driver had already reaped; nothing was signalled, and both sides probed with
+`kill(pid, 0)` only. The dead pids are the scenario table above, plus 60001 and
+60011 for `magmux-corpus` (its `LIVE-PIDS.txt`) and 999001 for every
+`tt-corpus` scenario (tt's `dead-pid.json`).
+
+Three corpus scenarios have **no** reference, and the reference test lists each
+with its reason so the set cannot shrink quietly:
+
+- `k3-duplicate-99-100`: NOT VERIFIED by construction. Canonically `100.json`
+  speaks, byte-wise; any ascending map of two pids of one digit count reverses
+  that, and the driver refuses to record a run whose speaker changed (§8.2
+  step 4, §11).
+- `tt-corpus.agents-real-37-with-waitingfor` and `tt-corpus.agents-real-39`:
+  one UNCITED difference each, reported rather than recorded. tt drops the
+  id-less registry record `no-session-id.json` (pid 2196) at parse, so that pid
+  is unclaimed and tt admits the listing's interactive entry
+  `c8d6e0df-…/pid 2196`. The library keeps the record (D11), so FR15 finds the
+  pid on a record and refuses the entry. No D-row covers it.
+
 ## Every file
 
 | File | Class | Origin | What it is for |
@@ -306,3 +350,41 @@ part of the scenario:
 | `roots/twin-waiting-done/jobs/twd00001/state.json` | SYNTHETIC | magmux | see the section for this root |
 | `roots/twin-waiting-done/sessions/70002.json` | SYNTHETIC | magmux | see the section for this root |
 | `roots/working-tempo-blocked/jobs/wtb00001/state.json` | SYNTHETIC | magmux | see the section for this root |
+| `tt-reference/bg-spare-no-jobid.json` | DERIVED | tt | tt 51ec374's answer for the `bg-spare-no-jobid` scenario |
+| `tt-reference/bg-spare-no-jobid.liveness.json` | SYNTHETIC | magmux | the inputs `bg-spare-no-jobid.json` was recorded against |
+| `tt-reference/bg-two-claimants.json` | DERIVED | tt | tt 51ec374's answer for the `bg-two-claimants` scenario |
+| `tt-reference/bg-two-claimants.liveness.json` | SYNTHETIC | magmux | the inputs `bg-two-claimants.json` was recorded against |
+| `tt-reference/job-no-id-shared-short.json` | DERIVED | tt | tt 51ec374's answer for the `job-no-id-shared-short` scenario |
+| `tt-reference/job-no-id-shared-short.liveness.json` | SYNTHETIC | magmux | the inputs `job-no-id-shared-short.json` was recorded against |
+| `tt-reference/k2-duplicate-different-transcripts.json` | DERIVED | tt | tt 51ec374's answer for the `k2-duplicate-different-transcripts` scenario |
+| `tt-reference/k2-duplicate-different-transcripts.liveness.json` | SYNTHETIC | magmux | the inputs `k2-duplicate-different-transcripts.json` was recorded against |
+| `tt-reference/k3-duplicate-both-mismatched.json` | DERIVED | tt | tt 51ec374's answer for the `k3-duplicate-both-mismatched` scenario |
+| `tt-reference/k3-duplicate-both-mismatched.liveness.json` | SYNTHETIC | magmux | the inputs `k3-duplicate-both-mismatched.json` was recorded against |
+| `tt-reference/lone-bg-two-claimants.json` | DERIVED | tt | tt 51ec374's answer for the `lone-bg-two-claimants` scenario |
+| `tt-reference/lone-bg-two-claimants.liveness.json` | SYNTHETIC | magmux | the inputs `lone-bg-two-claimants.json` was recorded against |
+| `tt-reference/lone-bg-with-transcript.json` | DERIVED | tt | tt 51ec374's answer for the `lone-bg-with-transcript` scenario |
+| `tt-reference/lone-bg-with-transcript.liveness.json` | SYNTHETIC | magmux | the inputs `lone-bg-with-transcript.json` was recorded against |
+| `tt-reference/lone-bg.json` | DERIVED | tt | tt 51ec374's answer for the `lone-bg` scenario |
+| `tt-reference/lone-bg.liveness.json` | SYNTHETIC | magmux | the inputs `lone-bg.json` was recorded against |
+| `tt-reference/magmux-corpus.json` | DERIVED | tt | tt 51ec374's answer for the `magmux-corpus` scenario |
+| `tt-reference/magmux-corpus.liveness.json` | SYNTHETIC | magmux | the inputs `magmux-corpus.json` was recorded against |
+| `tt-reference/tt-corpus.agents-background-only.json` | DERIVED | tt | tt 51ec374's answer for the `tt-corpus.agents-background-only` scenario |
+| `tt-reference/tt-corpus.agents-background-only.liveness.json` | SYNTHETIC | magmux | the inputs `tt-corpus.agents-background-only.json` was recorded against |
+| `tt-reference/tt-corpus.agents-cross-kind-sessionid.json` | DERIVED | tt | tt 51ec374's answer for the `tt-corpus.agents-cross-kind-sessionid` scenario |
+| `tt-reference/tt-corpus.agents-cross-kind-sessionid.liveness.json` | SYNTHETIC | magmux | the inputs `tt-corpus.agents-cross-kind-sessionid.json` was recorded against |
+| `tt-reference/tt-corpus.agents-empty.json` | DERIVED | tt | tt 51ec374's answer for the `tt-corpus.agents-empty` scenario |
+| `tt-reference/tt-corpus.agents-empty.liveness.json` | SYNTHETIC | magmux | the inputs `tt-corpus.agents-empty.json` was recorded against |
+| `tt-reference/tt-corpus.agents-interactive-no-registry.json` | DERIVED | tt | tt 51ec374's answer for the `tt-corpus.agents-interactive-no-registry` scenario |
+| `tt-reference/tt-corpus.agents-interactive-no-registry.liveness.json` | SYNTHETIC | magmux | the inputs `tt-corpus.agents-interactive-no-registry.json` was recorded against |
+| `tt-reference/tt-corpus.agents-malformed.json` | DERIVED | tt | tt 51ec374's answer for the `tt-corpus.agents-malformed` scenario |
+| `tt-reference/tt-corpus.agents-malformed.liveness.json` | SYNTHETIC | magmux | the inputs `tt-corpus.agents-malformed.json` was recorded against |
+| `tt-reference/tt-corpus.json` | DERIVED | tt | tt 51ec374's answer for the `tt-corpus` scenario |
+| `tt-reference/tt-corpus.liveness.json` | SYNTHETIC | magmux | the inputs `tt-corpus.json` was recorded against |
+| `tt-reference/twin-dead-blocked.json` | DERIVED | tt | tt 51ec374's answer for the `twin-dead-blocked` scenario |
+| `tt-reference/twin-dead-blocked.liveness.json` | SYNTHETIC | magmux | the inputs `twin-dead-blocked.json` was recorded against |
+| `tt-reference/twin-dead-overlay.json` | DERIVED | tt | tt 51ec374's answer for the `twin-dead-overlay` scenario |
+| `tt-reference/twin-dead-overlay.liveness.json` | SYNTHETIC | magmux | the inputs `twin-dead-overlay.json` was recorded against |
+| `tt-reference/twin-waiting-done.json` | DERIVED | tt | tt 51ec374's answer for the `twin-waiting-done` scenario |
+| `tt-reference/twin-waiting-done.liveness.json` | SYNTHETIC | magmux | the inputs `twin-waiting-done.json` was recorded against |
+| `tt-reference/working-tempo-blocked.json` | DERIVED | tt | tt 51ec374's answer for the `working-tempo-blocked` scenario |
+| `tt-reference/working-tempo-blocked.liveness.json` | SYNTHETIC | magmux | the inputs `working-tempo-blocked.json` was recorded against |

@@ -69,11 +69,17 @@ type writingFile struct {
 	Citation string
 }
 
-// writingFiles is EMPTY at this commit. The one planned entry is
-// `_diff/sandbox.go` (MkdirTemp, OpenRoot, RemoveAll; architecture §6 G2,
-// C1), and it lands in L6 with the file. An entry for a file that does not
-// exist fails TestNoCodeWeShipWritesToTheFilesystem, so it cannot go stale.
-var writingFiles = []writingFile{}
+// writingFiles is the ONE cited entry (architecture §6 G2, C1): the _diff
+// sandbox's lifecycle. An entry for a file that does not exist fails
+// TestNoCodeWeShipWritesToTheFilesystem, so it cannot go stale.
+var writingFiles = []writingFile{
+	{
+		Rel:     "_diff/sandbox.go",
+		Allowed: []string{"MkdirTemp", "OpenRoot", "RemoveAll"},
+		Citation: "architecture §6 G2 and §4.7 C1: the _diff sandbox's lifecycle; every other write in it " +
+			"goes through an *os.Root opened on its MkdirTemp directory or on testdata/",
+	},
+}
 
 func writeFindings(files []file, allow []writingFile) []finding {
 	exempt := map[string]writingFile{}
@@ -262,7 +268,7 @@ func isPureReadFlagExpr(e ast.Expr) bool {
 
 func TestNoCodeWeShipWritesToTheFilesystem(t *testing.T) {
 	files := nonTest(loadModule(t))
-	requireScanned(t, files, "_probe/probe.go", "ports/root.go")
+	requireScanned(t, files, "_probe/probe.go", "_diff/sandbox.go", "ports/root.go")
 	if got := writeFindings(files, writingFiles); len(got) != 0 {
 		t.Fatalf("code in this module writes to the filesystem:\n%s", format(got))
 	}
