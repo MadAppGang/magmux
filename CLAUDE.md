@@ -125,8 +125,14 @@ The input gate (magmux owns input readiness for a Claude Code pane):
   `sockdir/settings.go` — the merge, the private settings copy and its sweep.
 - `protocol/reasons.go`, `protocol/sendbudget.go` — the reason strings and THE
   send budget; `hub/exec.go` — `Hub.ExecContext`.
-- `mux/claude_e2e_test.go` — V1.1–V1.6 against a REAL Claude Code, gated on
-  `MAGMUX_CLAUDE_E2E=1` and never run in CI.
+- `mux/claude_e2e_test.go` — V1.1–V1.6 against a REAL Claude Code, never run
+  in CI. It compiles only under the `claude_e2e` build tag AND runs only with
+  `MAGMUX_CLAUDE_E2E=1`, so the default suite holds no test that reads the real
+  Claude config or runs `claude`; it is the one file allowed to carry the tag:
+
+  ```bash
+  MAGMUX_CLAUDE_E2E=1 go test -tags claude_e2e -run TestClaudeE2E -count=1 -timeout 30m -v ./mux/
+  ```
 
 Controlled sessions (an external AI agent steering a pane):
 
