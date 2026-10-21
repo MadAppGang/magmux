@@ -14,6 +14,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/MadAppGang/magmux/claudestate/join"
@@ -61,7 +62,21 @@ var (
 	ErrUnwatchable = errors.New("pipeline: Watch was asked of a tree that cannot be watched (Dir is empty)")
 	ErrBadBuffer   = errors.New("pipeline: a subscriber buffer cannot be negative")
 	errNoClock     = errors.New("pipeline: Config.Clock is required")
+
+	// ErrOutcomeUnknown is Exec's and Ops.Call's answer when the caller's
+	// context ended AFTER the work was accepted and before its result came
+	// back. The work may have run, may be running and may yet complete: it is
+	// neither a success nor a refusal, and a host that records outcomes (an
+	// audit trail) must record it as unknown, never as "not done". It always
+	// wraps the context's own error, so errors.Is(err, context.Canceled) and
+	// errors.Is(err, context.DeadlineExceeded) still answer which.
+	ErrOutcomeUnknown = errors.New("pipeline: accepted, and the caller stopped waiting before the outcome was known; it may have run")
 )
+
+// outcomeUnknown is ErrOutcomeUnknown wrapping ctx's error.
+func outcomeUnknown(ctx context.Context) error {
+	return fmt.Errorf("%w: %w", ErrOutcomeUnknown, ctx.Err())
+}
 
 // DefaultSubscriberBuffer is a subscription's buffer when nobody says.
 const DefaultSubscriberBuffer = 4
@@ -119,6 +134,13 @@ type Ops interface {
 	Session(k model.Key) (model.Session, bool)
 	// Call runs fn on k's actor goroutine. find looks a stage up by Name().
 	// fn must return promptly: the actor serves nothing else while it runs.
+	//
+	// ctx follows Exec's acceptance rule, one level down. Before the actor
+	// has fn, an ended ctx is ctx.Err() and fn never runs; once it has fn, an
+	// answer already given wins, and a ctx that ends first is
+	// ErrOutcomeUnknown wrapping ctx.Err() — fn may be completing (a focus
+	// that moves the keyboard) and must not be reported as not done. An actor
+	// that is gone is ErrNoSuchKey.
 	Call(ctx context.Context, k model.Key, fn func(s model.Session, find func(name string) (stage.Stage, bool)) error) error
 }
 
@@ -230,11 +252,15 @@ type reply struct {
 
 // ask sends one command and waits for its reply, honouring ctx and Stop.
 //
-// An Exec honours ctx only until the coordinator ACCEPTS it. From then on fn
-// has run or is running, with ctx, and its answer is the answer: returning
-// ctx.Err() instead would tell the caller "not done" about something that may
-// have been done, and the host's audit trail would say otherwise (review r1
-// #6b). fn is bounded by its own obligation to honour ctx (Exec's doc).
+// ACCEPTANCE is the line. Until the coordinator takes the command, a context
+// that ends is a plain refusal: nothing ran. Once it has taken it, a result
+// already sent always wins, and a caller whose context ends first gets, for an
+// Exec, ErrOutcomeUnknown wrapping ctx.Err() — fn has run or is running with
+// that ctx, so ctx.Err() alone would tell the caller "not done" about
+// something that may have been done (review r1 #6b), and waiting for fn would
+// hand the caller's goroutine to host code that ignores its context (review
+// r2 #2). The other commands are bookkeeping with no effect to misreport, and
+// keep the plain error.
 func (p *Pipeline) ask(ctx context.Context, c command) (reply, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -247,6 +273,9 @@ func (p *Pipeline) ask(ctx context.Context, c command) (reply, error) {
 		return reply{}, ErrStopped
 	default:
 	}
+	if err := ctx.Err(); err != nil {
+		return reply{}, err // never offered: a ready send would win the select at random
+	}
 	c.ctx = ctx
 	c.reply = make(chan reply, 1)
 	select {
@@ -256,16 +285,27 @@ func (p *Pipeline) ask(ctx context.Context, c command) (reply, error) {
 	case <-ctx.Done():
 		return reply{}, ctx.Err()
 	}
-	cancelled := ctx.Done()
-	if c.kind == cmdExec {
-		cancelled = nil // accepted: wait for fn's own answer
-	}
+	// Accepted. The coordinator answers a command it took before it can
+	// stop, so a reply that is ready is the answer, whatever else is.
 	select {
 	case r := <-c.reply:
 		return r, nil
 	case <-p.done:
+		select {
+		case r := <-c.reply:
+			return r, nil
+		default:
+		}
 		return reply{}, ErrStopped
-	case <-cancelled:
+	case <-ctx.Done():
+		select {
+		case r := <-c.reply:
+			return r, nil
+		default:
+		}
+		if c.kind == cmdExec {
+			return reply{}, outcomeUnknown(ctx)
+		}
 		return reply{}, ctx.Err()
 	}
 }
@@ -318,10 +358,21 @@ func (p *Pipeline) RefreshSources(ctx context.Context, ids []model.SourceID) (Re
 	return r.outcome, r.err
 }
 
-// Exec runs fn on the coordinator, between cycles. ctx bounds the wait for the
-// coordinator to accept fn; once accepted, Exec returns fn's own answer. fn
-// receives ctx and must return promptly, honouring it: it runs on the
-// goroutine that services every session's next cycle.
+// Exec runs fn on the coordinator, between cycles. fn receives ctx and must
+// return promptly, honouring it: it runs on the goroutine that services every
+// session's next cycle.
+//
+// What Exec returns depends on whether the coordinator had ACCEPTED fn when
+// ctx ended:
+//   - not yet: ctx.Err(), plainly. fn never runs.
+//   - accepted, and fn answered first: fn's own answer, whatever ctx did.
+//   - accepted, and ctx ended first: ErrOutcomeUnknown wrapping ctx.Err(),
+//     at once. fn has run, is running or will finish; Exec does not wait for
+//     it, so a fn that ignores ctx cannot hold the caller. A host recording
+//     outcomes records this one as unknown — never as "not done" — and reads
+//     its own record (the audit trail) for what happened.
+//
+// Exec never blocks for ever: it returns on fn's answer, ctx ending, or Stop.
 func (p *Pipeline) Exec(ctx context.Context, fn func(context.Context, Ops) error) error {
 	r, err := p.ask(ctx, command{kind: cmdExec, fn: fn})
 	if err != nil {

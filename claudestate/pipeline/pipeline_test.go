@@ -602,11 +602,13 @@ func TestADocumentWithNoProjectsTreeReadsNoTranscript(t *testing.T) {
 	}
 }
 
-// Once the coordinator has accepted an Exec, fn runs; its answer is the
-// answer, even if the caller's context ends while fn is running. Reporting
-// ctx.Err() then would tell the caller "not done" about something that was
-// done (review r1 #6b).
-func TestAnExecThatRanReportsWhatItsFunctionReturned(t *testing.T) {
+// Once the coordinator has accepted an Exec, a caller whose context ends
+// while fn runs is never told plainly "cancelled": that would say "not done"
+// about something that was done (review r1 #6b). It gets fn's own answer if
+// that is ready, and otherwise ErrOutcomeUnknown (review r2 #2, which
+// replaced r1's "wait for fn whatever happens"). Here fn ignores the cancel
+// for 50ms, so the unknown outcome is what comes back.
+func TestAnExecThatRanIsNeverReportedAsCancelled(t *testing.T) {
 	h := start(t, Config{Root: ports.Root{Sessions: mapTree("/s", fstest.MapFS{})}})
 	sentinel := errors.New("fn's own answer")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -617,13 +619,13 @@ func TestAnExecThatRanReportsWhatItsFunctionReturned(t *testing.T) {
 		close(ran)
 		return sentinel
 	})
+	if !errors.Is(err, sentinel) && !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("Exec returned %v after fn was accepted: want fn's answer or ErrOutcomeUnknown, never a bare cancellation", err)
+	}
 	select {
 	case <-ran:
-	default:
-		t.Fatalf("Exec returned %v before fn had finished", err)
-	}
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("Exec returned %v after fn ran and returned %v", err, sentinel)
+	case <-time.After(wait):
+		t.Fatal("fn never finished")
 	}
 }
 

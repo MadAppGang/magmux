@@ -241,8 +241,15 @@ func (g *paneGate) Observe(s model.Session) model.Session {
 	return s
 }
 
-// callOn runs fn on k's actor and waits, honouring ctx.
+// callOn runs fn on k's actor and waits, under Ops.Call's acceptance rule:
+// before the actor takes fn an ended ctx is a plain refusal, after it a reply
+// already sent wins and an ended ctx is ErrOutcomeUnknown (review r2 #3). The
+// actor answers a message it took before it handles another, so a reply that
+// is ready is always the answer.
 func callOn(ctx context.Context, a *actor, fn func(model.Session, func(string) (stage.Stage, bool)) error) error {
+	if err := ctx.Err(); err != nil {
+		return err // never offered: a ready send would win the select at random
+	}
 	r := make(chan actorReply, 1)
 	select {
 	case a.in <- actorMsg{kind: msgCall, call: fn, reply: r}:
@@ -255,8 +262,18 @@ func callOn(ctx context.Context, a *actor, fn func(model.Session, func(string) (
 	case v := <-r:
 		return v.err
 	case <-a.done:
+		select {
+		case v := <-r:
+			return v.err
+		default:
+		}
 		return ErrNoSuchKey
 	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case v := <-r:
+			return v.err
+		default:
+		}
+		return outcomeUnknown(ctx)
 	}
 }
