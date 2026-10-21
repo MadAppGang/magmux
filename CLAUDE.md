@@ -340,8 +340,13 @@ The SINKS — where a person sees the document without running a command:
   dead-process gate applies only to a session no job claims (verdict Rule 1's
   scope: for a job, the effective status already weighed the serving process).
   Its `Note` is a `stage.Effect`. Delivery is `osascript`, through
-  `mux/obsact.go`'s announcer on the coordinator's goroutine, bounded by the
-  port because the pipeline starts no timers.
+  `mux/obsact.go`'s announcer on the coordinator's goroutine. Each delivery
+  is bounded by the port, because the pipeline starts no timers, and the whole
+  batch of one cycle by `notifyBatchBudget` (one port bound): a note the budget
+  cuts off is recorded as not sent and rides out as a `ScopeHost` problem.
+  Before review round 1, a startup burst cost one bound per waiting session,
+  back to back, on the goroutine that serves every cycle and every
+  `agents focus`.
 
 **The control panel is ON-BOX ONLY for the life of a magmux started with
 `MAGMUX_AGENTS=1`** (claudestate architecture ADR-X5). Its attention view draws

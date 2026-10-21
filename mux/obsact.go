@@ -50,6 +50,9 @@ type obsActions struct {
 	audit act.Auditor
 	port  notify.Port
 	stats obsActionStats
+	// batchBudget bounds ONE OnEffects call, all of its notes together; 0
+	// takes notifyBatchBudget.
+	batchBudget time.Duration
 }
 
 // newObsActions builds the write path. now is the clock the gate renders a
@@ -237,7 +240,11 @@ func (x *actuatorOver) Do(ctx context.Context, a act.Action) (act.Result, error)
 // Each effect is the notify stage's own Note value, so the type assertion
 // below IS the hand-off (stage.Effect's contract). Anything else is a
 // programming error in magmux and is returned as a problem, never ignored.
+//
+// The whole batch shares one deadline, notifyBatchBudget: see there.
 func (a *obsActions) onEffects(ctx context.Context, b pipeline.EffectBatch) []model.Problem {
+	ctx, cancel := context.WithTimeout(ctx, a.budget())
+	defer cancel()
 	var problems []model.Problem
 	for _, item := range b.Items {
 		n, ok := item.Effect.(notify.Note)
@@ -345,6 +352,17 @@ func (a *obsActions) announce(ctx context.Context, n notify.Note, published mode
 		// what happened", and we know exactly what happened.
 		return a.finish(written, base, false, "", "nothing in this process can deliver a notification")
 	}
+	if ctx.Err() != nil {
+		// The batch's budget went on earlier notes. Recorded as not sent, and
+		// said out loud: a note silently dropped would be indistinguishable
+		// from one nobody decided to send.
+		why := fmt.Sprintf("not sent: this cycle's notifications spent their %s budget on earlier ones", a.budget())
+		if p := a.finish(written, base, false, "", why); p != nil {
+			return p
+		}
+		p := hostProblem(key, fmt.Sprintf("a notification for session %s was %s", key.SessionID, why))
+		return &p
+	}
 	a.stats.Notifications++
 	if sendErr := a.port.Send(ctx, n); sendErr != nil {
 		return a.finish(written, base, false, "", sendErr.Error())
@@ -376,4 +394,22 @@ func (a *obsActions) unrecorded(key model.Key, err error) *model.Problem {
 	p := hostProblem(key, fmt.Sprintf("a notification for session %s was NOT sent because it could not be "+
 		"recorded: %v", key.SessionID, err))
 	return &p
+}
+
+// notifyBatchBudget bounds one OnEffects call: every note of one cycle,
+// together (review r1 #5). Each delivery is bounded by its port
+// (notifyTimeout), but OnEffects runs on the coordinator, which serves every
+// session's next cycle, every Exec and every Stats, and a burst of N notes
+// cost N bounds back to back — at startup, or after a re-key, every waiting
+// session's actor starts unlatched and fires at once. One port bound is the
+// most the coordinator now waits on notifications in one cycle. A note the
+// budget cuts off is still recorded, attempt then outcome "not sent", and
+// rides out as a ScopeHost problem.
+const notifyBatchBudget = notifyTimeout
+
+func (a *obsActions) budget() time.Duration {
+	if a.batchBudget > 0 {
+		return a.batchBudget
+	}
+	return notifyBatchBudget
 }
