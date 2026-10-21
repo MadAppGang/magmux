@@ -105,7 +105,12 @@ func TestATornRecordIsErrTornNotAnEmptySession(t *testing.T) {
 	if _, _, err := ttRecord(t, "torn.json"); !errors.Is(err, ErrTorn) {
 		t.Errorf("tt's torn.json: %v", err)
 	}
-	for _, b := range []string{`null`, `[]`, `"x"`, `42`, `{"pid":1}{"pid":2}`, `{"pid":1} trailing`} {
+	// Trailing bytes after the object are torn too, WHATEVER they are: a closing
+	// brace or bracket is the shape an in-place rewrite that shrank a record
+	// leaves behind, and json.Decoder.More reports no further element before
+	// one, so a More-only check accepted `{...} }` as a whole record.
+	for _, b := range []string{`null`, `[]`, `"x"`, `42`, `{"pid":1}{"pid":2}`, `{"pid":1} trailing`,
+		`{"pid":1} }`, `{"pid":1}]`, `{"pid":1} ,`, "{\"pid\":1}\n}\n"} {
 		if _, _, err := DecodeRecord("1.json", []byte(b)); !errors.Is(err, ErrTorn) {
 			t.Errorf("%s: err %v, want ErrTorn", b, err)
 		}

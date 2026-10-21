@@ -38,7 +38,11 @@ func decodeObject(path string, b []byte) (*object, error) {
 	if err := dec.Decode(&m); err != nil {
 		return nil, ErrTorn
 	}
-	if dec.More() {
+	// Nothing but whitespace may follow the object. dec.More() is not that
+	// test: it reports no further element before a closing brace or bracket,
+	// so `{...} }` — the tail an in-place rewrite that shrank a record leaves —
+	// passed as a whole record.
+	if rest := bytes.TrimSpace(b[dec.InputOffset():]); len(rest) != 0 {
 		return nil, ErrTorn
 	}
 	return &object{path: path, m: m}, nil

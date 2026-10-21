@@ -132,3 +132,14 @@ func TestTheNeverReadKeysHaveNoFieldToArriveIn(t *testing.T) {
 		t.Fatalf("a never-read key leaked into a field: %+v", j)
 	}
 }
+
+// A job record with bytes after its object is torn, the same rule as the
+// registry's (decodeObject is the one reader of both): an in-place rewrite
+// that shrank the record leaves the old tail behind it.
+func TestAJobRecordWithATrailingTailIsErrTorn(t *testing.T) {
+	for _, b := range []string{`{"sessionId":"s","state":"working"} }`, `{"sessionId":"s","state":"working"}]`} {
+		if _, _, err := DecodeJob("d", []byte(b)); !errors.Is(err, ErrTorn) {
+			t.Errorf("%s: err %v, want ErrTorn", b, err)
+		}
+	}
+}
