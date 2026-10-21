@@ -45,6 +45,11 @@ type coordinator struct {
 	waiters  []chan reply
 	stats    Stats
 	onDemand bool
+	// watchDown latches when the watcher's loop has ended while the
+	// coordinator runs on. A stopped watcher holds nothing, so a read "under a
+	// watch" could never be granted again: from then on every cycle is an
+	// unwatched pull, and the Watch row says why (review r3 #1).
+	watchDown bool
 	// listCancel ends the in-flight agents List, nil when none is in flight.
 	// The List runs under this context, never a caller's (review r1 #6a).
 	listCancel context.CancelFunc
@@ -105,11 +110,18 @@ func (c *coordinator) loop() {
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				events = nil
+				// The watcher stopped under a coordinator that is not
+				// stopping (shutdown stops it only after this loop has
+				// returned): pull from now on, and say so at once.
+				events, c.watchDown = nil, true
+				c.cycle(triggerOther)
 				continue
 			}
 			if c.absorb(ev) {
 				c.cycle(triggerOther)
+			}
+			if c.watchDown {
+				events = nil
 			}
 		case <-c.p.refresh:
 			c.cycle(triggerOther)
@@ -140,7 +152,8 @@ func (c *coordinator) absorb(ev watch.Event) bool {
 		select {
 		case more, ok := <-c.watcher.Events():
 			if !ok {
-				return due
+				c.watchDown = true
+				return true
 			}
 			ev = more
 		default:
@@ -218,7 +231,7 @@ func (c *coordinator) command(m command) {
 	case cmdStats:
 		s := c.stats
 		s.Subscribers = len(c.subs)
-		s.Watching = c.watcher != nil && !c.onDemand
+		s.Watching = c.watching()
 		m.reply <- reply{stats: s}
 	case cmdExec:
 		ctx := context.WithValue(m.ctx, reentry{}, c.p)
@@ -305,19 +318,32 @@ type cycleState struct {
 	over     map[string]bool
 	failed   map[string]bool
 	shed     map[string]bool
-	// unarmed counts the targets this cycle asked to read under a watch that
-	// were not held when the read was granted: their arm or re-arm failed.
-	unarmed   int
+	// unarmed is the set of paths this cycle asked to read under a watch that
+	// were not held when the read was granted: their arm or re-arm failed. A
+	// SET, so two claimants sharing one transcript count it once (review r3,
+	// LOW 3).
+	unarmed   map[string]bool
 	published []model.Session
 	effects   []EffectItem
 	doc       model.Fleet
 }
+
+func (cs *cycleState) noteUnarmed(path string) {
+	if cs.unarmed == nil {
+		cs.unarmed = map[string]bool{}
+	}
+	cs.unarmed[path] = true
+}
+
+// unarmedPaths is how many distinct paths were refused for want of a watch.
+func (cs *cycleState) unarmedPaths() int { return len(cs.unarmed) }
 
 // cycle is ONE cycle, in §3.1's order. The method names are G7's landmarks:
 // every arm precedes the first verifyIdentity, which precedes readSources;
 // releaseOnce is the only release, after publish; deliverEffects is last.
 func (c *coordinator) cycle(trigger cycleTrigger) {
 	cs := &cycleState{}
+	c.noteWatcherStopped()
 	c.armSpine(cs)
 	c.discoverJobDirs(cs)
 	c.armJobDirs(cs)
@@ -338,7 +364,17 @@ func (c *coordinator) cycle(trigger cycleTrigger) {
 	c.deliverEffects(cs, trigger)
 }
 
-func (c *coordinator) watching() bool { return c.watcher != nil && !c.onDemand }
+func (c *coordinator) watching() bool { return c.watcher != nil && !c.onDemand && !c.watchDown }
+
+// noteWatcherStopped latches watchDown at the top of a cycle, so a cycle that
+// runs before the loop has seen Events close already pulls. A watcher that
+// stops DURING a cycle is that cycle's DegradedUnavailable, and the Events
+// close it causes runs the cycle that pulls.
+func (c *coordinator) noteWatcherStopped() {
+	if c.watcher != nil && !c.watchDown && c.watcher.Stopped() {
+		c.watchDown = true
+	}
+}
 
 // armSpine arms the registry directory, and the jobs directory if it exists;
 // while it does not, the Claude root itself, so creating jobs/ fires an event
@@ -359,7 +395,8 @@ func (c *coordinator) armSpine(cs *cycleState) {
 	if cs.jobsAbs && r.Base != "" {
 		cs.spine = append(cs.spine, model.WatchTarget{Path: r.Base, Dir: true, Kind: model.TargetSpine})
 	}
-	if c.watcher == nil {
+	if c.watcher == nil || c.watchDown {
+		c.onDemand = false
 		return
 	}
 	rep := c.watcher.Arm(cs.spine)
@@ -431,7 +468,7 @@ func (c *coordinator) armJobDirs(cs *cycleState) {
 // one BEFORE it is read, and recounts the budget. An overrun is shed: still
 // read this cycle (it was armed before the read), released at releaseOnce.
 func (c *coordinator) verifyIdentity(cs *cycleState) {
-	if c.watcher == nil {
+	if c.watcher == nil || c.watchDown {
 		return
 	}
 	rep := c.watcher.Verify()
@@ -461,7 +498,7 @@ func (c *coordinator) readSources(cs *cycleState) {
 		case c.watcher.Holds(filepath.Join(c.cfg.Root.Jobs.Dir, dir)):
 			return true
 		}
-		cs.unarmed++
+		cs.noteUnarmed(filepath.Join(c.cfg.Root.Jobs.Dir, dir))
 		return false
 	}
 	if c.cfg.Root.Jobs.Dir == "" {
@@ -664,7 +701,7 @@ func (c *coordinator) grant(cs *cycleState) map[model.Key]stage.Grant {
 			case !cs.failed[t.Path] && c.watcher.Holds(t.Path):
 				g.Armed = append(g.Armed, t)
 			default:
-				cs.unarmed++
+				cs.noteUnarmed(t.Path)
 			}
 		}
 		out[s.Key] = g
@@ -734,21 +771,29 @@ func (c *coordinator) sources(cs *cycleState) []model.SourceReport {
 	switch {
 	case c.watcher == nil:
 		w.State = model.SourceOff
-	case c.onDemand || len(cs.arm.Over) > 0 || len(cs.arm.Shed) > 0 || cs.notConv || cs.unarmed > 0:
+	case c.watchDown:
+		// Degraded, not failed: every source is still read, on every cycle.
+		w.State, w.Detail = model.SourceDegraded, "the watcher has stopped; every cycle is an unwatched pull"
+		cs.problems = append(cs.problems, model.Problem{Scope: model.ScopeWatch, Kind: model.ProblemWatchArm, Detail: w.Detail})
+	case slices.Contains(cs.arm.Degraded, watch.DegradedUnavailable):
+		// It stopped during this cycle: what it no longer held was not read,
+		// and the Events close that follows runs the cycle that pulls.
+		w.State, w.Detail = model.SourceDegraded, "the watcher has stopped during this cycle; the next cycle is an unwatched pull"
+		if n := cs.unarmedPaths(); n > 0 {
+			w.Detail += fmt.Sprintf(", %d targets were not read", n)
+		}
+		cs.problems = append(cs.problems, model.Problem{Scope: model.ScopeWatch, Kind: model.ProblemWatchArm, Detail: w.Detail})
+	case c.onDemand || len(cs.arm.Over) > 0 || len(cs.arm.Shed) > 0 || cs.notConv || cs.unarmedPaths() > 0:
 		var parts []string
 		if c.onDemand || len(cs.arm.Over) > 0 || len(cs.arm.Shed) > 0 || cs.notConv {
 			parts = append(parts, degradedDetail(cs.arm, c.onDemand))
 		}
-		if cs.unarmed > 0 {
-			parts = append(parts, fmt.Sprintf("%d targets could not be armed and were not read", cs.unarmed))
+		if n := cs.unarmedPaths(); n > 0 {
+			parts = append(parts, fmt.Sprintf("%d targets could not be armed and were not read", n))
 		}
 		w.State, w.Detail = model.SourceDegraded, strings.Join(parts, ", ")
 	default:
 		w.State = model.SourceOK
-	}
-	if w.State == model.SourceOK && slices.Contains(cs.arm.Degraded, watch.DegradedUnavailable) {
-		w.State, w.Detail = model.SourceFailed, "the watcher has stopped"
-		cs.problems = append(cs.problems, model.Problem{Scope: model.ScopeWatch, Kind: model.ProblemWatchArm, Detail: w.Detail})
 	}
 	reports := []model.SourceReport{reg, jobs, c.agents.Report(), w}
 	for _, r := range reports {
@@ -893,6 +938,10 @@ func cloneChanges(cs []join.Change) []join.Change {
 //	keep = (spine ∪ armed job dirs ∪ Armed targets of published sessions) ∖ shed
 func (c *coordinator) releaseOnce(cs *cycleState) {
 	if c.watcher == nil {
+		return
+	}
+	if c.watchDown {
+		c.stats.LastArm = cs.arm // nothing is held, so nothing is released
 		return
 	}
 	var keep []model.WatchTarget

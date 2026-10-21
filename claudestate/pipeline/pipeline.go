@@ -123,9 +123,11 @@ type Stats struct {
 	WatchEvents, WatchDropped                                            int
 	// TranscriptGlobs counts the by-id globs run: D5's cost, V3's number.
 	TranscriptGlobs int
-	Watching        bool
-	Budget          watch.Budget
-	LastArm         watch.ArmReport
+	// Watching is false with Watch off, on demand (D15), and once the
+	// watcher has stopped: in all three every cycle is an unwatched pull.
+	Watching bool
+	Budget   watch.Budget
+	LastArm  watch.ArmReport
 }
 
 // Ops is the coordinator's state, seen from inside Exec.

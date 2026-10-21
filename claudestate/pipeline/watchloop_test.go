@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -351,5 +352,76 @@ func TestWhatOneWatchEventMakesDue(t *testing.T) {
 	c = &coordinator{}
 	if !c.fold(watch.Event{Paths: []string{"/elsewhere/history.jsonl"}}) {
 		t.Error("with no Base, a path is due")
+	}
+}
+
+// A watcher whose loop has ended holds nothing, so no read is ever granted
+// "under a watch" again. The coordinator must notice and pull instead: every
+// record, job record and transcript is read on every cycle, the stop is itself
+// a cycle, and the Watch row says the watcher stopped (review r3 #1, a
+// regression from b07a866, which refused every watched read for the rest of
+// the run).
+func TestAStoppedWatcherDegradesToAPullAndStillReads(t *testing.T) {
+	root, err := ports.RootAt(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(root.Sessions.Path, "1.json"), rec(1, "s", claude.ValueStatusIdle))
+	write(t, filepath.Join(root.Projects.Path, "p", "s.jsonl"), transcriptLines("teal"))
+	link := filepath.Join(root.Projects.Path, "p", "j.jsonl")
+	write(t, link, transcriptLines("ruby"))
+	write(t, filepath.Join(root.Jobs.Path, "c", claude.JobStateFile), jobRec("j", "c", claude.ValueStateWorking, "", link))
+	interactive, job := model.Key{SessionID: "s", PID: 1}, model.Key{SessionID: "j", Job: "c"}
+
+	read := func(when string, d Delivery) {
+		t.Helper()
+		for k, colour := range map[model.Key]string{interactive: "teal", job: "ruby"} {
+			s, ok := byKey(d, k)
+			if !ok {
+				t.Fatalf("%s: %v is not in the document: %+v", when, k, d.Doc.Sessions)
+			}
+			if s.Transcript == nil || s.Transcript.Color == nil || *s.Transcript.Color != colour {
+				t.Fatalf("%s: %v's transcript was not read: %+v", when, k, s.Transcript)
+			}
+		}
+	}
+
+	h := watched(t, root, roomy)
+	d := h.cycle()
+	read("watched", d)
+	if w := sourceRow(d, model.SourceWatch); w.State != model.SourceOK {
+		t.Fatalf("watched: %+v", w)
+	}
+	h.settle()
+
+	// The loop ends under the coordinator, which is not stopping.
+	if err := h.p.Exec(context.Background(), func(_ context.Context, x Ops) error {
+		x.(ops).c.watcher.Stop()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stopped := func(when string, d Delivery) {
+		t.Helper()
+		read(when, d)
+		w := sourceRow(d, model.SourceWatch)
+		if w.State != model.SourceDegraded || !strings.Contains(w.Detail, "watcher has stopped") {
+			t.Fatalf("%s: the Watch row is %+v, want degraded and saying the watcher stopped", when, w)
+		}
+		said := false
+		for _, p := range d.Problems {
+			if p.Scope == model.ScopeWatch && strings.Contains(p.Detail, "watcher has stopped") {
+				said = true
+			}
+		}
+		if !said {
+			t.Fatalf("%s: no ScopeWatch problem names the stop: %v", when, d.Problems)
+		}
+	}
+	stopped("the cycle the stop raised", h.await())
+	stopped("a later cycle", h.cycle())
+	if st := h.stats(); st.Watching {
+		t.Fatalf("Stats.Watching is true with the watcher stopped: %+v", st)
 	}
 }

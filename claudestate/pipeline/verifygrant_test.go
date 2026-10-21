@@ -9,6 +9,7 @@ package pipeline
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/MadAppGang/magmux/claudestate/claude"
@@ -115,5 +116,38 @@ func TestAJobDirectoryWhoseReArmFailedIsNotRead(t *testing.T) {
 	}
 	if !hasProblem(cs.jobsRes.Problems, model.ProblemNotGranted) {
 		t.Fatalf("its read was not refused: %v", cs.jobsRes.Problems)
+	}
+}
+
+// Two claimants sharing one transcript that is not held are ONE target that
+// could not be armed, not two: the Watch row counts distinct paths (review r3,
+// LOW 3: it counted per grant and overstated the loss).
+func TestAnUnarmedPathSharedByTwoSessionsIsCountedOnce(t *testing.T) {
+	dir := t.TempDir()
+	transcript := filepath.Join(dir, "shared.jsonl")
+	if err := os.WriteFile(transcript, transcriptLines("teal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := bareCoordinator(t, ports.Root{Sessions: ports.Tree{Path: dir, Dir: dir, FS: os.DirFS(dir)}})
+	a, b := model.Key{SessionID: "a", PID: 1}, model.Key{SessionID: "b", PID: 2}
+	target := model.WatchTarget{Path: transcript, Kind: model.TargetTranscript}
+	cs := &cycleState{
+		sessions: []model.Session{{Key: a}, {Key: b}},
+		targets:  map[model.Key][]model.WatchTarget{a: {target}, b: {target}},
+		over:     map[string]bool{}, failed: map[string]bool{},
+	}
+	// Never armed, so not held: both grants refuse it.
+	for k, g := range c.grant(cs) {
+		if len(g.Armed) != 0 || len(g.Pull) != 0 {
+			t.Fatalf("%v was granted an unheld target: %+v", k, g)
+		}
+	}
+	for _, r := range c.sources(cs) {
+		if r.ID != model.SourceWatch {
+			continue
+		}
+		if r.State != model.SourceDegraded || !strings.Contains(r.Detail, "1 targets could not be armed") {
+			t.Fatalf("the Watch row is %+v, want degraded and counting the one shared path once", r)
+		}
 	}
 }

@@ -196,6 +196,13 @@ func (w *Watcher) Stop() {
 	<-w.done
 }
 
+// Stopped reports, without blocking, whether the loop has ended — by Stop, or
+// because fsnotify closed a channel under it. A stopped watcher holds
+// nothing and never starts again, so its owner must stop reading "under a
+// watch" and pull instead (review r3 #1). Safe from any goroutine: it is a
+// receive on a closed-or-open channel.
+func (w *Watcher) Stopped() bool { return w.stopped() }
+
 func (w *Watcher) stopped() bool {
 	select {
 	case <-w.done:
