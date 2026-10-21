@@ -11,6 +11,71 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+### Added
+
+- **`claudestate`, the Claude Code observation library**, as a nested module
+  of this repository (`github.com/MadAppGang/magmux/claudestate`). It owns the
+  contract — every decoder of Claude Code's files under the Claude root — and
+  the runtime: the filesystem watch, one actor per session, and the hub.
+  magmux's session observation (`magmux agents`, the socket `agents` verb, MCP
+  `list_agents`, the panel's attention view) now runs on it; magmux keeps its
+  panes, its wire, its actions, its policy, its audit trail and its
+  notifications. The root requires it by version, never by `replace`.
+- **Background jobs** (D6). `magmux agents` reads `~/.claude/jobs/` and
+  publishes Claude Code's background sessions. A job's process and its job
+  record are ONE row, keyed by the job; `--json` rows for jobs carry a new
+  `job` member (`omitempty`, on job rows only). A job no process claims has
+  `pid: 0`. A `blocked` job is `waiting`, needs a human, and is ANNOUNCED by
+  notifications like a waiting session; a `working` job is `busy`. A `done` or
+  `failed` job is `status: null` with the job's word in `statusRaw` and
+  `confidence: authoritative` — a pair no earlier row had.
+- **`--jobs DIR`** for `magmux agents` and `magmux agents focus`. With no tree
+  flag the whole Claude root is read; with `--root` and no `--jobs`, the jobs
+  source is off, so a staged registry never reads the real jobs tree. A focus
+  target found nowhere while jobs were off says so.
+
+### Changed
+
+- **The control panel is on-box only for the life of a magmux started with
+  `MAGMUX_AGENTS=1`** (X5): every pane read of it — `watch`, `watch_all`,
+  `capture`, `transcript` — is refused with `panel_private` to a caller not on
+  the local socket.
+- **Wire changes** of the `agents` document, each against goldens recorded by
+  the previous code and cited by decision row in `obsview/wirechanges.go`:
+  - D2: `color` is the last `type:"agent-color"` record's `agentColor` and
+    nothing else. A transcript that carries `agentColor` only on other
+    records now has `color: null`.
+  - D5: one session id whose transcript is in two project directories is
+    ambiguous and is never opened: `subagentCount`, `color` and
+    `fault.apiErrors` are `null` for it.
+  - D6: job rows and the `job` member (above). A `kind:"bg"` session's row is
+    the job's row, keyed by its job, even before the job record appears.
+  - D11: a job record with no session id is a row of its own (`"id": ""`,
+    `pid: 0`, no `job` member) rather than dropped, and the problem is
+    reported.
+  - D12: two `kind:"bg"` processes claiming one job are ONE row (the live
+    one speaks); two registry files naming one session id and one pid are one
+    row; a second interactive process on a session id is its own row and is
+    now fully enriched (it had no confidence or verdict before).
+- **`magmux agents focus` refuses an ambiguous session id** (D12): an exact id
+  that names two sessions — two processes, or a job and its resume — is
+  refused with every pid and job listed, where it used to focus the first. A
+  pid reaches a job through any process that claims it; pid 0 is refused.
+- The Claude pane controller reads Claude's registry through the library: a
+  registry file whose whole body is JSON `null` is now "not found", where it
+  was a found, empty entry. A declared transcript path that names a directory
+  no longer binds.
+- `mux/claude_e2e_test.go` (the real-Claude end-to-end test) compiles only
+  under the `claude_e2e` build tag: `MAGMUX_CLAUDE_E2E=1 go test -tags
+  claude_e2e -run TestClaudeE2E -count=1 -timeout 30m -v ./mux/`. No CI job
+  passes the tag.
+
+### Fixed
+
+- A Claude registry or job record with bytes after its JSON object (the tail
+  an in-place rewrite that shrank it leaves behind) is torn, and retried,
+  rather than read as a whole record.
+
 ## [0.18.0] - 2026-10-20
 
 ### Added

@@ -41,17 +41,32 @@ sessions through, formerly `mcp/mcp_client.go`. `client/` also holds the ONE
 socket discovery (`DiscoverSessions`, `SessionInfo`, formerly
 `mcp/mcp_spawn.go`) and the one copy of the event-field helpers
 (`EventString`, `EventInt`, `EventBool`; mcp's `evStr`/`evInt`/`evBool` are
-aliases of them). `obsview/` renders the session-observation document — the
-`magmux agents` table and `--json`, and `DisplaySafe` / `TerminalSafeJSON`,
-the one rule for registry text reaching a person — below `mux`, because the
-CLI, the socket verb and MCP's `list_agents` must share one renderer and `mcp`
-cannot import `mux`. Everything else is package `mux` in
+aliases of them). `obsview/` is the session-observation document's WIRE —
+its types and exact JSON tags (`wire.go`), `FromModel`, the one mapping from
+the claudestate library's model onto it (`frommodel.go`), the `magmux agents`
+table and `--json`, and `DisplaySafe` / `TerminalSafeJSON`, the one rule for
+registry text reaching a person — below `mux`, because the CLI, the socket verb
+and MCP's `list_agents` must share one renderer and `mcp` cannot import `mux`.
+Everything else is package `mux` in
 `mux/`, and `go test` runs each package with cwd = its own directory, so
 `TestMain` builds `../cmd/magmux`. The one `internal` directory is
-`internal/obs/` (session observation, below); it holds no `mux` code, so the
-compiler does not stop a lower package importing `mux`:
+`internal/obs/` (the observation layer's host packages, below); it holds no
+`mux` code, so the compiler does not stop a lower package importing `mux`:
 `cmd/magmux/import_direction_test.go` (`TestImportDirection`) is that guard,
-and `internal/obs/...` is one of its guarded patterns.
+and `internal/obs/...` and `obsview` are among its guarded patterns
+(`TestOnlyMuxObsFilesImportTheLibraryPipeline` holds the rest of §2.3's host
+rules).
+
+`claudestate/` is a SEPARATE Go module, `github.com/MadAppGang/magmux/claudestate`:
+the Claude Code observation library magmux (and later tt) is built on. The
+root's `./...` never descends into it, so CI runs it with its own steps, and
+the root requires it BY VERSION — a pseudo-version of the last commit that
+touches `claudestate/` until its first tag — never by `replace` and never by a
+committed `go.work` (CI refuses both; "Pin is current" fails a library commit
+whose re-pin has not landed). For local work across both, `go work init .
+./claudestate && go work edit -go=1.26.1`, uncommitted (`.gitignore` has
+`go.work`). Never rebase or amend a commit the pin names: a later library fix
+is a new commit and a re-pin.
 `test/reorg/r3.sed` is the rename map for the identifiers that changed name
 when the leaves moved out; `test/reorg/r4.sed` is the same for `protocol` and
 `client`.
@@ -198,24 +213,36 @@ packages can be tested against a bare hub with no terminal at all.
 Session observation (what every agent session on the machine is doing, whether
 or not magmux started it):
 
-- `internal/obs` — the vocabulary: `Session`, `Fleet`, `Liveness`, the `Clock`
-  port, and `PaneLocator`, the port through which magmux's pane model reaches a
-  layer that may not import `mux` (TestImportDirection guards `internal/obs/...`).
-- `internal/obs/{adapters,fswatch,registry}` — the decoders, the filesystem
-  watch (no polling, one-shot timers only) and the source that turns Claude
-  Code's `~/.claude/sessions` records into `obs.Session` values. **READ-ONLY**:
-  nothing there is created, written, renamed or removed, not even a temp file.
-- `internal/obs/pipeline` — the concurrency model: one actor goroutine per
-  session owning its own middleware chain, one hub that never blocks on a
-  sink, and the three freeze points. No mutexes and no atomics anywhere under
-  `internal/obs`; `TestNoTickerAnywhereInTheObservationLayer` reads the source
-  to prove there is no poll loop either.
-- `mux/obspane.go` — magmux's side: the `PaneLocator` implementation (ancestry —
-  the pane's pid is the SHELL's and a session's is the tool's, so they are
-  never equal), and the pipeline's start/stop. Opt-in via `MAGMUX_AGENTS=1`,
-  because the repository's own end-to-end tests spawn the real binary and may
-  not read a live registry or probe a live pid.
-- `mux/obscmd.go` — `magmux agents`, the same pipeline as a standalone command.
+- `claudestate/` — **the library, and everything Claude-specific lives there.**
+  `model` (the `Session`, `Key`, `Fleet` values, no JSON), `ports` (what a host
+  implements: `ProcessOracle`, `PaneLocator`, `PaneActivity`, `PaneShell`, the
+  `Clock`; a nil port is UNDETERMINED, never a negative), `stage` (the per-session
+  stage contract a host stage implements), `claude` (the CONTRACT: every decoder
+  of Claude Code's files, the one place a Claude literal is spelled), `join` (one
+  session per key — K1–K4 from one record's own fields — and one effective
+  status), `watch` (fsnotify, the arm/verify/release protocol and the descriptor
+  budget), `verdict` (the attention ladder), `pipeline` (the coordinator, one
+  actor per session key, the hub, `Exec` and `OnEffects`), `proclive` (the
+  `kill(pid,0)` oracle). It reads `sessions/`, `jobs/` and `projects/` under the
+  Claude root and is **READ-ONLY** by its own guard (G2): nothing is created,
+  written, renamed or removed, not even a temp file. No mutexes, no atomics and
+  no ticker anywhere in it, each held by a source guard (G3–G5). Its architecture,
+  its D-rows (D1–D15) and its contract are the session's `architecture.md`; the
+  library's own `doc.go` states the import DAG.
+- `mux/obspane.go` — magmux's side: the ports by `model.PaneRef` (magmux's pane
+  id in decimal, ADR-X1) — the ancestry walk (the pane's pid is the SHELL's and
+  a session's is the tool's, so they are never equal), pane liveness, activity,
+  the OSC 133 shell state — the `launchdir` host stage (the ONE source of a
+  session's `launchDir`: the directory magmux spawned the pane in, never the
+  record's live `cwd`), and the pipeline's start/stop. Opt-in via
+  `MAGMUX_AGENTS=1`, because the repository's own end-to-end tests spawn the real
+  binary and may not read a live registry or probe a live pid.
+- `mux/obscmd.go` — `magmux agents`, the same pipeline as a standalone command,
+  with `--root`/`--jobs`/`--projects`. No flag: the whole Claude root
+  (`ports.RootFromEnv`). Any flag: each named tree, and an omitted `--jobs` is
+  OFF when `--root` was given, so a staged registry never pulls in the real jobs
+  tree. `obscmd.go` and `cli.go` are the only two files that call
+  `proclive.New()` (`TestNoTestCanReachTheSignalOracle`).
 
 Two magmux-side rules there are applications of invariants already below, and
 both were deliberately broken and caught: the ancestry walk snapshots pane pids
@@ -239,10 +266,25 @@ The WRITE half — the only thing in that layer that changes anything:
 - `internal/obs/act` — the action vocabulary, the policy, the gate and the
   audit trail. `Gate.Do` is the one path to an actuator: decide, record,
   act, record.
-- `internal/obs/navigate` — the one live actuator. It focuses the pane a
-  session runs in and does nothing else.
+- `internal/obs/navigate` — the one live actuator, a host stage in the library's
+  chain (`navigate.Factory`), with the one write port (`navigate.PaneFocuser`).
+  It focuses the pane a session runs in and does nothing else.
+- `mux/obsact.go` — where the gate and the audit writer live: ON the
+  pipeline's coordinator goroutine, through `Pipeline.Exec` for an action and
+  `Config.OnEffects` for a notification, which is what keeps `act.Writer`'s one
+  owner. An action reaches the navigate stage on the session's own actor
+  through `Ops.Call`, found by name (`actuatorOver`); the library knows nothing
+  of `act`. The announcer type-asserts each effect to `notify.Note` — that
+  assertion IS the hand-off — and returns a `ScopeHost` problem for every note
+  it could not record or deliver; the library carries those to every
+  subscriber on the next delivery and wakes itself once to do it.
 - `mux/obsfocus.go` — `magmux agents focus TARGET`, plus `Magmux.obsFocusSession`,
-  which is magmux's own entry to the same gate.
+  which is magmux's own entry to the same gate. The `model.Key` the FIRST read
+  resolved is the only identity the second read and the action use. Since
+  background jobs became rows, an exact session id can name two sessions (two
+  processes on one id, or a job and its resume): that is refused through
+  `oneOf`, naming every pid and job (D12), never answered with the first match.
+  A pid target matches `Session.PID` or any claimant; pid 0 names no process.
 - `mux/obssock.go` — the pane ports answered over the SOCKET, which is what lets
   `magmux agents focus` work from outside any magmux. It needs no new verb: the
   connect-time aggregate already carries every pane's id and its child's pid
@@ -261,9 +303,22 @@ The SINKS — where a person sees the document without running a command:
   for the surfaces that answer a question, and `fleetPayload`. The socket verb
   is `agents` in `mux/sockrpc.go` — SOCKET-ONLY, not a hub op, so no view token
   reaches it — and the MCP tool is `list_agents` (`mcp/mcp_agents.go`); both render
-  the SAME `obs.Fleet`, and `list_agents` calls `obsview.WriteFleetTable` — the
+  the SAME `obsview.Fleet` (the sink stores `obsview.FromModel` of each
+  delivery, once), and `list_agents` calls `obsview.WriteFleetTable` — the
   CLI's own renderer, below `mux` because `mcp` cannot import `mux` — so "one document, three renderings" is a property rather than a
   promise. `TestTheThreeSurfacesAgree` walks one document through all three.
+  The socket and MCP payloads carry the fleet document ONLY; a host problem
+  reaches the panel's count and a streaming `magmux agents`'s stderr
+  (`TestAHostProblemFromOnEffectsReachesTheSinkThePanelAndTheCLI`).
+- **The wire is pinned (H6).** `obsview/golden_test.go` holds the JSON of every
+  scenario to goldens recorded by the PRE-library code (`testdata/golden/magmux`
+  over `internal/obs/testdata`, `testdata/golden/tt` over the library's tt
+  scenario roots), each directory's `MANIFEST` pinning every input byte. Every
+  difference is cited in `obsview/wirechanges.go` by golden, row and field with
+  the decision row that made it (D2 colour, D6 job rows and the `job` member,
+  D11 id-less rows, D12 merged claimants), and a citation that names no real
+  difference fails too. A golden is never re-recorded to make a difference
+  go away.
 - `mux/obspanel.go` — the panel's attention view (see the wire-tap invariants).
 - `obsview/display.go` — **the one rule for registry text reaching a person.**
   `obsview.DisplaySafe` neutralises C0, DEL, C1 and invalid UTF-8 (whitespace to a
@@ -278,11 +333,15 @@ The SINKS — where a person sees the document without running a command:
   unrecognised status. `TestTheNotifierHasNoPrivateCopyOfTheRule` keeps the
   second copy from coming back.
 - `internal/obs/notify` + `mux/obsnotify.go` — R4.4. The DECISION is a per-session
-  middleware that also implements `Waker`, so a `delay` is served by a one-shot
-  alarm rather than by a timer sweep, and the "announce once per EPISODE" latch
-  is per-session state in the actor. Delivery is `osascript`, on the
-  coordinator's goroutine, bounded by the port because the pipeline starts no
-  timers.
+  host stage that also implements `stage.Waker`, so a `delay` is served by a
+  one-shot alarm rather than by a timer sweep, and the "announce once per
+  EPISODE" latch is per-session state in the actor. It triggers on
+  `WaitingApplies()` — waiting, or a background job `blocked` — and its
+  dead-process gate applies only to a session no job claims (verdict Rule 1's
+  scope: for a job, the effective status already weighed the serving process).
+  Its `Note` is a `stage.Effect`. Delivery is `osascript`, through
+  `mux/obsact.go`'s announcer on the coordinator's goroutine, bounded by the
+  port because the pipeline starts no timers.
 
 **The control panel is ON-BOX ONLY for the life of a magmux started with
 `MAGMUX_AGENTS=1`** (claudestate architecture ADR-X5). Its attention view draws
@@ -395,8 +454,8 @@ per-message `Client`); only direct socket verbs carry `callerFor`'s `Client`.
   sketches it in TOML and TOML is the better format for a file whose purpose is
   recording rules a human wrote and will want to annotate — JSON has no
   comments, which cost the migrated test data its provenance headers. What
-  decided it is the dependency pin: a TOML library is the fourth module and
-  `TestDependencySetIsExactlyWhatWasDecided` exists so a fourth is a deliberate
+  decided it is the dependency pin: a TOML library would be a fifth module and
+  `TestDependencySetIsExactlyWhatWasDecided` exists so a fifth is a deliberate
   decision in a diff that says so. JSON-now-TOML-later is one file
   (`act.FileLoader`) against an unchanged `act.Policy`; a dependency added
   without the decision has already defeated the gate. R6.3 stays a property of
@@ -593,7 +652,7 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   `_` and spaces too, not just `/`), per UTF-16 CODE UNIT rather than per rune —
   so an emoji is a surrogate pair and becomes TWO dashes — and truncates at 200
   characters with a base36 hash suffix. That is
-  `internal/obs/adapters.EncodeProjectDir`, extracted verbatim from the bundle
+  `claudestate/claude.EncodeProjectDir`, extracted verbatim from the bundle
   and pinned against 20,019 generated vectors; `encodeProjectDir` in
   `mux/controller_claude.go` is a one-line call to it and **must stay one**. It had
   its own implementation until 2026-09-18 and that implementation was wrong in
@@ -615,23 +674,33 @@ These are easy to re-break; each caused a filed bug or cost real debugging time.
   resolver does the same, and addresses the file by **session id**, which is
   what makes a wrong directory a miss rather than a wrong answer.
 
-- **Every Claude decode in `mux/` goes through `internal/obs/adapters`, and the
-  schema guard holds it there.** The pane controller had its own encoder, its
-  own turn parser, its own registry reader (`json:"waitingFor"` tags,
+- **Every Claude decode in magmux goes through `claudestate/claude`, and H1
+  holds it there.** The pane controller had its own encoder, its own turn
+  parser, its own registry reader (`json:"waitingFor"` tags,
   `status == "waiting"`) and its own spelling of `.jsonl`, `stop_hook_summary`,
-  the queue records and the attachments. It now reads `adapters.DecodeLine`
-  (one transcript record, as a typed `Line`), `adapters.ParseTurns`,
-  `adapters.DecodeReadinessFields` (the three registry fields, refusing exactly
-  what the old `json.Unmarshal` refused, so the cache's "not found" is
-  unchanged), `adapters.DecodeStatus` for every status compare (`regStatusIs`),
-  `adapters.LooksLikePermission` and the path constants. `Turn` / `ToolCall` are
-  aliases of `obs.Turn` / `obs.ToolCall`. `TestOnlySchemaFileDecodesClaudeStrings`
-  (in `internal/obs/adapters`) scans `mux/`'s NON-TEST files with the same
-  decode-site detector; `muxOwnWords` beside it lists the three homograph sites
-  that are magmux's own vocabulary (route state `idle`, the `agent` hook's
-  `idle`, the results key `sessionId`), each with its reason, and fails when an
-  entry goes stale. mux's TESTS are not scanned: they build Claude records as
-  input on purpose.
+  the queue records and the attachments. It now reads `claude.DecodeLine`
+  (through `decodeCtrlLine`, `mux/claude_line.go`, the controller's view of a
+  typed `Line`: `CWD`, `Model`, the queue op with `AbsorbedMidTurn`, the
+  queued-command attachment), `claude.ParseTurns`, `claude.EncodeProjectDir`,
+  `claude.DecodeRecord` + `claude.IsRecordName` for the registry corroboration
+  (its own bounded read, cadence cache and `<pid>.json`-then-scan order stay in
+  mux; a torn file, a body of JSON `null`, or a wrong-typed `status` /
+  `waitingFor` / `sessionId` is "not found", any other problem is ignored),
+  `claude.MapRegistryStatus` for every status compare (`regStatusIs`) and
+  `claude.LooksLikePermission`. A declared binding is located by
+  `claude.LocateTranscript` — `DeclaredPath` for a declared file, `DeclaredID`'s
+  by-id glob for a declared id, never a fallback, and an id in two project
+  directories binds nothing. `Turn` / `ToolCall` are aliases of the library's
+  `model.Turn` / `model.ToolCall`. `TestNoClaudeLiteralOutsideTheLibrary`
+  (`mux/obsguard_test.go`, H1) scans every non-test file of `mux/`,
+  `internal/obs/`, `obsview/`, `mcp/` and `client/` with the library's own
+  `lint` detector, split by shape: a Claude-only literal (`sessionId`,
+  `input needed`) in any decode position, a plain-word Claude VALUE (`busy`,
+  `blocked`) in a compare or a case. `magmuxOwnWords` beside it lists the
+  homograph sites that are magmux's own vocabulary, each with its reason, and
+  fails when an entry goes stale. A plain-word Claude KEY used as an index is
+  out of its reach (magmux's own JSON uses the same words) and the test says
+  so. Tests are not scanned: they build Claude records as input on purpose.
 
 - **A DECLARED binding is the only way a wrapper pane reads the right
   transcript, so it must never fall back.** A wrapper shows no prompt, so
@@ -2131,28 +2200,41 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
 
 ## Dependencies
 
-Go: `golang.org/x/sys` (PTY ioctls), `golang.org/x/term` (raw mode), and
-`github.com/fsnotify/fsnotify` (directory watching, used only by
-`internal/obs`). The terminal core itself stays third-party-free — the control
+Go, the root module — exactly four, held by `cmd/magmux/deps_test.go`
+(`TestDependencySetIsExactlyWhatWasDecided`, G10's host half):
+
+- `golang.org/x/sys` (PTY ioctls) and `golang.org/x/term` (raw mode);
+- `github.com/MadAppGang/magmux/claudestate` — the observation library, a
+  nested module of this repository, required BY VERSION (a pseudo-version of
+  the last commit touching `claudestate/` until its first tag; see Release).
+  `TestClaudestateIsRequiredAndResolvable` keeps the requirement honest;
+- `github.com/fsnotify/fsnotify`, now `// indirect`: only the library's
+  `watch` package imports it. The root pin holds it to the version
+  `claudestate/go.mod` requires, so the measurements below are of the version
+  magmux links.
+
+The library has its own pin (`claudestate/internal/audit`'s G10): fsnotify
+and its `golang.org/x/sys` and nothing else, with fsnotify imported only by
+`watch/`. The terminal core itself stays third-party-free — the control
 panel is raw ANSI written through the pane's own VT parser rather than a TUI
 library, which is what keeps that true.
 
 The zero-third-party rule was lifted once, deliberately, for fsnotify. On
 Darwin a kqueue watch on a directory does **not** fire when a file inside it
-changes content, and the records `internal/obs` watches are rewritten IN PLACE
+changes content, and the records the library watches are rewritten IN PLACE
 rather than replaced by a rename — so the only event that matters is the one
 the kernel does not deliver. fsnotify's kqueue backend compensates by opening a
 descriptor on every entry of a watched directory ("to mimic inotify"), which is
 measured behaviour of the library and not a documented promise. Hand-rolling it
 costs the same descriptors and owns the bug.
 
-That makes the dependency version-coupled, so three tests hold it:
-`TestFsnotifySeesInPlaceWrites` fails loudly if a future fsnotify stops adding
+That makes the dependency version-coupled, so three tests hold it, all in the
+library now: `TestFsnotifySeesInPlaceWrites` (G11, `claudestate/watch`) fails loudly if a future fsnotify stops adding
 per-entry watches (the alternative is a watcher that goes silent with no error
 anywhere), `TestRepeatedStartStopLeaksNoDescriptor` covers the second measured
-behaviour below, and `TestDependencySetIsExactlyWhatWasDecided` fails if a
-fourth module appears in `go.mod` or if the pinned version drifts from the one
-the regression tests name.
+behaviour below (G12), and the library's pin test fails if its fsnotify version
+drifts from the one the regression tests name; the root's fails if a fifth
+module appears, or if the root links a different fsnotify from the library's.
 
 - **`fsnotify.Watcher.Close()` alone LEAKS every descriptor it opened, and the
   fix is to drain `Events` until it closes.** Measured against raw fsnotify with
@@ -2164,7 +2246,7 @@ the regression tests name.
   ENTRIES, because the kqueue backend opens one per entry, so the registry's 34
   records make it ~34 per cycle against a macOS soft `RLIMIT_NOFILE` of 256 in a
   process that already holds a descriptor per PTY. `closeAndDrain` in
-  `internal/obs/fswatch/watch.go` is the whole of the mitigation, and its 2 s
+  `claudestate/watch/watch.go` is the whole of the mitigation, and its 2 s
   bound is deliberate: a future fsnotify that never closes the channel must cost
   a pause, not a hung `Stop`. The failure this prevents is not a slow watcher —
   it is magmux failing to open something else entirely, much later, for no
@@ -2175,6 +2257,29 @@ The pilot is separate and out-of-process by design: it is TypeScript
 the documented socket, and nothing in the Go binary depends on it.
 
 ## Release
+
+**Before the next magmux release: tag the library and bump the root.** Until
+claudestate has a tag, the root pins it at a pseudo-version, and
+`.github/workflows/release.yml` REFUSES to release with one ("Refuse a release
+that pins claudestate at a pseudo-version"). So the next release run starts
+with, in order:
+
+1. Tag `claudestate/v0.1.0` on the MERGE commit of the PR that brought
+   claudestate in (it was merged with a merge commit precisely so the pinned
+   commit stays an ancestor of main): `git tag -a claudestate/v0.1.0 -m "..."
+   <merge-sha>`, then `git push origin refs/tags/claudestate/v0.1.0`. The
+   release workflow's `v*` trigger never fires on it: `*` does not match `/`.
+2. Warm the module proxy so the tag resolves for everyone:
+   `GOPROXY=https://proxy.golang.org GOWORK=off go list -m github.com/MadAppGang/magmux/claudestate@v0.1.0`.
+3. Bump the root: `GOWORK=off go get github.com/MadAppGang/magmux/claudestate@v0.1.0`,
+   `GOWORK=off go mod tidy`, and `go -C demo/rc/driver mod tidy`; commit and
+   merge that, and only then follow the steps below. CI's "Pin is current"
+   ignores a tagged pin; the release gate owns that case.
+
+The release workflow also pins GoReleaser's own tag view to the `v*` family
+(`GORELEASER_CURRENT_TAG` / `GORELEASER_PREVIOUS_TAG`), so a `claudestate/v*`
+tag between two releases can never become the "previous tag" a changelog is
+diffed against.
 
 Uses GoReleaser. To release:
 

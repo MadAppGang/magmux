@@ -1516,6 +1516,7 @@ magmux agents                  # a table, redrawn whenever a session changes
 magmux agents --once           # one document, then exit
 magmux agents --json           # the same document as JSON, for jq
 magmux agents --root DIR       # a registry somewhere other than ~/.claude/sessions
+magmux agents --jobs DIR       # background jobs somewhere other than ~/.claude/jobs
 magmux agents --projects DIR   # transcripts somewhere other than ~/.claude/projects
 magmux agents focus TARGET     # focus the pane a session runs in — the ONE action
 ```
@@ -1544,7 +1545,8 @@ the reason behind every verdict worth acting on — a `YES`, a `?`, or any sessi
 whose two tiers disagreed. `--json` carries all of them, `no` included.
 
 The rule that produces the verdict is written out in one place, in full, in the
-package documentation of `internal/obs/verdict`: eight ordered rules, first
+package documentation of `claudestate/verdict` (the observation library, in this
+repository's `claudestate/` module): eight ordered rules, first
 match wins. In short — a dead process or a closed pane is `no`; a session that
 is `waiting` is `YES`, and the reason says whether it wants a keystroke or an
 approval; an API-level error is `YES`; two tiers that disagree is `?`; working
@@ -1558,6 +1560,20 @@ traffic: how long it has been since the child printed anything, and whether the
 silence belongs to the child or to a human who has just typed. Authoritative
 wins whenever both have something to say, because the tool's own record beats a
 guess made from the outside.
+
+**Background jobs are rows too.** Claude Code's background sessions keep a job
+record under `~/.claude/jobs/<dir>/state.json` beside the process's own
+registry entry, and the two are ONE row, keyed by the job: `--json` carries it
+as `job` (the record's `daemonShort`, else its directory), and that member
+appears on job rows only. A job no process claims has `pid` 0. Its status is
+the vendor's own rule for the two records — a working job is `busy`, a
+`blocked` one is `waiting` and needs a human (and is announced, like any
+waiting session), and a finished or failed one has a status magmux has no word
+for: `null` in `--json` with the job's own word in `statusRaw`, and
+`authoritative`, because the job said it. Two processes running one session id
+are two rows, each with its own verdict. A job directory with no session id is
+kept as a row with an empty `id` rather than dropped, and the problem is printed.
+`--root` alone reads no jobs at all; pass `--jobs DIR` to read them.
 
 **When the two disagree, the loser is published too.** A session whose record
 says it is working, whose pane has produced not one byte for a minute or more,
@@ -1697,6 +1713,12 @@ magmux agents focus 62931            # by pid
 magmux agents focus waiting-on-perm  # by name
 magmux agents focus c874de20         # by session id, or an unambiguous prefix
 ```
+
+A target that matches more than one session is refused with every candidate
+named — its pid, and its job when it has one — rather than picked. Since
+background jobs became rows, an exact session id can name two sessions (two
+processes running it, or a job and the job that resumed it); name one by pid
+then. A pid also reaches a job through any process that claims it.
 
 Focus moves the keyboard to the magmux pane a session is running in. **It is
 the only thing magmux will do to a session.** Three further action tiers exist
