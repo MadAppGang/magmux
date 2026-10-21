@@ -117,11 +117,11 @@ func TestImportDirection(t *testing.T) {
 		t.Fatalf("the import DAG is violated:\n  %s", strings.Join(p, "\n  "))
 	}
 
-	// The positive control that EXISTS at this commit: ports must be seen
-	// importing model. Without it a listing that returned nothing would pass.
-	// L5 switches it to pipeline importing watch.
-	if !contains(l[modulePath+"/ports"], modulePath+"/model") {
-		t.Fatalf("go list does not show ports importing model; the guard is not seeing the graph: %v", l[modulePath+"/ports"])
+	// The positive control (review MEDIUM-3): pipeline must be seen importing
+	// watch, the deepest edge in the DAG. Without it a listing that returned
+	// nothing would pass. (L1 to L4 used ports importing model.)
+	if !contains(l[modulePath+"/pipeline"], modulePath+"/watch") {
+		t.Fatalf("go list does not show pipeline importing watch; the guard is not seeing the graph: %v", l[modulePath+"/pipeline"])
 	}
 	if _, ok := l[modulePath+"/_probe"]; !ok {
 		t.Fatal("go list did not return _probe; its stdlib-only rule is not being checked")

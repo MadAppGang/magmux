@@ -21,10 +21,11 @@ import (
 	"testing"
 )
 
-// isolationAllowlist: test file -> citation. EMPTY at this commit. The one
-// planned entry, proclive/proclive_test.go (its own pid and a child it
-// spawned, §6 G8), lands in L5 with the package. A stale entry fails.
-var isolationAllowlist = map[string]string{}
+// isolationAllowlist: test file -> citation. A stale entry fails.
+var isolationAllowlist = map[string]string{
+	"proclive/proclive_test.go": "architecture §6 G8: the production kill(pid, 0) oracle's own test probes " +
+		"this test process's pid and a child it spawned and reaped, and no other pid",
+}
 
 const proclivePath = modulePath + "/proclive"
 
