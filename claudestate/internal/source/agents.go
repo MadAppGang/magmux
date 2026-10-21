@@ -124,17 +124,15 @@ func (a *Agents) Report() model.SourceReport {
 // after the Stat. It seeks when the file can (os.DirFS's files do). Otherwise
 // it reads the head through io.Discard and keeps only the window, because
 // ports.Tree.FS is any host fs.FS and a tail is a bounded read (D10) whatever
-// the FS: a whole file is never held in memory.
+// the FS: a whole file is never held in memory. A name that is not a regular
+// file is refused before it is opened (openRegular): a FIFO would block the
+// open, and the actor with it.
 func Tail(fsys fs.FS, name string, n int) ([]byte, int64, error) {
-	f, err := fsys.Open(name)
+	f, info, err := openRegular(fsys, name)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, 0, err
-	}
 	size := info.Size()
 	window := min(size, int64(n))
 	if head := size - window; head > 0 {

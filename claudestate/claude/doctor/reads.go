@@ -51,8 +51,25 @@ type transcriptStat struct {
 	size int64
 }
 
+// regularByName refuses a name that is not a regular file, BEFORE anything
+// opens it. A blocking open of a FIFO with no writer never returns, so every
+// file the doctor opens is judged by name first (review r2 #1, the library's
+// internal/source.openRegular for the same reason). fs.Stat follows a
+// symlink, as the open would.
+func regularByName(fsys fs.FS, name string) error {
+	info, err := fs.Stat(fsys, name)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("not a regular file")
+	}
+	return nil
+}
+
 // readBounded reads one record whole, refusing one larger than
-// claude.MaxRecordBytes rather than reading it.
+// claude.MaxRecordBytes rather than reading it. Its first check is by name,
+// before the read opens anything, which is what regularByName is for.
 func readBounded(fsys fs.FS, name string) ([]byte, fs.FileInfo, error) {
 	info, err := fs.Stat(fsys, name)
 	if err != nil {
@@ -204,6 +221,9 @@ func (d *run) newestTranscript() (transcriptStat, bool) {
 // os.DirFS's files do; otherwise it reads and discards the head. The first
 // line is dropped unless the read reached the start of the file.
 func tailLines(fsys fs.FS, name string, n int) ([][]byte, error) {
+	if err := regularByName(fsys, name); err != nil {
+		return nil, err
+	}
 	f, err := fsys.Open(name)
 	if err != nil {
 		return nil, err

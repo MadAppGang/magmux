@@ -155,27 +155,58 @@ func (r *Registry) wait() {
 	<-t.C()
 }
 
-// readBounded reads one record whole, refusing one larger than
-// claude.MaxRecordBytes.
+// openRegular opens name only if it is a regular file, and checks the type
+// TWICE: by name BEFORE the open, and on the handle after it.
 //
-// Every check is made on the HANDLE that is read, never on the name before the
-// read: a file swapped between a Stat of its name and the read would otherwise
-// pass the regular-file and size checks and then be read whole. The read
-// itself is limited too, so a size the handle misreports cannot carry it past
-// the bound either.
-func readBounded(fsys fs.FS, name string) ([]byte, error) {
+// The name check is what keeps a FIFO from hanging the caller. os.DirFS's
+// Open is a blocking open(2), and on a FIFO with no writer it waits for one,
+// for ever — so a check made only on the opened handle is never reached, and
+// the coordinator (and with it Stop) would hang on a `*.json` named pipe in
+// the registry (review r2 #1). fs.Stat follows a symlink, as the open would,
+// so a link to a FIFO is refused the same way.
+//
+// The handle check is what keeps a file swapped in AFTER the name check from
+// passing: the bytes read are the handle's, so the handle is what is judged.
+// The window between the two cannot be closed through fs.FS, which has no
+// O_NONBLOCK: a FIFO swapped in between them can still block the open. That
+// takes a same-user writer racing a stat, not a file left lying in the tree.
+func openRegular(fsys fs.FS, name string) (fs.File, fs.FileInfo, error) {
+	info, err := fs.Stat(fsys, name)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("%s is not a regular file (%s)", name, info.Mode().Type())
+	}
 	f, err := fsys.Open(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err = f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, nil, fmt.Errorf("%s is not a regular file (%s)", name, info.Mode().Type())
+	}
+	return f, info, nil
+}
+
+// readBounded reads one record whole, refusing one larger than
+// claude.MaxRecordBytes, and one that is not a regular file (openRegular).
+//
+// The size is checked on the HANDLE that is read, never only on the name: a
+// file swapped between a Stat of its name and the read would otherwise pass
+// the size check and then be read whole. The read itself is limited too, so a
+// size the handle misreports cannot carry it past the bound either.
+func readBounded(fsys fs.FS, name string) ([]byte, error) {
+	f, info, err := openRegular(fsys, name)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", name)
-	}
 	tooBig := func(size int64) error {
 		return fmt.Errorf("%s is %d bytes, larger than the %d-byte record bound", name, size, claude.MaxRecordBytes)
 	}

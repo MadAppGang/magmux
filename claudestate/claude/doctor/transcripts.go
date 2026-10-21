@@ -22,10 +22,12 @@ func (d *run) retention() (time.Duration, string, bool) {
 	if d.env.Settings == nil {
 		return 0, "", false
 	}
-	b, err := fs.ReadFile(d.env.Settings, claude.SettingsFile)
-	if err == nil {
-		if r, ok := claude.DecodeRetention(b); ok {
-			return r, claude.SettingsFile, true
+	// Named first: a FIFO named settings.json would block ReadFile's open.
+	if regularByName(d.env.Settings, claude.SettingsFile) == nil {
+		if b, err := fs.ReadFile(d.env.Settings, claude.SettingsFile); err == nil {
+			if r, ok := claude.DecodeRetention(b); ok {
+				return r, claude.SettingsFile, true
+			}
 		}
 	}
 	return claude.DefaultTranscriptRetention, "the default", true
