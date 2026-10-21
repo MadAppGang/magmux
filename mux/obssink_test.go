@@ -1,12 +1,14 @@
 package mux
 
 import (
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"github.com/MadAppGang/magmux/internal/obs/act"
 	"github.com/MadAppGang/magmux/internal/obs/pipeline"
 	"github.com/MadAppGang/magmux/internal/obs/registry"
+	"github.com/MadAppGang/magmux/obsview"
 )
 
 // The sinks: the document magmux keeps, the three surfaces that render it, and
@@ -75,6 +78,153 @@ func stagedFleet() obs.Fleet {
 				Attention: obs.Attention{Reason: "the two tiers disagree"},
 			},
 		},
+	}
+}
+
+// TestTheThreeSurfacesAgree is requirements.md R4.1 and R4.3 as one assertion:
+// the socket verb, the MCP tool and the panel are three renderings of ONE
+// document, and none of them may say something about a session that another
+// contradicts.
+//
+// It compares FACTS rather than bytes, deliberately. The three surfaces are a
+// JSON object, a text table and a 34-column ANSI frame; a byte comparison is
+// impossible and a comparison of three hand-written expectations would prove
+// only that somebody copied the same table three times. What is asserted is
+// that each surface's own rendering of each session round-trips back to the
+// same values.
+func TestTheThreeSurfacesAgree(t *testing.T) {
+	defer deadlineWatchdog(t, 60*time.Second)()
+	fleet := stagedFleet()
+
+	// ── surface 1: the socket verb ──────────────────────────────────────
+	m := newTestMux(t, ctrlPanes(2)...)
+	m.obsDoc.start()
+	m.obsDoc.set(fleet.Clone(), obsEpoch, 0)
+	payload, err := m.sockObs()
+	if err != nil {
+		t.Fatalf("the obs verb: %v", err)
+	}
+	// The payload IS the document: it decodes back into an obs.Fleet whose
+	// every field equals the one that went in. That is the property R4.1's
+	// "identical document" needs, and it is what a hand-built map would break.
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("re-encoding the reply: %v", err)
+	}
+	var overWire obs.Fleet
+	if err := json.Unmarshal(raw, &overWire); err != nil {
+		t.Fatalf("decoding the reply as a document: %v", err)
+	}
+	if !reflect.DeepEqual(overWire, fleet) {
+		t.Fatalf("the socket document differs from the one published:\n got %+v\nwant %+v",
+			overWire, fleet)
+	}
+	// And it carries NOTHING else. An extra key here is a second schema in the
+	// one place R4.1 names.
+	if len(payload) != 2 || payload["epoch"] == nil || payload["sessions"] == nil {
+		t.Errorf("the reply carries %d keys (%v); the document has exactly epoch and sessions",
+			len(payload), keysOfPayload(payload))
+	}
+
+	// ── surface 2: the MCP tool's rendering ─────────────────────────────
+	// The tool decodes the wire into obs.Fleet and renders it with the CLI's
+	// own writeFleetTable, so what is exercised here is that decode-and-render
+	// path over the document that actually crossed the wire.
+	var mcpOut strings.Builder
+	obsview.WriteFleetTable(&mcpOut, overWire)
+	mcpText := mcpOut.String()
+
+	// ── surface 3: the panel ────────────────────────────────────────────
+	view := attentionOf(fleet.Clone(), obsEpoch, pipeline.Delivery{})
+	cp := newControlPanel()
+	cp.setAttention(view)
+	cp.mu.Lock()
+	snap := cp.snapshotLocked()
+	cp.mu.Unlock()
+	panelText := stripANSI(strings.Join(cp.frameAttention(snap, 60, 40), "\n"))
+
+	// Logged, not just asserted. `go test -v -run TestTheThreeSurfacesAgree`
+	// then shows all three renderings of one document side by side, which is
+	// the only way a person can check the agreement this test checks
+	// mechanically — and the only way a reviewer can see that the panel is
+	// legible at all.
+	t.Logf("the socket verb replies with:\n%s", string(raw))
+	t.Logf("the MCP tool renders:\n%s", mcpText)
+	t.Logf("the panel renders:\n%s", panelText)
+
+	// ── the agreement ───────────────────────────────────────────────────
+	for _, s := range fleet.Sessions {
+		name := s.Name
+		if name == "" {
+			name = "pid " + strconv.Itoa(s.PID)
+		}
+		t.Run(name, func(t *testing.T) {
+			// Every surface identifies the session. The two do it with
+			// different keys and that is not a disagreement: the table has a
+			// PID column and the panel is 30 columns wide and leads with the
+			// name, falling back to the pid for a session that has none.
+			pidText := strconv.Itoa(s.PID)
+			if !strings.Contains(mcpText, pidText) {
+				t.Errorf("the MCP rendering does not name pid %s", pidText)
+			}
+			if !strings.Contains(panelText, name) {
+				t.Errorf("the panel does not name %q:\n%s", name, panelText)
+			}
+
+			// The STATUS word is one word in all three.
+			want := obsview.StatusText(s)
+			if !strings.Contains(mcpText, want) {
+				t.Errorf("the MCP rendering does not say %q for %s", want, name)
+			}
+			if !strings.Contains(panelText, want) {
+				t.Errorf("the panel does not say %q for %s", want, name)
+			}
+
+			// The ATTENTION verdict is the same verdict, in each surface's own
+			// three spellings. The panel uses marks because it is 30 columns
+			// wide; what must not differ is WHICH of the three it is.
+			row := panelRowFor(panelText, name)
+			mcpRow := tableRowFor(mcpText, pidText)
+			switch {
+			case s.Attention.Needed == nil:
+				if !strings.Contains(mcpRow, "?") {
+					t.Errorf("the MCP rendering does not spell %s undetermined: %q", name, mcpRow)
+				}
+				if !strings.HasPrefix(strings.TrimSpace(row), "?") {
+					t.Errorf("the panel does not spell %s undetermined: %q", name, row)
+				}
+			case *s.Attention.Needed:
+				if !strings.Contains(mcpRow, "YES") {
+					t.Errorf("the MCP rendering does not say %s needs a human: %q", name, mcpRow)
+				}
+				if !strings.HasPrefix(strings.TrimSpace(row), "●") {
+					t.Errorf("the panel does not mark %s as needing a human: %q", name, row)
+				}
+			default:
+				if !strings.Contains(mcpRow, " no ") {
+					t.Errorf("the MCP rendering does not say %s is fine: %q", name, mcpRow)
+				}
+				if !strings.HasPrefix(strings.TrimSpace(row), "·") {
+					t.Errorf("the panel does not mark %s as fine: %q", name, row)
+				}
+			}
+
+			// A conflict appears in every surface that shows reasons at all.
+			if s.Conflict != nil {
+				if !strings.Contains(mcpText, "conflict") {
+					t.Errorf("the MCP rendering hides %s's conflict", name)
+				}
+				if !strings.Contains(panelText, "conflict") {
+					t.Errorf("the panel hides %s's conflict:\n%s", name, panelText)
+				}
+			}
+		})
+	}
+
+	// The one number all three agree on, said out loud: how many need a human.
+	if view.needed != 1 || view.unsure != 1 || view.total != 3 {
+		t.Errorf("the panel counted %d needed / %d unsure / %d total, want 1/1/3",
+			view.needed, view.unsure, view.total)
 	}
 }
 
@@ -496,6 +646,36 @@ func TestTheSinkNeverTakesTreeMu(t *testing.T) {
 		if len(f.Decls) == 0 {
 			t.Errorf("%s has no declarations; this scan is checking a file that is not there", file)
 		}
+	}
+}
+
+// TestTheStoreTellsOffApartFromNothingYet: two states with different remedies —
+// restart magmux with MAGMUX_AGENTS, versus ask again in a moment.
+func TestTheStoreTellsOffApartFromNothingYet(t *testing.T) {
+	m := newTestMux(t, ctrlPanes(1)...)
+
+	if _, err := m.sockObs(); verbErrCode(err) != sockCodeObsOff {
+		t.Errorf("a magmux with observation off answered %v (%q), want %s",
+			err, verbErrCode(err), sockCodeObsOff)
+	}
+
+	m.obsDoc.start()
+	if _, err := m.sockObs(); verbErrCode(err) != sockCodeObsPending {
+		t.Errorf("a magmux with observation running and nothing published answered %v (%q), "+
+			"want %s", err, verbErrCode(err), sockCodeObsPending)
+	}
+
+	m.obsDoc.set(stagedFleet(), obsEpoch, 0)
+	if _, err := m.sockObs(); err != nil {
+		t.Errorf("a magmux with a document answered %v", err)
+	}
+
+	// And stopping DROPS it: a stopped pipeline's last document keeps ageing
+	// and nothing will ever correct it.
+	m.obsDoc.stop()
+	if _, err := m.sockObs(); verbErrCode(err) != sockCodeObsOff {
+		t.Errorf("after stopping, the verb answered %v (%q), want %s",
+			err, verbErrCode(err), sockCodeObsOff)
 	}
 }
 

@@ -385,7 +385,7 @@ func TestObservationIsOffUnlessAskedFor(t *testing.T) {
 	// main() names obsOracle. See TestNoTestCanReachTheSignalOracle.
 	t.Setenv(obsEnvVar, "")
 	m := newTestMux(t, ctrlPanes(1)...)
-	m.startObservationIfEnabled(nil)
+	m.startObservationIfEnabled(obsEnabled(os.Getenv(obsEnvVar)), nil)
 	if m.obs != nil {
 		t.Fatal("the pipeline started with MAGMUX_AGENTS unset")
 	}
@@ -413,6 +413,7 @@ func TestStartObservationAgainstATemporaryRegistry(t *testing.T) {
 	before := runtime.NumGoroutine()
 
 	m := newTestMux(t, ctrlPanes(1)...)
+	m.panelPrivate = true // ADR-X5: observation only runs on a magmux whose panel is on-box
 	if err := m.startObservation(dir); err != nil {
 		t.Fatalf("startObservation: %v", err)
 	}

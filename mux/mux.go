@@ -139,6 +139,29 @@ type Magmux struct {
 	// everywhere after. No lock, deliberately, on the same argument as
 	// pendingInput and themeAskedAt: init() returns before any goroutine exists.
 	headless bool
+
+	// panelPrivate says the control panel is ON-BOX ONLY for the whole life of
+	// this magmux: it was started with MAGMUX_AGENTS=1, so the panel's attention
+	// view lists every Claude Code session on the machine — names and launch
+	// directories — and that document is socket-only (the `agents` verb is not
+	// a hub op). Every pane read of the panel by a caller whose transport is not
+	// the local socket is refused with panel_private: watch, watch_all,
+	// capture, transcript. See panelReadableBy.
+	//
+	// Written ONCE, in Main, on the struct literal, from the one read of
+	// MAGMUX_AGENTS — before init(), the socket, the hub, the Streamer and the
+	// Firebase mirror exist — and never again. So there is no transition to
+	// race: nothing that serves a watch existed while it was false, and nothing
+	// ever needs evicting. Read without a lock for the same reason as headless:
+	// every goroutine that reads it starts after the write.
+	//
+	// Stated as a POSITIVE whose zero value is today's behaviour (a public
+	// panel), because every unit test builds a Magmux as a struct literal.
+	// startObservationWith refuses to run on a magmux whose panel is public,
+	// so "observation running" implies "panel private" by construction — for
+	// test literals too.
+	panelPrivate bool
+
 	rawState *term.State
 	quit     chan struct{}
 	quitOnce sync.Once

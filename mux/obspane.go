@@ -11,11 +11,13 @@ package mux
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/MadAppGang/magmux/hub"
 	"github.com/MadAppGang/magmux/internal/obs"
 	"github.com/MadAppGang/magmux/internal/obs/act"
 	"github.com/MadAppGang/magmux/internal/obs/claudecode"
@@ -469,7 +471,11 @@ func (l *muxPaneLocator) panePIDs() map[int]int {
 // has a registry root of its own to point at.
 const obsEnvVar = "MAGMUX_AGENTS"
 
-// startObservationIfEnabled starts the pipeline when MAGMUX_AGENTS asks for it.
+// startObservationIfEnabled starts the pipeline when MAGMUX_AGENTS asked for it.
+//
+// enabled is Main's ONE read of MAGMUX_AGENTS, the same value it wrote into
+// panelPrivate on the struct literal; this function reads no environment
+// variable of its own, so the switch and the panel's privacy cannot disagree.
 //
 // Called from Main() AFTER the layout is built, the panel is attached and the
 // read loops are running — so pane ids are final. Starting it earlier would
@@ -503,8 +509,8 @@ const obsEnvVar = "MAGMUX_AGENTS"
 // which registry answers with LivenessUnknown rather than with a probe — see
 // registry.Config.Oracle, where phase 2 chose that default precisely so
 // forgetting to inject one is honest rather than dangerous.
-func (m *Magmux) startObservationIfEnabled(oracle registry.ProcessOracle) {
-	if !obsEnabled(os.Getenv(obsEnvVar)) {
+func (m *Magmux) startObservationIfEnabled(enabled bool, oracle registry.ProcessOracle) {
+	if !enabled {
 		return
 	}
 	root, err := defaultRegistryRoot()
@@ -684,6 +690,13 @@ func (m *Magmux) startObservationWith(cfg obsConfig) error {
 	}
 	if _, err := os.Stat(cfg.Root); err != nil {
 		return fmt.Errorf("no session registry at %s: %w", cfg.Root, err)
+	}
+	// THIRD, after "already running" and the registry stat, so a caller that
+	// expects either of those errors still gets it. A magmux whose panel is
+	// public must not observe: the attention view would put every session on
+	// the machine into a pane any remote viewer may watch. See panelPrivate.
+	if !m.panelPrivate {
+		return errPanelPublic
 	}
 
 	// The audit trail, resolved before anything starts. NewWriter creates
@@ -878,4 +891,38 @@ func obsEnabled(v string) bool {
 		return false
 	}
 	return true
+}
+
+// errPanelPublic is startObservationWith's refusal on a magmux whose control
+// panel is readable off-box. It is unreachable from Main, which writes
+// panelPrivate from the same MAGMUX_AGENTS read that enables observation; it
+// is what makes the rule hold for every other caller, struct-literal tests
+// included.
+var errPanelPublic = errors.New("session observation needs a private control panel: " +
+	"this magmux was not started with " + obsEnvVar + "=1, so its panel is readable off-box")
+
+// panelReadableBy reports whether caller may read the CONTROL PANEL's pane —
+// watch it, capture it, read its transcript.
+//
+// Always, unless this magmux observes sessions (panelPrivate); then only a
+// caller on the local socket. The socket adapter sets Transport "socket" once,
+// in callerFor, before any verb runs. A ZERO Caller fails closed: something
+// that never said how it arrived is not on-box.
+//
+// Every non-socket transport is refused, not only the read-only view token: the
+// `agents` document is socket-only, and a full-token remote controller is
+// still off-box.
+func (m *Magmux) panelReadableBy(c hub.Caller) bool {
+	return !m.panelPrivate || c.Transport == "socket"
+}
+
+// refusePanelOffBox is the one refusal every pane read of the panel gives an
+// off-box caller of an observing magmux. nil when the read may proceed.
+func (m *Magmux) refusePanelOffBox(p *Pane, c hub.Caller) error {
+	if p == nil || !p.isControl || m.panelReadableBy(c) {
+		return nil
+	}
+	return sockErrf(sockCodePanelPrivate,
+		"pane %d is magmux's control panel, and this magmux observes the Claude Code sessions "+
+			"on its machine (%s=1), so the panel is readable only over the local socket", p.id, obsEnvVar)
 }

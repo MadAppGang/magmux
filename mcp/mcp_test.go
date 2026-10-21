@@ -178,6 +178,10 @@ func TestMCPStdioHandshake(t *testing.T) {
 		"list_sessions", "attach_session", "request_session",
 		"list_panes", "open_pane", "close_pane", "read_pane",
 		"send_keys", "send_and_wait",
+		// The observation surface (requirements.md R4.1). It is listed here
+		// with the rest rather than counted, so that adding a tool is a
+		// deliberate edit to this table with a reviewer attached.
+		"list_agents",
 	}
 	if len(got) != len(want) {
 		t.Errorf("tools/list returned %d tools, want %d: %v", len(got), len(want), got)

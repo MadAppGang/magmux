@@ -67,6 +67,7 @@ func TestTheInjectedOracleDecidesLiveness(t *testing.T) {
 			if tt.oracle != nil {
 				cfg.Oracle = tt.oracle
 			}
+			m.panelPrivate = true // ADR-X5: observation only runs on a magmux whose panel is on-box
 			if err := m.startObservationWith(cfg); err != nil {
 				t.Fatalf("startObservationWith: %v", err)
 			}

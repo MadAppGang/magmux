@@ -56,6 +56,9 @@ const (
 	sockCodeNoTranscript  = protocol.CodeNoTranscript
 	sockCodePluginGone    = protocol.CodePluginGone
 	sockCodeNotAccepted   = protocol.CodeNotAccepted
+	sockCodeObsOff        = protocol.CodeObsOff
+	sockCodeObsPending    = protocol.CodeObsPending
+	sockCodePanelPrivate  = protocol.CodePanelPrivate
 )
 
 // sockVerbs and sockEvents are what `capabilities` advertises. Maintained by
@@ -63,8 +66,8 @@ const (
 // client that feature-detects rather than probing, so adding a verb means
 // adding it in both places.
 var (
-	sockVerbs = []string{"capabilities", "list", "capture", "transcript", "open_pane", "close_pane",
-		"focus", "status", "tint", "overlay", "send", "pilot", "agent", "ops", "call",
+	sockVerbs = []string{"capabilities", "list", "capture", "transcript", "agents", "open_pane",
+		"close_pane", "focus", "status", "tint", "overlay", "send", "pilot", "agent", "ops", "call",
 		"watch", "unwatch", "resync", "input", "resize"}
 	sockEvents = []string{protocol.EventSnapshot, protocol.EventExit, protocol.EventControl, protocol.EventPaneOpened, protocol.EventPaneClosed,
 		protocol.EventResults, protocol.EventShutdown, protocol.EventReply,
@@ -249,8 +252,79 @@ func (m *Magmux) dispatchSocketVerbExt(msg sockMsg, done func(map[string]any, er
 		return m.sockOps()
 	case "call":
 		return m.sockCall(msg)
+	case "agents":
+		// SOCKET-ONLY, and checked here rather than trusted to the op table.
+		// The document lists every Claude Code session on the machine — names,
+		// launch directories — and a hub op would be readable off-box by a
+		// view-token viewer over HTTP, WebSocket or the Firebase mirror. It is
+		// not registered as an op, and this refuses it to any other transport
+		// should a wrapper ever forward the verb name.
+		if msg.caller.Transport != "socket" {
+			return nil, sockErrf(sockCodeUnknownVerb, "agents is a socket-only verb")
+		}
+		return m.sockObs()
 	}
 	return m.dispatchSocketVerb(msg, done)
+}
+
+// sockObs publishes the session-observation document: requirements.md R4.1's
+// socket surface, and the one the MCP tool is a translation of.
+//
+// # It is the SAME document `magmux agents --json` prints
+//
+// Not a document like it. fleetPayload marshals the obs.Fleet the sink kept
+// and re-reads it into the map this protocol's replies carry, so there is one
+// definition of every key and nothing here can spell one differently. R4.1
+// asks for "the identical document" from three surfaces and R4.3 says the
+// panel must match it exactly; that is a property of the construction rather
+// than a promise, and TestTheThreeSurfacesAgree walks one document through
+// all three.
+//
+// # It is not a pane verb, and it is not recorded in the control panel
+//
+// Every other read verb here resolves a pane and opens a panel route. This one
+// has no pane: its subject is the Claude Code sessions on the MACHINE,
+// including sessions in no magmux at all. CLAUDE.md's wire-tap rule is that
+// the panel records one exchange — what a controller asked of a SESSION, and
+// what magmux observed that session do — so a row for a question about
+// magmux's own instrument would be the panel reporting on itself, which is the
+// line that rule exists to hold. It is also not an isControllerVerb: asking
+// what is running is not driving anything, and counting it as a controller
+// would put a phantom connect/disconnect pair in the panel for every poll.
+//
+// # Locks
+//
+// None of magmux's. It reads obsStore, which carries its own mutex and is
+// never held across anything — see obssink.go. In particular it does NOT read
+// Magmux.obs, which is main()'s goroutine only.
+func (m *Magmux) sockObs() (map[string]any, error) {
+	snap := m.obsDoc.snapshot()
+	switch {
+	case !snap.Running:
+		return nil, sockErrf(sockCodeObsOff,
+			"session observation is not running in this magmux. It is opt-in: start magmux "+
+				"with %s=1 to read Claude Code's session registry.", obsEnvVar)
+	case !snap.Have:
+		return nil, sockErrf(sockCodeObsPending,
+			"session observation is running and has not published a document yet; ask again")
+	}
+
+	payload, err := fleetPayload(snap.Doc)
+	if err != nil {
+		return nil, sockErrf(sockCodeInternal, "%v", err)
+	}
+	// Nothing is added to it. Not `receivedAt`, not the sink's drop count,
+	// not a freshness flag — R4.1 says the three surfaces return the identical
+	// document, and a key here that `magmux agents --json` does not print is a
+	// second schema in the one place the requirement names.
+	//
+	// Nothing is lost by that. The question extra keys would answer is "how
+	// old is this", and requirements.md R2.8 already put the answer in the
+	// document: `epoch` is the instant the registry was read, and a client
+	// comparing it with its own clock has the whole of the staleness. A drop
+	// count would say the sink missed INTERMEDIATE documents, which changes
+	// nothing about the age of this one.
+	return payload, nil
 }
 
 // isControllerVerb reports whether a verb is one an agent DRIVING magmux would
@@ -374,6 +448,13 @@ func (m *Magmux) sockCapture(msg sockMsg) (map[string]any, error) {
 		m.refuseRequest("capture", "read the screen", err)
 		return nil, err
 	}
+	// ADR-X5: in a magmux that observes sessions the panel is on-box only.
+	// msg.caller is the socket's own (callerFor) or the hub op's, never the
+	// payload's; a zero Caller is refused.
+	if err := m.refusePanelOffBox(p, msg.caller); err != nil {
+		m.refuseRequest("capture", "read the screen", err)
+		return nil, err
+	}
 	// Reading a pane is the controller touching it, so it opens a route: a
 	// pane the agent looks at is a pane the panel should be able to compare.
 	seq := m.control.recordRequest(idx, "capture", "read the screen")
@@ -427,6 +508,11 @@ func (m *Magmux) sockTranscript(msg sockMsg) (map[string]any, error) {
 	// states: an unvalidated index would open a route to a pane that is not there.
 	p, err := m.paneForMsg(idx)
 	if err != nil {
+		m.refuseRequest("transcript", what, err)
+		return nil, err
+	}
+	// ADR-X5, as in sockCapture.
+	if err := m.refusePanelOffBox(p, msg.caller); err != nil {
 		m.refuseRequest("transcript", what, err)
 		return nil, err
 	}

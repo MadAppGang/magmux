@@ -592,8 +592,15 @@ func Main(args []string) int {
 		commands = append(commands, PaneConfig{Control: true})
 	}
 
+	// The ONE read of MAGMUX_AGENTS. It decides two things that must never
+	// disagree — whether observation starts, and whether the control panel is
+	// on-box only (ADR-X5) — so it is read once, here, before init(), the
+	// socket, the hub and the Firebase mirror exist, and both take this value.
+	observeAgents := obsEnabled(os.Getenv(obsEnvVar))
+
 	mux := &Magmux{
 		gridMode:       useGrid,
+		panelPrivate:   observeAgents,
 		autoExit:       autoExit,
 		hideStatus:     noStatus,
 		noIdleDone:     noIdleDone,
@@ -801,7 +808,7 @@ func Main(args []string) int {
 	// is a parameter rather than a default so that no test can reach
 	// kill(pid, 0) without naming obsOracle itself, which nothing under
 	// _test.go is allowed to do; see TestNoTestCanReachTheSignalOracle.
-	mux.startObservationIfEnabled(obsOracle{})
+	mux.startObservationIfEnabled(observeAgents, obsOracle{})
 
 	// The mirror subscribes HERE, on the same reasoning and one line later: its
 	// first write is the connect-time aggregate, and a mirror seeded from a

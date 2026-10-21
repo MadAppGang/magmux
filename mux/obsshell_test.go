@@ -557,6 +557,7 @@ func TestStartObservationWiresTheShellPort(t *testing.T) {
 
 	// The oracle is nil on this path, so no pid anywhere is probed; pid 4242 is
 	// a number in a temporary file and nothing signals it.
+	m.panelPrivate = true // ADR-X5: observation only runs on a magmux whose panel is on-box
 	if err := m.startObservation(newSilentPaneRegistry(t, pid, "busy")); err != nil {
 		t.Fatalf("startObservation: %v", err)
 	}

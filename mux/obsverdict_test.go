@@ -276,6 +276,7 @@ func TestStartObservationWiresTheActivityPort(t *testing.T) {
 	givePID(t, m.paneByID(0), pid)
 	stampActivity(t, m.paneByID(0), time.Now().Add(-10*time.Minute), time.Time{})
 
+	m.panelPrivate = true // ADR-X5: observation only runs on a magmux whose panel is on-box
 	if err := m.startObservation(newSilentPaneRegistry(t, pid, "busy")); err != nil {
 		t.Fatalf("startObservation: %v", err)
 	}

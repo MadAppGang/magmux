@@ -187,6 +187,7 @@ func TestNavigateInsideMagmuxMovesFocusAndIsAudited(t *testing.T) {
 	// ever signals this pid.
 	givePID(t, m.paneByID(1), 4242)
 
+	m.panelPrivate = true // ADR-X5: observation only runs on a magmux whose panel is on-box
 	if err := m.startObservationWith(obsConfig{
 		Root: dir,
 		// No oracle: liveness stays undetermined, which is honest and is what
@@ -290,6 +291,7 @@ func TestNavigateIsRefusedWhenTheZeroPolicyIsInForce(t *testing.T) {
 
 	m := newTestMux(t, ctrlPanes(2)...)
 	givePID(t, m.paneByID(1), 4242)
+	m.panelPrivate = true // ADR-X5: observation only runs on a magmux whose panel is on-box
 	if err := m.startObservationWith(obsConfig{Root: dir, AuditPath: trail}); err != nil {
 		t.Fatalf("startObservationWith: %v", err)
 	}
@@ -328,6 +330,7 @@ func TestAnActionIsRefusedWhenThereIsNoTrailToRecordItIn(t *testing.T) {
 
 	m := newTestMux(t, ctrlPanes(2)...)
 	givePID(t, m.paneByID(1), 4242)
+	m.panelPrivate = true // ADR-X5: observation only runs on a magmux whose panel is on-box
 	if err := m.startObservationWith(obsConfig{Root: dir, Policy: act.Default()}); err != nil {
 		t.Fatalf("startObservationWith: %v", err)
 	}
@@ -365,6 +368,7 @@ func TestObservationRefusesAnAuditPathUnderClaude(t *testing.T) {
 	stageRegistry(t, dir, 4242, "id-a", "session-a")
 
 	m := newTestMux(t, ctrlPanes(1)...)
+	m.panelPrivate = true // ADR-X5: observation only runs on a magmux whose panel is on-box
 	err := m.startObservationWith(obsConfig{
 		Root:      dir,
 		Policy:    act.Default(),

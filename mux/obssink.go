@@ -34,6 +34,8 @@ package mux
 // CLONE and what it derives is derived before anything is stored.
 
 import (
+	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -200,4 +202,31 @@ func (m *Magmux) stopObsSink() {
 	m.obsSinkDone = nil
 	m.obsDoc.stop()
 	m.control.clearAttention()
+}
+
+// fleetPayload turns the document into the map the socket reply carries.
+//
+// # It is a round trip through encoding/json, deliberately
+//
+// requirements.md R4.1 says the socket verb, the MCP tool and the CLI return
+// "the identical document", and R4.3 says the panel's content must match it
+// exactly. The cheapest way to make that a PROPERTY rather than a promise is
+// for every surface to render the same obs.Fleet, and for the wire one to be
+// the marshalled Fleet itself rather than a map assembled by hand beside it.
+// A hand-built map is a second copy of architecture-v4 §9's key table, and a
+// second copy of a table is how two spellings drift.
+//
+// The cost is one marshal and one unmarshal per request, at human rate, on a
+// socket goroutine. The socket protocol's reply type is a map, so something
+// has to produce one; this produces it from the only definition there is.
+func fleetPayload(f obs.Fleet) (map[string]any, error) {
+	data, err := json.Marshal(f)
+	if err != nil {
+		return nil, fmt.Errorf("encoding the session document: %w", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("re-reading the session document: %w", err)
+	}
+	return out, nil
 }
