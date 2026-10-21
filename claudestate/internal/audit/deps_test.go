@@ -17,6 +17,7 @@ package audit
 
 import (
 	"fmt"
+	"go/ast"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -31,8 +32,9 @@ const (
 	pinFsnotify
 )
 
-// currentPin is the state this commit is in.
-const currentPin = pinNothing
+// currentPin is the state this commit is in: watch/ exists and imports
+// fsnotify, so the module requires it.
+const currentPin = pinFsnotify
 
 const (
 	fsnotifyModule  = "github.com/fsnotify/fsnotify"
@@ -163,6 +165,11 @@ func TestTheDependencySetIsExactlyWhatWasDecided(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "go.sum")); err == nil && currentPin == pinNothing {
 		t.Error("go.sum exists, but the module requires nothing")
 	}
+	if currentPin == pinFsnotify {
+		if got := regressionVersion(t); got != fsnotifyVersion {
+			t.Errorf("watch/fsnotify_regression_test.go (G11) names fsnotify %q, the pin %q: bump them together, and re-run G11 and G12 against the new version", got, fsnotifyVersion)
+		}
+	}
 }
 
 func TestThePinGuardActuallyDetectsDrift(t *testing.T) {
@@ -206,4 +213,34 @@ func TestThePinGuardActuallyDetectsDrift(t *testing.T) {
 	if got := importProblems([]file{snippet(t, "join/zz.go", root)}, pinFsnotify); len(got) != 1 {
 		t.Errorf("a magmux import: %d findings, want 1", len(got))
 	}
+}
+
+// regressionVersion reads the fsnotifyVersion constant G11 was measured
+// against, from the test file that moved with the watcher.
+func regressionVersion(t *testing.T) string {
+	t.Helper()
+	const rel = "watch/fsnotify_regression_test.go"
+	for _, f := range loadModule(t) {
+		if f.Rel != rel {
+			continue
+		}
+		for _, decl := range f.AST.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || len(vs.Names) != 1 || vs.Names[0].Name != "fsnotifyVersion" || len(vs.Values) != 1 {
+					continue
+				}
+				if s, ok := stringLit(vs.Values[0]); ok {
+					return s
+				}
+			}
+		}
+		t.Fatalf("%s has no string constant fsnotifyVersion", rel)
+	}
+	t.Fatalf("%s is missing: G11 must exist while the module requires fsnotify", rel)
+	return ""
 }

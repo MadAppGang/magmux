@@ -66,6 +66,12 @@ jobs:
             exit 1
           fi
 
+      # watch/'s linux budget is a quarter of max_user_watches (D15). Printed so
+      # a red watch test on a runner can be read against the runner's limits.
+      - name: inotify limits (informational)
+        if: runner.os == 'Linux'
+        run: cat /proc/sys/fs/inotify/max_user_watches /proc/sys/fs/inotify/max_user_instances
+
   # Validate the release config on every push, because otherwise nothing does
   # until a tag is pushed — and by then the tag is immutable and the failure
   # costs a renumbered release. This is not theoretical: the v0.12.0 cask
