@@ -46,8 +46,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
-	"github.com/MadAppGang/magmux/internal/obs/pipeline"
+	"github.com/MadAppGang/magmux/claudestate/pipeline"
 	"github.com/MadAppGang/magmux/obsview"
 	"github.com/MadAppGang/magmux/theme"
 )
@@ -149,7 +148,7 @@ type ctrlAttention struct {
 // It runs on the SINK's goroutine holding no lock at all — that is the whole
 // point of deriving here rather than at paint time — and it reads a clone the
 // sink already took, so it retains nothing of the shared document.
-func attentionOf(doc obs.Fleet, at time.Time, d pipeline.Delivery) ctrlAttention {
+func attentionOf(doc obsview.Fleet, at time.Time, d pipeline.Delivery) ctrlAttention {
 	v := ctrlAttention{
 		have:     true,
 		epoch:    doc.Epoch,
@@ -307,7 +306,7 @@ func (cp *ControlPanel) hasAttention() bool {
 // the same rules — "-" for undetermined everywhere except the attention
 // column, which spells its third state "?" because a dash beside a "no" in the
 // same column is read as another no. That is not a coincidence to be
-// maintained by hand: both renderings are derived from one obs.Fleet, and
+// maintained by hand: both renderings are derived from one obsview.Fleet, and
 // TestTheThreeSurfacesAgree walks a document through all three.
 //
 // What it does not show is anything about the controller: no `sent`, no

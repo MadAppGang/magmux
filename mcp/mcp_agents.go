@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/MadAppGang/magmux/client"
-	"github.com/MadAppGang/magmux/internal/obs"
 	"github.com/MadAppGang/magmux/obsview"
 	"github.com/MadAppGang/magmux/protocol"
 )
@@ -84,12 +83,12 @@ func toolListAgents(ctx context.Context, s *mcpServer, raw json.RawMessage) (map
 // observeFleet asks one magmux for the session-observation document over the
 // socket `agents` verb.
 //
-// # It decodes into obs.Fleet, and that is not an exception to client's
+// # It decodes into obsview.Fleet, and that is not an exception to client's
 // no-shared-types rule
 //
 // The client package keeps wire shapes of its own, because the MCP server is a
 // separate process from the multiplexer and a type shared with mux's socket
-// layer would couple two programs that only speak JSON. obs.Fleet is not one
+// layer would couple two programs that only speak JSON. obsview.Fleet is not one
 // of those types: it is the DEFINITION of the document, and both ends of this
 // hop are rendering it rather than passing magmux's internals through. A
 // second, hand-written decoder here would be a second copy of that key table —
@@ -97,11 +96,12 @@ func toolListAgents(ctx context.Context, s *mcpServer, raw json.RawMessage) (map
 // document, which is a property one definition has and two spellings do not.
 //
 // It lives in mcp rather than on client.Session because client is a PUBLIC
-// package and the document's types are internal to this module.
-func observeFleet(ctx context.Context, sess *client.Session) (obs.Fleet, error) {
+// package with no dependency on the observation layer, and obsview is that
+// layer's wire.
+func observeFleet(ctx context.Context, sess *client.Session) (obsview.Fleet, error) {
 	res, err := sess.Request(ctx, map[string]any{"type": "agents"}, client.ReadTimeout)
 	if err != nil {
-		return obs.Fleet{}, err
+		return obsview.Fleet{}, err
 	}
 	// Back through JSON rather than by walking the map: the reply is the
 	// marshalled document (see mux's fleetPayload), so re-marshalling the map
@@ -109,11 +109,11 @@ func observeFleet(ctx context.Context, sess *client.Session) (obs.Fleet, error) 
 	// cannot spell a key differently.
 	data, err := json.Marshal(res)
 	if err != nil {
-		return obs.Fleet{}, fmt.Errorf("re-encoding the session document: %w", err)
+		return obsview.Fleet{}, fmt.Errorf("re-encoding the session document: %w", err)
 	}
-	var fleet obs.Fleet
+	var fleet obsview.Fleet
 	if err := json.Unmarshal(data, &fleet); err != nil {
-		return obs.Fleet{}, fmt.Errorf("reading the session document: %w", err)
+		return obsview.Fleet{}, fmt.Errorf("reading the session document: %w", err)
 	}
 	return fleet, nil
 }

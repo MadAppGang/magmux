@@ -13,7 +13,7 @@ import (
 //
 // # There are two Tiers in this layer and they are not related
 //
-// obs.Tier is a CONFIDENCE tier — inferred or authoritative — and says where a
+// obsview.Tier (the wire's spelling of claudestate's model.Confidence) is a CONFIDENCE tier — inferred or authoritative — and says where a
 // FACT came from. This one is an ACTION tier and says how dangerous a CHANGE
 // is. They share a name because both requirements.md and the architecture
 // amendment call them that, and renaming one here would put this package's
@@ -190,7 +190,7 @@ const VerbFocus = "focus"
 // There is deliberately no entry for a deferred tier's verbs. Nothing
 // implements them, and the name R5.4's restart will have is a decision for
 // whoever builds it — a vocabulary invented ahead of its design is the one
-// the claudecode package doc warns is guaranteed to be wrong. An undeclared
+// this layer has always called guaranteed to be wrong. An undeclared
 // name is refused here as unknown, which is the same answer those tiers get
 // from [Tier.Deferred] by every other route.
 //
@@ -294,7 +294,7 @@ type Request struct {
 //
 // # It is per session, and "cannot" is not "will not"
 //
-// A middleware is built per session (see pipeline.Middleware), so this list is
+// A stage is built per session (see claudestate's stage.Factory), so this list is
 // already about one session and needs no target parameter. A capability that
 // cannot be performed FOR THIS SESSION is not declared for it — a session with
 // no pane cannot be navigated to, and saying so by omission is different from
@@ -352,8 +352,9 @@ type Result struct {
 // ToolController: a middleware that only enriches does not implement it and
 // must not be forced to pretend.
 //
-// pipeline.Actuating is the interface an actor asserts; it is this one plus
-// pipeline.Middleware, and it lives there because the actor is there.
+// magmux reaches it through pipeline.Ops.Call, which runs on the session's
+// actor and finds the stage by name (mux's actuatorOver): the library knows
+// nothing of this interface, and needs to know nothing.
 //
 // # Both methods run on the ACTOR's goroutine
 //

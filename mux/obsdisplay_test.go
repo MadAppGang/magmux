@@ -11,10 +11,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/claudestate/pipeline"
 	"github.com/MadAppGang/magmux/internal/obs/act"
 	"github.com/MadAppGang/magmux/internal/obs/notify"
-	"github.com/MadAppGang/magmux/internal/obs/pipeline"
 	"github.com/MadAppGang/magmux/obsview"
 )
 
@@ -96,7 +96,7 @@ var magmuxSGR = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
 // attentionFrame paints the attention view for a fleet, exactly as the panel
 // would, and returns it with magmux's own SGR removed.
-func attentionFrame(fleet obs.Fleet) string {
+func attentionFrame(fleet obsview.Fleet) string {
 	cp := newControlPanel()
 	cp.setAttention(attentionOf(fleet, obsEpoch, pipeline.Delivery{}))
 	cp.mu.Lock()
@@ -109,41 +109,52 @@ func attentionFrame(fleet obs.Fleet) string {
 // hostileSession is one session whose every registry-derived string is
 // hostile: its name, its raw status and waiting words, the reason the verdict
 // wrote (which embeds a transcript's own error text), and a conflict detail.
-func hostileSession() obs.Session {
+func hostileSession() obsview.Session {
 	since := obsEpoch.Add(-3 * time.Minute)
-	return obs.Session{
+	return obsview.Session{
 		ID: "a1478d55-6e02-4bb9-93cf-01d2e8f47a6b", PID: 4242,
 		Name:         hostileText,
-		PaneID:       obs.Ptr(1),
+		PaneID:       obsPtr(1),
 		StatusRaw:    hostileText,
 		WaitingRaw:   hostileText,
 		StatusSince:  &since,
-		ProcessAlive: obs.LivenessYes,
-		Attention: obs.Attention{
-			Needed: obs.Ptr(true),
+		ProcessAlive: obsview.LivenessYes,
+		Attention: obsview.Attention{
+			Needed: obsPtr(true),
 			Reason: "it has hit an API-level error: " + hostileText,
 		},
-		Conflict: &obs.Conflict{
-			Tier:   obs.TierInferred,
-			Status: obs.StatusIdle,
+		Conflict: &obsview.Conflict{
+			Tier:   obsview.TierInferred,
+			Status: obsview.StatusIdle,
 			Detail: hostileText,
 		},
 	}
 }
 
-func hostileFleet() obs.Fleet {
-	return obs.Fleet{Epoch: obsEpoch, Sessions: []obs.Session{hostileSession()}}
+func hostileFleet() obsview.Fleet {
+	return obsview.Fleet{Epoch: obsEpoch, Sessions: []obsview.Session{hostileSession()}}
+}
+
+// hostileModelSession is hostileSession as the library's model carries it, for
+// the surface that is handed a model.Session: the notification.
+func hostileModelSession() model.Session {
+	since := obsEpoch.Add(-3 * time.Minute)
+	return model.Session{
+		Key: model.Key{SessionID: "a1478d55-6e02-4bb9-93cf-01d2e8f47a6b", PID: 4242}, PID: 4242,
+		Name: hostileText, StatusRaw: hostileText, WaitingRaw: hostileText, StatusSince: &since,
+		ProcessAlive: model.LivenessYes,
+	}
 }
 
 // cleanFleet is the same shape with nothing hostile in it — the control that
 // proves a surface's OWN output passes the check, so that a failure below is
 // about the registry text and not about magmux's framing.
-func cleanFleet() obs.Fleet {
+func cleanFleet() obsview.Fleet {
 	s := hostileSession()
 	s.Name, s.StatusRaw, s.WaitingRaw = "plain-name", "compacting", "dialog open"
 	s.Attention.Reason = "it has hit an API-level error: overloaded"
 	s.Conflict.Detail = "the pane has produced nothing for 45m"
-	return obs.Fleet{Epoch: obsEpoch, Sessions: []obs.Session{s}}
+	return obsview.Fleet{Epoch: obsEpoch, Sessions: []obsview.Session{s}}
 }
 
 // TestRegistryTextReachesNoTerminalWithItsControlsIntact is item 3's test:
@@ -182,7 +193,7 @@ func TestRegistryTextReachesNoTerminalWithItsControlsIntact(t *testing.T) {
 			script = s
 			return nil
 		}}
-		note := notify.Note{Session: hostileSession(), On: act.NotifyOnWaiting, For: 3 * time.Minute}
+		note := notify.Note{Session: hostileModelSession(), On: act.NotifyOnWaiting, For: 3 * time.Minute}
 		if err := n.Send(context.Background(), note); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -281,3 +292,7 @@ func readSource(t *testing.T, name string) string {
 	}
 	return string(body)
 }
+
+// obsPtr is a pointer to a copy of v, for the optional fields of the
+// observation types.
+func obsPtr[T any](v T) *T { return &v }

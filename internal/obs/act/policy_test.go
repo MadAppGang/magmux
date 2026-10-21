@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
 )
 
 // TestTheZeroPolicyRefusesEverythingIncludingNavigate is the most important
@@ -24,7 +24,7 @@ import (
 func TestTheZeroPolicyRefusesEverythingIncludingNavigate(t *testing.T) {
 	var zero Policy
 	for _, tier := range []Tier{TierUnknown, TierNavigate, TierApprove, TierSend, TierLifecycle} {
-		d := zero.Decide(tier, obs.Session{})
+		d := zero.Decide(tier, model.Session{})
 		if d.Allowed {
 			t.Errorf("the ZERO policy allows %s — a struct literal that says nothing about "+
 				"policy must not be able to act", tier)
@@ -97,7 +97,7 @@ func TestEveryDecisionNamesWhatAuthorisedIt(t *testing.T) {
 			case TierLifecycle:
 				p.Actions.Lifecycle = stance
 			}
-			d := p.Decide(tier, obs.Session{})
+			d := p.Decide(tier, model.Session{})
 			if strings.TrimSpace(d.Rule) == "" {
 				t.Errorf("%s at stance %s decided with no rule named", tier, stance)
 			}
@@ -115,7 +115,7 @@ func TestEveryDecisionNamesWhatAuthorisedIt(t *testing.T) {
 
 	// A policy nobody named still decides, and says that nobody named it.
 	// An empty rule would be refused by the writer; an honest one is not.
-	if d := (Policy{}).Decide(TierNavigate, obs.Session{}); !strings.Contains(d.Rule, "unnamed") {
+	if d := (Policy{}).Decide(TierNavigate, model.Session{}); !strings.Contains(d.Rule, "unnamed") {
 		t.Errorf("an unnamed policy's rule is %q", d.Rule)
 	}
 }
@@ -147,7 +147,7 @@ func TestRuleStanceAllowsOnlyAMatchingSession(t *testing.T) {
 		{"no launch directory at all", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d := p.Decide(TierNavigate, obs.Session{LaunchDir: tc.launchDir})
+			d := p.Decide(TierNavigate, model.Session{LaunchDir: tc.launchDir})
 			if d.Allowed != tc.want {
 				t.Fatalf("allowed=%v want %v (rule: %s)", d.Allowed, tc.want, d.Rule)
 			}
@@ -163,7 +163,7 @@ func TestRuleStanceAllowsOnlyAMatchingSession(t *testing.T) {
 			Actions: Actions{Navigate: StanceRule},
 			Rules:   []Rule{{Do: TierNavigate}},
 		}
-		if d := open.Decide(TierNavigate, obs.Session{LaunchDir: "/anywhere"}); d.Allowed {
+		if d := open.Decide(TierNavigate, model.Session{LaunchDir: "/anywhere"}); d.Allowed {
 			t.Fatal("a rule with no match clause authorised a session; an absent pattern " +
 				"must match NOTHING, or a half-written rule is blanket permission")
 		}
@@ -175,7 +175,7 @@ func TestRuleStanceAllowsOnlyAMatchingSession(t *testing.T) {
 			Actions: Actions{Navigate: StanceRule},
 			Rules:   []Rule{{Do: TierSend, LaunchDir: "/Users/j/mag/**"}},
 		}
-		if d := crossed.Decide(TierNavigate, obs.Session{LaunchDir: "/Users/j/mag/x"}); d.Allowed {
+		if d := crossed.Decide(TierNavigate, model.Session{LaunchDir: "/Users/j/mag/x"}); d.Allowed {
 			t.Fatal("a send rule authorised a navigate")
 		}
 	})
@@ -245,7 +245,7 @@ func TestLoadAlwaysYieldsAUsableAndSafePolicy(t *testing.T) {
 			t.Fatalf("Load: %v", err)
 		}
 		rules[0].LaunchDir = "/**"
-		if d := p.Decide(TierNavigate, obs.Session{LaunchDir: "/somewhere/else"}); d.Allowed {
+		if d := p.Decide(TierNavigate, model.Session{LaunchDir: "/somewhere/else"}); d.Allowed {
 			t.Fatal("mutating the caller's slice changed a loaded policy's decision")
 		}
 	})

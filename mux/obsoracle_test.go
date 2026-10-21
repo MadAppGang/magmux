@@ -3,13 +3,14 @@ package mux
 // The liveness oracle is INJECTED, and this file is the proof that no test can
 // reach the real one.
 //
-// `obsOracle` sends kill(pid, 0) — which delivers no signal, but which does ask
+// claudestate's proclive.New() sends kill(pid, 0) — which delivers no signal, but which does ask
 // the kernel about a pid that belongs to somebody else's process on whatever
 // machine is running the suite. testdata/PROVENANCE.md rule 2 forbids that
 // outright, and the reason it gives is not "signals are dangerous" but that a
 // test's answer must not depend on what else happens to be running.
 
 import (
+	"context"
 	"go/ast"
 	"go/build/constraint"
 	"go/parser"
@@ -24,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
 )
 
 // fakeOracle is the liveness answer a test supplies instead of the kernel's.
@@ -33,9 +34,9 @@ import (
 // their own goroutines, so an oracle that counted its calls would need a lock.
 // Anything absent from the map is undetermined, which is the honest answer for
 // a pid nobody asked about.
-type fakeOracle map[int]obs.Liveness
+type fakeOracle map[int]model.Liveness
 
-func (f fakeOracle) Alive(pid int) obs.Liveness { return f[pid] }
+func (f fakeOracle) Alive(pid int) model.Liveness { return f[pid] }
 
 // TestTheInjectedOracleDecidesLiveness exercises the seam rather than merely
 // asserting it exists, and takes attention rule 1 with it.
@@ -50,16 +51,16 @@ func TestTheInjectedOracleDecidesLiveness(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		oracle fakeOracle
-		want   obs.Liveness
+		want   model.Liveness
 		// needed is the attention verdict that liveness produces. A dead
 		// process is rule 1: there is nobody home to attend to.
 		needed *bool
 		reason string
 	}{
-		{"alive", fakeOracle{pid: obs.LivenessYes}, obs.LivenessYes, obs.Ptr(false), "it is working"},
-		{"dead", fakeOracle{pid: obs.LivenessNo}, obs.LivenessNo, obs.Ptr(false), "its process has exited"},
-		{"nobody could tell", fakeOracle{}, obs.LivenessUnknown, obs.Ptr(false), "it is working"},
-		{"no oracle at all", nil, obs.LivenessUnknown, obs.Ptr(false), "it is working"},
+		{"alive", fakeOracle{pid: model.LivenessYes}, model.LivenessYes, obsPtr(false), "it is working"},
+		{"dead", fakeOracle{pid: model.LivenessNo}, model.LivenessNo, obsPtr(false), "its process has exited"},
+		{"nobody could tell", fakeOracle{}, model.LivenessUnknown, obsPtr(false), "it is working"},
+		{"no oracle at all", nil, model.LivenessUnknown, obsPtr(false), "it is working"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			m := newTestMux(t, ctrlPanes(1)...)
@@ -73,11 +74,11 @@ func TestTheInjectedOracleDecidesLiveness(t *testing.T) {
 			}
 			defer m.stopObservation()
 
-			sub, err := m.obs.Subscribe("test", 0)
+			sub, err := m.obs.p.Subscribe(context.Background(), "test", 0)
 			if err != nil {
 				t.Fatalf("Subscribe: %v", err)
 			}
-			m.obs.Refresh()
+			m.obs.p.Refresh()
 			select {
 			case d, ok := <-sub.C():
 				if !ok || len(d.Doc.Sessions) != 1 {
@@ -111,26 +112,31 @@ func TestTheInjectedOracleDecidesLiveness(t *testing.T) {
 // a test disposing of a process it owns, which is not what rule 2 is about; see
 // the scope note on TestNoTestCanReachTheSignalOracle.
 var oracleBanned = map[string]string{
-	"obsOracle": "the observation layer's signal oracle itself",
-	"RunAgents": "`magmux agents`'s entry point, which installs that oracle",
+	"RunAgents":   "`magmux agents`'s entry point, which installs that oracle",
+	"runObsFocus": "`magmux agents focus`'s entry point, which installs it too",
 }
 
 // oracleBannedSelectors is the same ban for a package-qualified call: a test
-// that hand-rolled the probe rather than naming obsOracle. Resolved through the
-// file's imports, so a renamed import cannot slip past, which is the lesson
-// termev's ticker detector already learned.
+// that built the real oracle, or hand-rolled the probe. Resolved through the
+// file's imports, so a renamed import cannot slip past, which is the lesson the
+// ticker detector already learned.
 var oracleBannedSelectors = map[string]map[string]string{
-	"syscall": {"Kill": "syscall.Kill IS the probe, however it is spelled"},
+	"syscall":      {"Kill": "syscall.Kill IS the probe, however it is spelled"},
+	procliveImport: {"New": "proclive.New is the observation layer's signal oracle itself"},
 }
 
-// oracleProductionFiles is where naming obsOracle is CORRECT: the file that
-// defines it, and the two program entry points that install it.
+// procliveImport is the library package that holds the real oracle. No test may
+// import it at all (G8, host half): its only export IS the probe.
+const procliveImport = "github.com/MadAppGang/magmux/claudestate/proclive"
+
+// oracleProductionFiles is where calling proclive.New is CORRECT: the two program
+// entry points that install the oracle.
 //
 // Listed rather than counted, so that a third site is a deliberate edit to this
 // table with a reviewer attached — and so this test cannot pass vacuously if
 // the type is renamed and the ban above stops matching anything.
 var oracleProductionFiles = map[string]bool{
-	"mux/obscmd.go": true, // defines it, and installs it in RunAgents
+	"mux/obscmd.go": true, // installs it in RunAgents and runObsFocus
 	"mux/cli.go":    true, // installs it in Main, for startObservationIfEnabled
 }
 
@@ -163,14 +169,14 @@ var oracleKillAllowed = map[string]string{
 //
 // Every .go file the root module's default build compiles, in every package —
 // mux, internal/, hub, mcp, transport and the rest (see walkModuleGoFiles). The
-// oracle reaches the pipeline through registry.ProcessOracle, whose nil is
+// oracle reaches the pipeline through ports.ProcessOracle, whose nil is
 // documented as "undetermined" rather than "probe" — so a test that injects
 // nothing is safe by construction, and the only way to reach the probe is to
 // NAME something on the banned list.
 //
 // # What it claims, exactly
 //
-// That no test can reach obsOracle, and therefore that no observation-layer
+// That no test can reach proclive.New, and therefore that no observation-layer
 // test result depends on what else happens to be running. It does NOT claim
 // that no test anywhere asks the kernel about a pid, which would be false and
 // should be: sockdir.go's own pidIsGone has tests that fork a `sleep`, ask
@@ -207,7 +213,30 @@ func TestNoTestCanReachTheSignalOracle(t *testing.T) {
 		// that assumed the package's own name.
 		aliases := importAliases(file)
 
+		// G8, host half: no test imports the oracle's package at all.
+		if isTest {
+			for _, imp := range file.Imports {
+				if p, err := strconv.Unquote(imp.Path.Value); err == nil && p == procliveImport {
+					t.Errorf("%s: a test imports %s, whose only export is the signal oracle. "+
+						"Inject a fakeOracle, or nil, which the library answers with LivenessUnknown.",
+						fset.Position(imp.Pos()), procliveImport)
+				}
+			}
+		}
+
 		ast.Inspect(file, func(n ast.Node) bool {
+			// The one production call that installs the oracle, counted where
+			// it is correct and refused everywhere else.
+			if sel, ok := n.(*ast.SelectorExpr); ok && !isTest {
+				if x, ok := sel.X.(*ast.Ident); ok && aliases[x.Name] == procliveImport && sel.Sel.Name == "New" {
+					named++
+					if !oracleProductionFiles[rel] {
+						t.Errorf("%s: calls proclive.New. Only %v may install the signal oracle; "+
+							"add this file to oracleProductionFiles deliberately if that is wrong.",
+							fset.Position(sel.Pos()), keysOf(oracleProductionFiles))
+					}
+				}
+			}
 			// A package-qualified call first, because the selector's X is
 			// itself an Ident and would otherwise be judged on its own.
 			if sel, ok := n.(*ast.SelectorExpr); ok && isTest {
@@ -218,7 +247,7 @@ func TestNoTestCanReachTheSignalOracle(t *testing.T) {
 								killSeen[rel] = true
 							} else {
 								t.Errorf("%s: a test calls %s.%s — %s. Inject a fakeOracle, or nil, "+
-									"which registry answers with LivenessUnknown rather than a probe.",
+									"which the library answers with LivenessUnknown rather than a probe.",
 									fset.Position(sel.Pos()), x.Name, sel.Sel.Name, why)
 							}
 						}
@@ -229,21 +258,13 @@ func TestNoTestCanReachTheSignalOracle(t *testing.T) {
 			if !ok {
 				return true
 			}
-			if id.Name == "obsOracle" && !isTest {
-				named++
-				if !oracleProductionFiles[rel] {
-					t.Errorf("%s: names obsOracle. Only %v may install the signal oracle; "+
-						"add this file to oracleProductionFiles deliberately if that is wrong.",
-						fset.Position(id.Pos()), keysOf(oracleProductionFiles))
-				}
-			}
 			if !isTest {
 				return true
 			}
 			if why, bad := oracleBanned[id.Name]; bad {
 				t.Errorf("%s: a test names %q — %s. No test may reach the observation layer's "+
 					"pid probe (testdata/PROVENANCE.md rule 2); inject a fakeOracle, or nil, "+
-					"which registry answers with LivenessUnknown rather than a probe.",
+					"which the library answers with LivenessUnknown rather than a probe.",
 					fset.Position(id.Pos()), id.Name, why)
 			}
 			return true
@@ -266,10 +287,10 @@ func TestNoTestCanReachTheSignalOracle(t *testing.T) {
 		t.Fatalf("scanned %d test files and %d production files", scannedTests, scannedProd)
 	}
 	if named == 0 {
-		t.Fatal("no production file names obsOracle at all — either the oracle was renamed and " +
+		t.Fatal("no production file calls proclive.New at all — either the oracle was renamed and " +
 			"this test is now checking for a word nothing uses, or nothing installs it")
 	}
-	t.Logf("scanned %d test files and %d production files; obsOracle named %d times, all in %v",
+	t.Logf("scanned %d test files and %d production files; proclive.New called %d times, all in %v",
 		scannedTests, scannedProd, named, keysOf(oracleProductionFiles))
 }
 
@@ -412,8 +433,8 @@ const moduleRoot = ".."
 // # Why the whole module, and not this package
 //
 // The guards below were written when everything was package main in one
-// directory, and "." was the repository. It is not any more: obsOracle lives in
-// mux, and a test in hub, client, mcp, transport or internal/obs could reach
+// directory, and "." was the repository. It is not any more: the oracle is
+// installed in mux, and a test in hub, client, mcp, transport or internal/obs could reach
 // the probe just as well. The walk therefore starts at the module root and
 // covers every package `go test ./...` builds.
 //

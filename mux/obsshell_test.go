@@ -10,6 +10,7 @@ package mux
 // and reaps what it started.
 
 import (
+	"context"
 	"github.com/MadAppGang/magmux/pty"
 	"os"
 	"os/exec"
@@ -19,7 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/obsview"
 )
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -58,9 +60,9 @@ func staged(readings ...[2]int) func(*Pane) (int, int, bool) {
 
 // shellOf drives one observation through the real port and returns what the
 // layer would see.
-func shellOf(t *testing.T, l *muxPaneLocator, pane int) obs.ShellState {
+func shellOf(t *testing.T, l *muxPaneLocator, pane int) model.ShellState {
 	t.Helper()
-	st, ok := l.Shell(pane)
+	st, ok := l.Shell(obsview.PaneRef(pane))
 	if !ok {
 		t.Fatalf("pane %d: the shell port declined to answer", pane)
 	}
@@ -87,7 +89,7 @@ func TestForegroundEqualityIsWorthNothingUntilTheLatchIsProven(t *testing.T) {
 	// running or not. Ten looks, no flip.
 	l := &muxPaneLocator{m: m, foreground: staged([2]int{700, 700})}
 	for i := 0; i < 10; i++ {
-		if got := shellOf(t, l, 0).AtPrompt; got != obs.LivenessUnknown {
+		if got := shellOf(t, l, 0).AtPrompt; got != model.LivenessUnknown {
 			t.Fatalf("look %d answered %v; foreground equality means nothing until this pane "+
 				"has been seen to hand its terminal to something and take it back", i, got)
 		}
@@ -119,12 +121,12 @@ func TestTheLatchSetsOnTheFlipAndNotBefore(t *testing.T) {
 		[2]int{700, 700}, // still at the prompt
 	)}
 
-	want := []obs.Liveness{
-		obs.LivenessUnknown,
-		obs.LivenessNo,
-		obs.LivenessNo,
-		obs.LivenessYes,
-		obs.LivenessYes,
+	want := []model.Liveness{
+		model.LivenessUnknown,
+		model.LivenessNo,
+		model.LivenessNo,
+		model.LivenessYes,
+		model.LivenessYes,
 	}
 	for i, w := range want {
 		if got := shellOf(t, l, 0).AtPrompt; got != w {
@@ -161,11 +163,11 @@ func TestTheLatchOnlyEverSets(t *testing.T) {
 		if i >= 1 && !p.shell.proven {
 			t.Fatalf("look %d: the latch came un-set", i)
 		}
-		if i == 2 && got != obs.LivenessUnknown {
+		if i == 2 && got != model.LivenessUnknown {
 			t.Fatalf("look %d answered %v from a reading that failed", i, got)
 		}
 	}
-	if got := shellOf(t, l, 0).AtPrompt; got != obs.LivenessYes {
+	if got := shellOf(t, l, 0).AtPrompt; got != model.LivenessYes {
 		t.Fatalf("after a failed reading the proven latch answered %v, want yes", got)
 	}
 }
@@ -196,20 +198,20 @@ func TestTheLatchIsPerPane(t *testing.T) {
 	}}
 
 	for i := 0; i < 2; i++ {
-		l.Shell(0)
-		l.Shell(1)
+		l.Shell(obsview.PaneRef(0))
+		l.Shell(obsview.PaneRef(1))
 	}
-	if got := shellOf(t, l, 0).AtPrompt; got != obs.LivenessYes {
+	if got := shellOf(t, l, 0).AtPrompt; got != model.LivenessYes {
 		t.Errorf("pane 0 (flipped) answered %v, want yes", got)
 	}
-	if got := shellOf(t, l, 1).AtPrompt; got != obs.LivenessUnknown {
+	if got := shellOf(t, l, 1).AtPrompt; got != model.LivenessUnknown {
 		t.Errorf("pane 1 (never flipped) answered %v, want unknown — it borrowed pane 0's proof", got)
 	}
 }
 
 // TestAPaneWithNoTerminalDeclinesToAnswer.
 //
-// A WRONG IMPLEMENTATION returns a zero [obs.ShellState] with ok true, which
+// A WRONG IMPLEMENTATION returns a zero [model.ShellState] with ok true, which
 // downstream reads as "this shell says nothing is running" — indistinguishable
 // from a real shell that emits no marks. magmux's own control panel has no PTY
 // and never will, and a closed pane's master is closed.
@@ -217,13 +219,13 @@ func TestAPaneWithNoTerminalDeclinesToAnswer(t *testing.T) {
 	m := newTestMux(t, ctrlPanes(1)...)
 	l := &muxPaneLocator{m: m, foreground: staged([2]int{700, 700})}
 
-	if _, ok := l.Shell(0); ok {
+	if _, ok := l.Shell(obsview.PaneRef(0)); ok {
 		t.Error("a pane with no PTY answered the shell port")
 	}
-	if _, ok := l.Shell(404); ok {
+	if _, ok := l.Shell(obsview.PaneRef(404)); ok {
 		t.Error("a pane that does not exist answered the shell port")
 	}
-	if _, ok := l.Shell(-1); ok {
+	if _, ok := l.Shell(obsview.PaneRef(-1)); ok {
 		t.Error("a negative id is not an address, and it answered")
 	}
 }
@@ -251,15 +253,15 @@ func writeOSC(p *Pane, body string) {
 func TestOSC133IsParsedIntoTheTwoStatesThatMatter(t *testing.T) {
 	for _, tt := range []struct {
 		body string
-		want obs.ShellMark
+		want model.ShellMark
 	}{
-		{"133;A", obs.ShellMarkPrompt},
-		{"133;B", obs.ShellMarkPrompt},
-		{"133;C", obs.ShellMarkRunning},
-		{"133;D", obs.ShellMarkPrompt},
-		{"133;D;0", obs.ShellMarkPrompt},
-		{"133;A;aid=7", obs.ShellMarkPrompt},
-		{"133;C;cmdline=make%20all", obs.ShellMarkRunning},
+		{"133;A", model.ShellMarkPrompt},
+		{"133;B", model.ShellMarkPrompt},
+		{"133;C", model.ShellMarkRunning},
+		{"133;D", model.ShellMarkPrompt},
+		{"133;D;0", model.ShellMarkPrompt},
+		{"133;A;aid=7", model.ShellMarkPrompt},
+		{"133;C;cmdline=make%20all", model.ShellMarkRunning},
 	} {
 		t.Run(tt.body, func(t *testing.T) {
 			p := markPane(t)
@@ -337,7 +339,7 @@ func TestUnknownMembersOfThe133FamilyAreIgnored(t *testing.T) {
 	writeOSC(p, "133;C")
 	for _, body := range []string{"133;P;k=i", "133;E;cmdline=ls", "133;Z", "133;"} {
 		writeOSC(p, body)
-		if p.shell.mark != obs.ShellMarkRunning {
+		if p.shell.mark != model.ShellMarkRunning {
 			t.Fatalf("%s changed the mark to %v", body, p.shell.mark)
 		}
 	}
@@ -393,13 +395,13 @@ func TestTheMarksReachTheLayerThroughThePort(t *testing.T) {
 	l := &muxPaneLocator{m: m, foreground: staged([2]int{0, 0})}
 
 	writeOSC(p, "133;C")
-	if got := shellOf(t, l, 0); got.Mark != obs.ShellMarkRunning || got.Exit != nil {
+	if got := shellOf(t, l, 0); got.Mark != model.ShellMarkRunning || got.Exit != nil {
 		t.Fatalf("port reported %+v, want a running command and no status", got)
 	}
 
 	writeOSC(p, "133;D;2")
 	got := shellOf(t, l, 0)
-	if got.Mark != obs.ShellMarkPrompt {
+	if got.Mark != model.ShellMarkPrompt {
 		t.Fatalf("port reported mark %v, want prompt", got.Mark)
 	}
 	if got.Exit == nil {
@@ -563,11 +565,11 @@ func TestStartObservationWiresTheShellPort(t *testing.T) {
 	}
 	defer m.stopObservation()
 
-	sub, err := m.obs.Subscribe("test", 0)
+	sub, err := m.obs.p.Subscribe(context.Background(), "test", 0)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
-	m.obs.Refresh()
+	m.obs.p.Refresh()
 	select {
 	case d, ok := <-sub.C():
 		if !ok || len(d.Doc.Sessions) != 1 {
@@ -668,7 +670,7 @@ func TestANonInteractiveShellRunningACommandReportsUndetermined(t *testing.T) {
 				equal++
 			}
 		}
-		if got := shellOf(t, l, 0).AtPrompt; got == obs.LivenessYes {
+		if got := shellOf(t, l, 0).AtPrompt; got == model.LivenessYes {
 			t.Fatalf("look %d reported at-prompt from a shell that has never been seen to "+
 				"hand its terminal to anything (fg=%d leader=%d)", looks, fg, leader)
 		}
@@ -708,7 +710,7 @@ func TestAnInteractiveShellProvesJobControlAndThenMeansSomething(t *testing.T) {
 	// Let the shell reach its prompt, then give it something that takes the
 	// terminal away from it.
 	time.Sleep(400 * time.Millisecond)
-	if got := shellOf(t, l, 0).AtPrompt; got == obs.LivenessYes {
+	if got := shellOf(t, l, 0).AtPrompt; got == model.LivenessYes {
 		t.Fatalf("answered at-prompt %v before any flip had been seen", got)
 	}
 	if _, err := p.ptmx.WriteString("sleep 1\n"); err != nil {
@@ -719,9 +721,9 @@ func TestAnInteractiveShellProvesJobControlAndThenMeansSomething(t *testing.T) {
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) && !sawPrompt {
 		switch got := shellOf(t, l, 0).AtPrompt; got {
-		case obs.LivenessNo:
+		case model.LivenessNo:
 			sawForeign = true
-		case obs.LivenessYes:
+		case model.LivenessYes:
 			if !sawForeign {
 				t.Fatal("answered at-prompt without ever having seen the terminal leave the shell")
 			}

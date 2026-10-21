@@ -9,6 +9,7 @@ package mux
 
 import (
 	"bytes"
+	"context"
 	"github.com/MadAppGang/magmux/obsview"
 	"os"
 	"path/filepath"
@@ -19,9 +20,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
-	"github.com/MadAppGang/magmux/internal/obs/pipeline"
-	"github.com/MadAppGang/magmux/internal/obs/verdict"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/claudestate/pipeline"
+	"github.com/MadAppGang/magmux/claudestate/ports"
+	"github.com/MadAppGang/magmux/claudestate/verdict"
 )
 
 // stamp writes the two instants the activity port reads, exactly where magmux
@@ -51,7 +53,7 @@ func TestTheActivityPortReadsThePaneStamps(t *testing.T) {
 	in := time.Now().Add(-40 * time.Minute)
 	stampActivity(t, m.paneByID(1), out, in)
 
-	gotOut, gotIn, ok := loc.Activity(1)
+	gotOut, gotIn, ok := loc.Activity(obsview.PaneRef(1))
 	if !ok {
 		t.Fatal("Activity reported no such pane for a live one")
 	}
@@ -67,7 +69,7 @@ func TestTheActivityPortReadsThePaneStamps(t *testing.T) {
 // ok true, not as "there is no such pane".
 func TestAPaneThatHasDoneNothingReportsZeroInstantsAndNotAnAbsence(t *testing.T) {
 	m := newTestMux(t, ctrlPanes(1)...)
-	out, in, ok := newPaneLocator(m).Activity(0)
+	out, in, ok := newPaneLocator(m).Activity(obsview.PaneRef(0))
 	if !ok {
 		t.Fatal("a pane that has produced nothing was reported as absent")
 	}
@@ -89,7 +91,7 @@ func TestTheActivityPortRefusesAPaneThatIsNotThere(t *testing.T) {
 	}
 
 	for _, id := range []int{1, 99, -1} {
-		if _, _, ok := loc.Activity(id); ok {
+		if _, _, ok := loc.Activity(obsview.PaneRef(id)); ok {
 			t.Errorf("Activity(%d) answered for a pane that is not there", id)
 		}
 	}
@@ -117,8 +119,8 @@ func TestActivityIsSafeForEveryActorAtOnce(t *testing.T) {
 					return
 				default:
 				}
-				loc.Activity(0)
-				loc.Activity(2)
+				loc.Activity(obsview.PaneRef(0))
+				loc.Activity(obsview.PaneRef(2))
 			}
 		}()
 	}
@@ -166,24 +168,16 @@ func TestInsideAMagmuxASilentPaneContradictsABusyRecord(t *testing.T) {
 	stampActivity(t, m.paneByID(0), time.Now().Add(-30*time.Minute), time.Time{})
 
 	loc := newPaneLocator(m)
-	p, err := pipeline.Start(pipeline.Config{
-		Root:     newSilentPaneRegistry(t, pid, "busy"),
-		Locator:  loc,
-		Activity: loc,
-		Now:      time.Now,
-	})
-	if err != nil {
-		t.Fatalf("pipeline.Start: %v", err)
-	}
+	p := startHostPipeline(t, newSilentPaneRegistry(t, pid, "busy"), pipeline.Config{Locator: loc, Activity: loc})
 	defer p.Stop()
 
-	sub, err := p.Subscribe("test", 0)
+	sub, err := p.Subscribe(context.Background(), "test", 0)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	p.Refresh()
 
-	var s obs.Session
+	var s model.Session
 	select {
 	case d, ok := <-sub.C():
 		if !ok || len(d.Doc.Sessions) != 1 {
@@ -194,10 +188,10 @@ func TestInsideAMagmuxASilentPaneContradictsABusyRecord(t *testing.T) {
 		t.Fatal("no document arrived")
 	}
 
-	if s.PaneID == nil || *s.PaneID != 0 {
-		t.Fatalf("the session was matched to pane %v, want 0", s.PaneID)
+	if s.Pane != obsview.PaneRef(0) {
+		t.Fatalf("the session was matched to pane %q, want 0", s.Pane)
 	}
-	if s.Status != obs.StatusBusy || s.Confidence != obs.TierAuthoritative {
+	if s.Status != model.StatusBusy || s.Confidence != model.ConfidenceAuthoritative {
 		t.Fatalf("published %v/%v, want busy/authoritative — the record must win",
 			s.Status, s.Confidence)
 	}
@@ -205,7 +199,7 @@ func TestInsideAMagmuxASilentPaneContradictsABusyRecord(t *testing.T) {
 		t.Fatal("half an hour of silence against a busy record published no conflict; " +
 			"the losing tier was dropped")
 	}
-	if s.Conflict.Tier != obs.TierInferred || s.Conflict.Status != obs.StatusIdle {
+	if s.Conflict.Confidence != model.ConfidenceInferred || s.Conflict.Status != model.StatusIdle {
 		t.Errorf("conflict is %+v, want the inferred tier reporting idle", *s.Conflict)
 	}
 	if s.Attention.Needed != nil {
@@ -229,18 +223,10 @@ func TestALivePaneNeverContradictsItsOwnRecord(t *testing.T) {
 	stampActivity(t, m.paneByID(0), time.Now(), time.Time{})
 
 	loc := newPaneLocator(m)
-	p, err := pipeline.Start(pipeline.Config{
-		Root:     newSilentPaneRegistry(t, pid, "busy"),
-		Locator:  loc,
-		Activity: loc,
-		Now:      time.Now,
-	})
-	if err != nil {
-		t.Fatalf("pipeline.Start: %v", err)
-	}
+	p := startHostPipeline(t, newSilentPaneRegistry(t, pid, "busy"), pipeline.Config{Locator: loc, Activity: loc})
 	defer p.Stop()
 
-	sub, err := p.Subscribe("test", 0)
+	sub, err := p.Subscribe(context.Background(), "test", 0)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -282,11 +268,11 @@ func TestStartObservationWiresTheActivityPort(t *testing.T) {
 	}
 	defer m.stopObservation()
 
-	sub, err := m.obs.Subscribe("test", 0)
+	sub, err := m.obs.p.Subscribe(context.Background(), "test", 0)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
-	m.obs.Refresh()
+	m.obs.p.Refresh()
 	select {
 	case d, ok := <-sub.C():
 		if !ok || len(d.Doc.Sessions) != 1 {
@@ -303,9 +289,9 @@ func TestStartObservationWiresTheActivityPort(t *testing.T) {
 
 // ── the table ───────────────────────────────────────────────────────────────
 
-func renderTable(sessions ...obs.Session) string {
+func renderTable(sessions ...obsview.Session) string {
 	var buf bytes.Buffer
-	obsview.WriteFleetTable(&buf, obs.Fleet{Epoch: time.Unix(1789545200, 0), Sessions: sessions})
+	obsview.WriteFleetTable(&buf, obsview.Fleet{Epoch: time.Unix(1789545200, 0), Sessions: sessions})
 	return buf.String()
 }
 
@@ -319,9 +305,9 @@ func renderTable(sessions ...obs.Session) string {
 // carried the distinction all the way to the terminal.
 func TestTheTableSpellsTheThreeAttentionStates(t *testing.T) {
 	out := renderTable(
-		obs.Session{PID: 1, Name: "needs-me", Attention: obs.Attention{Needed: obs.Ptr(true), Reason: "it is waiting for you to type something"}},
-		obs.Session{PID: 2, Name: "fine", Attention: obs.Attention{Needed: obs.Ptr(false), Reason: "it is working"}},
-		obs.Session{PID: 3, Name: "cannot-tell", Attention: obs.Attention{Reason: "nothing is known about this session yet"}},
+		obsview.Session{PID: 1, Name: "needs-me", Attention: obsview.Attention{Needed: obsPtr(true), Reason: "it is waiting for you to type something"}},
+		obsview.Session{PID: 2, Name: "fine", Attention: obsview.Attention{Needed: obsPtr(false), Reason: "it is working"}},
+		obsview.Session{PID: 3, Name: "cannot-tell", Attention: obsview.Attention{Reason: "nothing is known about this session yet"}},
 	)
 	t.Logf("\n%s", out)
 
@@ -358,9 +344,9 @@ func TestTheTableSpellsTheThreeAttentionStates(t *testing.T) {
 // instruction to go and look with no indication of what at.
 func TestTheTableExplainsEveryVerdictWorthActingOn(t *testing.T) {
 	out := renderTable(
-		obs.Session{PID: 1, Name: "a", Attention: obs.Attention{Needed: obs.Ptr(true), Reason: "it is holding a permission prompt open, for 3m 0s"}},
-		obs.Session{PID: 2, Name: "b", Attention: obs.Attention{Needed: obs.Ptr(false), Reason: "it is working"}},
-		obs.Session{PID: 3, Name: "c", Attention: obs.Attention{Reason: `the tool reported a status this build does not recognise ("compacting")`}},
+		obsview.Session{PID: 1, Name: "a", Attention: obsview.Attention{Needed: obsPtr(true), Reason: "it is holding a permission prompt open, for 3m 0s"}},
+		obsview.Session{PID: 2, Name: "b", Attention: obsview.Attention{Needed: obsPtr(false), Reason: "it is working"}},
+		obsview.Session{PID: 3, Name: "c", Attention: obsview.Attention{Reason: `the tool reported a status this build does not recognise ("compacting")`}},
 	)
 	t.Logf("\n%s", out)
 
@@ -384,10 +370,10 @@ func TestTheTableExplainsEveryVerdictWorthActingOn(t *testing.T) {
 // into the one place a person looks would be resolution in silence again, one
 // layer further out.
 func TestTheTableShowsTheLosingTier(t *testing.T) {
-	out := renderTable(obs.Session{
-		PID: 1, Name: "wedged", Status: obs.StatusBusy, Confidence: obs.TierAuthoritative,
-		Conflict:  &obs.Conflict{Tier: obs.TierInferred, Status: obs.StatusIdle, Detail: "the pane has produced no output for 12m 0s"},
-		Attention: obs.Attention{Reason: "its own record says it is working, but the pane has produced no output for 12m 0s"},
+	out := renderTable(obsview.Session{
+		PID: 1, Name: "wedged", Status: obsview.StatusBusy, Confidence: obsview.TierAuthoritative,
+		Conflict:  &obsview.Conflict{Tier: obsview.TierInferred, Status: obsview.StatusIdle, Detail: "the pane has produced no output for 12m 0s"},
+		Attention: obsview.Attention{Reason: "its own record says it is working, but the pane has produced no output for 12m 0s"},
 	})
 	t.Logf("\n%s", out)
 
@@ -402,11 +388,11 @@ func TestTheTableShowsTheLosingTier(t *testing.T) {
 // ride along with a verdict reached by a gate or an API error, and then the
 // reason line never mentions it. The block is the only place it appears at all.
 func TestAConflictIsShownEvenWhenSomethingElseDecidedTheVerdict(t *testing.T) {
-	out := renderTable(obs.Session{
-		PID: 1, Name: "gone", Status: obs.StatusBusy, Confidence: obs.TierAuthoritative,
-		ProcessAlive: obs.LivenessNo,
-		Conflict:     &obs.Conflict{Tier: obs.TierInferred, Status: obs.StatusIdle, Detail: "silent for an hour"},
-		Attention:    obs.Attention{Needed: obs.Ptr(false), Reason: "its process has exited"},
+	out := renderTable(obsview.Session{
+		PID: 1, Name: "gone", Status: obsview.StatusBusy, Confidence: obsview.TierAuthoritative,
+		ProcessAlive: obsview.LivenessNo,
+		Conflict:     &obsview.Conflict{Tier: obsview.TierInferred, Status: obsview.StatusIdle, Detail: "silent for an hour"},
+		Attention:    obsview.Attention{Needed: obsPtr(false), Reason: "its process has exited"},
 	})
 	t.Logf("\n%s", out)
 
@@ -419,8 +405,8 @@ func TestAConflictIsShownEvenWhenSomethingElseDecidedTheVerdict(t *testing.T) {
 // trains a reader to skip the place the real line will appear.
 func TestATableOfSettledSessionsHasNoWhyBlock(t *testing.T) {
 	out := renderTable(
-		obs.Session{PID: 1, Name: "a", Attention: obs.Attention{Needed: obs.Ptr(false), Reason: "it is working"}},
-		obs.Session{PID: 2, Name: "b", Attention: obs.Attention{Needed: obs.Ptr(false), Reason: "nothing outstanding"}},
+		obsview.Session{PID: 1, Name: "a", Attention: obsview.Attention{Needed: obsPtr(false), Reason: "it is working"}},
+		obsview.Session{PID: 2, Name: "b", Attention: obsview.Attention{Needed: obsPtr(false), Reason: "nothing outstanding"}},
 	)
 	if strings.Contains(out, "why:") {
 		t.Fatalf("a table with nothing to act on printed a reason block:\n%s", out)
@@ -431,20 +417,20 @@ func TestATableOfSettledSessionsHasNoWhyBlock(t *testing.T) {
 // the table is one more thing a reader has to map back to --json.
 func TestTheTierColumnUsesTheWireWords(t *testing.T) {
 	for _, tt := range []struct {
-		tier obs.Tier
+		tier obsview.Tier
 		want string
 	}{
-		{obs.TierAuthoritative, "authoritative"},
-		{obs.TierInferred, "inferred"},
+		{obsview.TierAuthoritative, "authoritative"},
+		{obsview.TierInferred, "inferred"},
 	} {
-		out := renderTable(obs.Session{PID: 1, Name: "a", Confidence: tt.tier})
+		out := renderTable(obsview.Session{PID: 1, Name: "a", Confidence: tt.tier})
 		if !strings.Contains(out, tt.want) {
 			t.Errorf("the tier column does not spell %v as %q:\n%s", tt.tier, tt.want, out)
 		}
 	}
 	// An undetermined tier is a plain absence of an answer and takes the same
 	// dash as every other undetermined column.
-	out := renderTable(obs.Session{PID: 1, Name: "a"})
+	out := renderTable(obsview.Session{PID: 1, Name: "a"})
 	if strings.Contains(out, "authoritative") || strings.Contains(out, "inferred") {
 		t.Errorf("a session resolved by nobody named a tier:\n%s", out)
 	}
@@ -495,13 +481,8 @@ func TestTheAlarmDoesNotLeakAGoroutineOrATimer(t *testing.T) {
 	stampActivity(t, m.paneByID(0), time.Now().Add(-2*time.Minute), time.Time{})
 
 	loc := newPaneLocator(m)
-	p, err := pipeline.Start(pipeline.Config{
-		Root: newSilentPaneRegistry(t, pid, "busy"), Locator: loc, Activity: loc, Now: time.Now,
-	})
-	if err != nil {
-		t.Fatalf("pipeline.Start: %v", err)
-	}
-	sub, err := p.Subscribe("test", 0)
+	p := startHostPipeline(t, newSilentPaneRegistry(t, pid, "busy"), pipeline.Config{Locator: loc, Activity: loc})
+	sub, err := p.Subscribe(context.Background(), "test", 0)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -511,8 +492,8 @@ func TestTheAlarmDoesNotLeakAGoroutineOrATimer(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("no document arrived")
 	}
-	if st := p.Stats(); st.Actors != 1 {
-		t.Fatalf("stats report %d actors, want 1", st.Actors)
+	if st, err := p.Stats(context.Background()); err != nil || st.ActorsStarted-st.ActorsStopped != 1 {
+		t.Fatalf("stats report %d actors running (%v), want 1", st.ActorsStarted-st.ActorsStopped, err)
 	}
 	during := runtime.NumGoroutine()
 
@@ -530,4 +511,24 @@ func TestTheAlarmDoesNotLeakAGoroutineOrATimer(t *testing.T) {
 		t.Errorf("goroutines went from %d to %d across a whole start/stop cycle", before, after)
 	}
 	t.Logf("goroutines: %d before, %d with the pipeline running, %d after", before, during, after)
+}
+
+// startHostPipeline starts the library's pipeline over one registry directory
+// with the ports cfg names, as magmux would — no watcher, the real clock for
+// the torn-read retry, time.Now as the epoch — and fails the test on error.
+// The caller stops it.
+func startHostPipeline(t *testing.T, sessions string, cfg pipeline.Config) *pipeline.Pipeline {
+	t.Helper()
+	root, err := claudeRoot(sessions, "", "", "")
+	if err != nil {
+		t.Fatalf("claudeRoot: %v", err)
+	}
+	cfg.Root = root
+	cfg.Clock = ports.RealClock()
+	cfg.Now = time.Now
+	p, err := pipeline.Start(cfg)
+	if err != nil {
+		t.Fatalf("pipeline.Start: %v", err)
+	}
+	return p
 }

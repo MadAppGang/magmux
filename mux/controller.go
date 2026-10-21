@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
 )
 
 // ToolController is a side-channel observer + interactor for a specific
@@ -302,34 +302,33 @@ const (
 // ── turn history ────────────────────────────────────────────────────────────
 
 // Turn and ToolCall are one entry in a tool's own record of a session, and one
-// tool invocation inside it. They are declared in internal/obs and ALIASED
-// here.
+// tool invocation inside it. They are declared in the claudestate library's
+// model and ALIASED here.
 //
 // An alias is the same type, not a conversion, so [TranscriptReader] below is
 // the contract it always was, the unexported correlation field on ToolCall
 // travels with the type, and no caller — in this package, over the socket, or
-// through MCP — notices that they moved. They moved because Go forbids
-// importing package main: the observation layer under internal/obs reads the
-// same transcripts and would otherwise need a second, parallel Turn type, and
-// two vocabularies for one thing diverge the first time either side gains a
-// field.
+// through MCP — notices that they moved. They moved because the observation
+// layer reads the same transcripts and would otherwise need a second, parallel
+// Turn type, and two vocabularies for one thing diverge the first time either
+// side gains a field.
 //
-// The parser moved with them, to internal/obs/adapters, for the same reason
-// and one more: a ToolCall's correlation id is unexported, so whatever builds
+// The parser moved with them, to claudestate/claude (ParseTurns), for the same
+// reason and one more: a ToolCall's correlation id is unexported, so whatever builds
 // one has to live where it can be set. [parseClaudeTurns] below is what is
 // left here — one line, so that every existing caller and test compiles
 // untouched.
 type (
-	Turn     = obs.Turn
-	ToolCall = obs.ToolCall
+	Turn     = model.Turn
+	ToolCall = model.ToolCall
 )
 
 // Turn roles. Deliberately the same two words every tool in this space uses,
-// so a consumer needs no translation table. Aliased to obs's own, which are
-// the values that reach the wire.
+// so a consumer needs no translation table. Aliased to the library's own,
+// which are the values that reach the wire.
 const (
-	TurnUser      = obs.TurnUser
-	TurnAssistant = obs.TurnAssistant
+	TurnUser      = model.TurnUser
+	TurnAssistant = model.TurnAssistant
 )
 
 // Transcript request bounds. These bound MEMORY, not presentation: a caller

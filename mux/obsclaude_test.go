@@ -8,16 +8,23 @@ package mux
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 	"unicode/utf16"
 
-	"github.com/MadAppGang/magmux/internal/obs"
-	"github.com/MadAppGang/magmux/internal/obs/adapters"
+	"github.com/MadAppGang/magmux/claudestate/claude"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/claudestate/pipeline"
+	"github.com/MadAppGang/magmux/claudestate/ports"
+	"github.com/MadAppGang/magmux/internal/obs/act"
+	"github.com/MadAppGang/magmux/obsview"
 )
 
 // ── one encoder ─────────────────────────────────────────────────────────────
@@ -47,7 +54,7 @@ func TestTheProjectDirectoryEncoderIsTheVerifiedOne(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := encodeProjectDir(c.dir)
-			want := adapters.EncodeProjectDir(c.dir)
+			want := claude.EncodeProjectDir(c.dir)
 			if got != want {
 				t.Errorf("encodeProjectDir(%q)\n got: %q\nwant: %q", c.dir, got, want)
 			}
@@ -84,7 +91,7 @@ func TestTheProjectDirectoryEncoderIsTheVerifiedOne(t *testing.T) {
 func TestTurnAndToolCallAreTheObservationLayersTypes(t *testing.T) {
 	var (
 		mine  Turn
-		other obs.Turn
+		other model.Turn
 	)
 	other = mine
 	mine = other
@@ -92,15 +99,15 @@ func TestTurnAndToolCallAreTheObservationLayersTypes(t *testing.T) {
 
 	var (
 		myCall    ToolCall
-		otherCall obs.ToolCall
+		otherCall model.ToolCall
 	)
 	otherCall = myCall
 	myCall = otherCall
 	_ = myCall
 
-	if TurnUser != obs.TurnUser || TurnAssistant != obs.TurnAssistant {
+	if TurnUser != model.TurnUser || TurnAssistant != model.TurnAssistant {
 		t.Errorf("the role constants have diverged: %q/%q here, %q/%q there",
-			TurnUser, TurnAssistant, obs.TurnUser, obs.TurnAssistant)
+			TurnUser, TurnAssistant, model.TurnUser, model.TurnAssistant)
 	}
 }
 
@@ -222,7 +229,7 @@ func TestLaunchDirIsTheDirectoryMagmuxSpawnedWith(t *testing.T) {
 		300: 1,
 	})}
 
-	dir, ok := loc.LaunchDir(900)
+	dir, ok := loc.launchDir(900)
 	if !ok {
 		t.Fatal("LaunchDir(900) found nothing; the tool's pid is never the pane's")
 	}
@@ -242,7 +249,7 @@ func TestLaunchDirFallsBackToMagmuxsOwnDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
-	dir, ok := loc.LaunchDir(700)
+	dir, ok := loc.launchDir(700)
 	if !ok {
 		t.Fatal("LaunchDir(700) found nothing")
 	}
@@ -263,17 +270,20 @@ func TestLaunchDirRefusesASessionThatIsNotOurs(t *testing.T) {
 	givePID(t, m.paneByID(0), 400)
 	loc := &muxPaneLocator{m: m, ppid: tree(map[int]int{999: 998, 998: 1})}
 
-	if dir, ok := loc.LaunchDir(999); ok {
+	if dir, ok := loc.launchDir(999); ok {
 		t.Errorf("LaunchDir(999) = %q, ok; that session belongs to no pane of ours", dir)
 	}
 }
 
-// ── the controller's registry read, through adapters ────────────────────────
+// ── the controller's registry read, through claude.DecodeRecord ─────────────
 
-// TestTheControllerTreatsATornRegistryFileAsNotFound pins the mapping from the
-// adapter's decode onto the controller's "not found", which its cache and its
-// scan act on: exactly what the old json.Unmarshal refused is refused, and a
-// record with any other shape of extra keys is still found.
+// TestTheControllerTreatsATornRegistryFileAsNotFound pins claudestate
+// architecture §2.2's table: claude.DecodeRecord's outcomes onto the
+// controller's "not found", which its cache and its scan act on. What the old
+// json.Unmarshal refused is refused, a record with any other shape of extra
+// keys is still found, and the table's one named difference holds: a body of
+// JSON null is NOT found, where Unmarshal found the zero entry. Claude never
+// writes one, and the PR body names the change.
 func TestTheControllerTreatsATornRegistryFileAsNotFound(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) string {
@@ -299,25 +309,151 @@ func TestTheControllerTreatsATornRegistryFileAsNotFound(t *testing.T) {
 	if !ok || e.Status != "waiting" || e.WaitingFor != "input needed" || e.SessionID != "s" {
 		t.Errorf("a whole record read as %+v, %v", e, ok)
 	}
-	if e, ok := readRegEntry(write("null.json", "null")); !ok || e != (regEntry{}) {
-		t.Errorf("a JSON null record read as %+v, %v; it was always found, as the zero entry", e, ok)
+	if e, ok := readRegEntry(write("null.json", "null")); ok {
+		t.Errorf("a JSON null record read as %+v, found; it is not an object, so it is not found (§2.2)", e)
 	}
 }
 
 // TestTheControllerTreatsAnUnknownRegistryStatusAsNeitherWaitingNorBusy: the
-// status is compared through adapters.DecodeStatus, so a word this build does
+// status is compared through claude.MapRegistryStatus, so a word this build does
 // not know — a newer Claude's — is neither of the two the gate acts on, and the
 // two it knows are exactly themselves.
 func TestTheControllerTreatsAnUnknownRegistryStatusAsNeitherWaitingNorBusy(t *testing.T) {
 	for _, raw := range []string{"compacting", "", "Waiting", "BUSY"} {
-		if regStatusIs(raw, obs.StatusWaiting) || regStatusIs(raw, obs.StatusBusy) {
+		if regStatusIs(raw, model.StatusWaiting) || regStatusIs(raw, model.StatusBusy) {
 			t.Errorf("registry status %q counted as waiting or busy", raw)
 		}
 	}
-	if !regStatusIs("waiting", obs.StatusWaiting) || regStatusIs("waiting", obs.StatusBusy) {
+	if !regStatusIs("waiting", model.StatusWaiting) || regStatusIs("waiting", model.StatusBusy) {
 		t.Error(`"waiting" is not exactly waiting`)
 	}
-	if !regStatusIs("busy", obs.StatusBusy) || regStatusIs("busy", obs.StatusWaiting) {
+	if !regStatusIs("busy", model.StatusBusy) || regStatusIs("busy", model.StatusWaiting) {
 		t.Error(`"busy" is not exactly busy`)
+	}
+}
+
+// TestLaunchDirIsTheHostsAndNeverTheRecordsCWD pins the launchdir host stage
+// (claudestate architecture §3.2): the ONE source of a session's launchDir, by
+// the old fast path's exact algorithm, on every surface that carries it.
+//
+// Three sessions, each with a registry cwd of /record/cwd:
+//
+//   - (a) in a pane magmux spawned with cmd.Dir set: that directory;
+//   - (b) in a pane spawned with no cmd.Dir: magmux's own directory, compared
+//     with this test process's os.Getwd(), so no machine path is committed;
+//   - (c) in no pane at all (pid 1, which the walk refuses without a syscall):
+//     no launchDir.
+//
+// Each is asserted on the socket `agents` document, on the document MCP
+// decodes from it, and on the audit line — act's rules match LaunchDir, so the
+// rule that authorised each focus is the evidence. A rule written against the
+// record's cwd never matches, and the standalone `magmux agents`, which has no
+// pane table, carries no launchDir at all.
+func TestLaunchDirIsTheHostsAndNeverTheRecordsCWD(t *testing.T) {
+	defer deadlineWatchdog(t, 60*time.Second)()
+	const recordCWD = "/record/cwd"
+	const spawned = "/home/someone/launched"
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+
+	dir := t.TempDir()
+	for _, r := range []struct {
+		pid int
+		id  string
+	}{{4300, "id-a"}, {4301, "id-b"}, {1, "id-c"}} {
+		body := `{"sessionId":"` + r.id + `","pid":` + strconv.Itoa(r.pid) + `,"name":"` + r.id + `","cwd":"` + recordCWD +
+			`","status":"waiting","waitingFor":"input needed","statusUpdatedAt":1789286000000,"updatedAt":1789286000000}`
+		if err := os.WriteFile(filepath.Join(dir, strconv.Itoa(r.pid)+".json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	projects := t.TempDir() // a projects tree, empty: the stage's first condition
+
+	m := newTestMux(t, ctrlPanes(2)...)
+	p0 := m.paneByID(0)
+	p0.mu.Lock()
+	p0.cmd = &exec.Cmd{Process: &os.Process{Pid: 4300}, Dir: spawned}
+	p0.mu.Unlock()
+	givePID(t, m.paneByID(1), 4301)
+
+	trail := filepath.Join(t.TempDir(), "state", "magmux", "trail.jsonl")
+	policy := act.Policy{
+		Source:  "the launchDir test",
+		Actions: act.Actions{Navigate: act.StanceRule},
+		Rules: []act.Rule{
+			{Do: act.TierNavigate, LaunchDir: recordCWD, Note: "the record's cwd"},
+			{Do: act.TierNavigate, LaunchDir: spawned, Note: "case a"},
+			{Do: act.TierNavigate, LaunchDir: wd, Note: "case b"},
+		},
+	}
+	m.panelPrivate = true
+	if err := m.startObservationWith(obsConfig{Root: dir, Projects: projects, Policy: policy, AuditPath: trail}); err != nil {
+		t.Fatalf("startObservationWith: %v", err)
+	}
+	t.Cleanup(m.stopObservation)
+	waitUntilObs(t, func() bool { return len(m.obsDoc.snapshot().Doc.Sessions) == 3 }, "the document")
+
+	// The socket document, and the document MCP decodes from it.
+	payload, err := m.sockObs()
+	if err != nil {
+		t.Fatalf("the agents verb: %v", err)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var overWire obsview.Fleet
+	if err := json.Unmarshal(raw, &overWire); err != nil {
+		t.Fatalf("decoding the reply as MCP does: %v", err)
+	}
+	want := map[string]string{"id-a": spawned, "id-b": wd, "id-c": ""}
+	for _, s := range overWire.Sessions {
+		if s.LaunchDir != want[s.ID] {
+			t.Errorf("session %s carries launchDir %q, want %q", s.ID, s.LaunchDir, want[s.ID])
+		}
+	}
+	if strings.Contains(string(raw), `"launchDir":"`+recordCWD) {
+		t.Errorf("a record's cwd reached the wire as a launch directory:\n%s", raw)
+	}
+
+	// The audit line: the rule that authorised each focus. (c) is in no pane, so
+	// nothing can focus it and the gate refuses before any rule is read.
+	for _, tc := range []struct {
+		id, rule string
+		allowed  bool
+	}{{"id-a", "case a", true}, {"id-b", "case b", true}, {"id-c", "no capability", false}} {
+		rep, err := m.obsFocusSession(context.Background(), tc.id, act.RequesterCLI)
+		if (err == nil) != tc.allowed {
+			t.Errorf("focus %s: err %v, want allowed=%v", tc.id, err, tc.allowed)
+		}
+		if len(rep.Records) == 0 || !strings.Contains(rep.Records[0].Policy.Rule, tc.rule) {
+			t.Errorf("focus %s was decided by %+v, want a rule naming %q", tc.id, rep.Records, tc.rule)
+		}
+	}
+	body, err := os.ReadFile(trail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "the record's cwd") {
+		t.Errorf("a rule written against the record's cwd matched a session:\n%s", body)
+	}
+
+	// The standalone command: no pane table, so no launchDir on any row.
+	root, err := claudeRoot(dir, "", projects, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := pipeline.Start(pipeline.Config{Root: root, Clock: ports.RealClock(), Now: time.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Stop()
+	d := firstHostDoc(t, p)
+	var cli strings.Builder
+	obsview.WriteFleetJSON(&cli, obsview.FromModel(d.Doc))
+	if strings.Contains(cli.String(), "launchDir") {
+		t.Errorf("the standalone document carries a launchDir:\n%s", cli.String())
 	}
 }

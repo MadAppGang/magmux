@@ -8,7 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/obsview"
 )
 
 // auditNow is the fixed instant this file's records are stamped with. Time is
@@ -373,17 +374,19 @@ func TestTheRecordCarriesTheFourThingsR5ARequires(t *testing.T) {
 	w := newTestWriter(t, path)
 
 	since := auditNow.Add(-90 * time.Second)
-	session := obs.Session{
-		ID: "id-a", PID: 4242, Name: "circl", PaneID: obs.Ptr(2),
-		Status: obs.StatusWaiting, Waiting: obs.WaitingReasonInput,
-		StatusSince: &since, Confidence: obs.TierAuthoritative,
-		Attention: obs.Attention{Needed: obs.Ptr(true)},
+	needed := true
+	session := model.Session{
+		Key: model.Key{SessionID: "id-a", PID: 4242}, PID: 4242, Name: "circl", Pane: "2",
+		Status: model.StatusWaiting, Waiting: model.WaitingInput,
+		StatusSince: &since, Confidence: model.ConfidenceAuthoritative,
+		Attention: model.Attention{Needed: &needed},
 	}
 	before := StateOf(session, auditNow)
 
 	r := testRecord()
 	r.Event = EventOutcome
-	r.Target = Target{SessionID: session.ID, PID: session.PID, Name: session.Name, PaneID: obs.Ptr(2)}
+	pane := 2
+	r.Target = Target{SessionID: session.Key.SessionID, PID: session.PID, Name: session.Name, PaneID: &pane}
 	r.Before = &before
 	r.Outcome = &Outcome{Done: true, Detail: "focus moved from magmux pane 1 to pane 2"}
 	if _, err := w.Append(r); err != nil {
@@ -415,9 +418,8 @@ func TestTheRecordCarriesTheFourThingsR5ARequires(t *testing.T) {
 	// Compared against the enum's own word rather than a literal: the status
 	// vocabulary mirrors Claude's spelling on purpose, and a literal here
 	// would read as this file decoding Claude's format — which is a rule
-	// adapters.TestOnlySchemaFileDecodesClaudeStrings enforces by reading the
-	// source.
-	if got, _ := state["status"].(string); got != obs.StatusWaiting.String() {
+	// mux.TestNoClaudeLiteralOutsideTheLibrary enforces by reading the source.
+	if got, _ := state["status"].(string); got != obsview.StatusWaiting.String() {
 		t.Errorf("the `before` state says status %q", got)
 	}
 }

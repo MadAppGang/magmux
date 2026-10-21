@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
 	"github.com/MadAppGang/magmux/internal/obs/act"
 )
 
@@ -14,13 +14,13 @@ import (
 var NOW = time.Date(2026, 9, 18, 14, 0, 0, 0, time.Local)
 
 // waitingSince builds a session that entered `waiting` at an instant.
-func waitingSince(t time.Time) obs.Session {
-	return obs.Session{
-		ID:          "id-a",
+func waitingSince(t time.Time) model.Session {
+	return model.Session{
+		Key:         model.Key{SessionID: "id-a", PID: 4242},
 		PID:         4242,
 		Name:        "session-a",
-		Status:      obs.StatusWaiting,
-		Waiting:     obs.WaitingReasonInput,
+		Status:      model.StatusWaiting,
+		Waiting:     model.WaitingInput,
 		StatusSince: &t,
 	}
 }
@@ -52,7 +52,7 @@ func at(start time.Time) (func() time.Time, func(time.Duration)) {
 func TestTheZeroPolicySaysNothing(t *testing.T) {
 	s := New(Config{Now: func() time.Time { return NOW }})
 	s.Observe(waitingSince(NOW.Add(-time.Hour)))
-	if notes := s.Pending(); len(notes) != 0 {
+	if notes := notesOf(t, s); len(notes) != 0 {
 		t.Fatalf("the zero policy produced %d notifications: %+v", len(notes), notes)
 	}
 	if d, ok := s.WakeIn(); ok {
@@ -68,7 +68,7 @@ func TestNotifyEnabledFalseSilencesEverything(t *testing.T) {
 	p.Notify.Delay = 0
 	s := New(Config{Policy: p, Now: func() time.Time { return NOW }})
 	s.Observe(waitingSince(NOW.Add(-time.Hour)))
-	if notes := s.Pending(); len(notes) != 0 {
+	if notes := notesOf(t, s); len(notes) != 0 {
 		t.Fatalf("enabled=false produced %d notifications", len(notes))
 	}
 }
@@ -87,7 +87,7 @@ func TestASessionThatStaysWaitingNotifiesExactlyOnce(t *testing.T) {
 	total := 0
 	for i := 0; i < 30; i++ {
 		s.Observe(waitingSince(since))
-		total += len(s.Pending())
+		total += len(notesOf(t, s))
 		advance(time.Minute)
 	}
 	if total != 1 {
@@ -108,15 +108,15 @@ func TestANewEpisodeNotifiesAgain(t *testing.T) {
 
 	first := NOW.Add(-10 * time.Minute)
 	s.Observe(waitingSince(first))
-	if got := len(s.Pending()); got != 1 {
+	if got := len(notesOf(t, s)); got != 1 {
 		t.Fatalf("the first episode produced %d notifications, want 1", got)
 	}
 
 	// Answered: the session goes back to work.
 	advance(time.Minute)
-	busy := obs.Session{ID: "id-a", PID: 4242, Status: obs.StatusBusy, StatusSince: obs.Ptr(now())}
+	busy := model.Session{Key: model.Key{SessionID: "id-a"}, PID: 4242, Status: model.StatusBusy, StatusSince: ptr(now())}
 	s.Observe(busy)
-	if got := len(s.Pending()); got != 0 {
+	if got := len(notesOf(t, s)); got != 0 {
 		t.Fatalf("a busy session produced %d notifications", got)
 	}
 
@@ -124,7 +124,7 @@ func TestANewEpisodeNotifiesAgain(t *testing.T) {
 	advance(10 * time.Minute)
 	second := now().Add(-3 * time.Minute)
 	s.Observe(waitingSince(second))
-	if got := len(s.Pending()); got != 1 {
+	if got := len(notesOf(t, s)); got != 1 {
 		t.Fatalf("the second episode produced %d notifications, want 1", got)
 	}
 }
@@ -139,7 +139,7 @@ func TestTheDelayIsServedByAnAlarmAndNotByAPoll(t *testing.T) {
 	s := New(Config{Policy: loud(), Now: now})
 
 	s.Observe(waitingSince(NOW.Add(-30 * time.Second)))
-	if got := len(s.Pending()); got != 0 {
+	if got := len(notesOf(t, s)); got != 0 {
 		t.Fatalf("a session 30s into a 2m delay produced %d notifications", got)
 	}
 	d, ok := s.WakeIn()
@@ -154,7 +154,7 @@ func TestTheDelayIsServedByAnAlarmAndNotByAPoll(t *testing.T) {
 	// The deadline arrives; the cycle it asked for observes again.
 	advance(90 * time.Second)
 	s.Observe(waitingSince(NOW.Add(-30 * time.Second)))
-	notes := s.Pending()
+	notes := notesOf(t, s)
 	if len(notes) != 1 {
 		t.Fatalf("at the deadline the session produced %d notifications, want 1", len(notes))
 	}
@@ -175,12 +175,12 @@ func TestNothingIsArmedForASessionThatWillNeverQualify(t *testing.T) {
 	now, _ := at(NOW)
 	for _, tt := range []struct {
 		name string
-		s    obs.Session
+		s    model.Session
 	}{
-		{"busy", obs.Session{ID: "id-a", Status: obs.StatusBusy, StatusSince: obs.Ptr(NOW)}},
-		{"idle", obs.Session{ID: "id-a", Status: obs.StatusIdle, StatusSince: obs.Ptr(NOW)}},
-		{"a shell", obs.Session{ID: "id-a", Status: obs.StatusShell, StatusSince: obs.Ptr(NOW)}},
-		{"undetermined", obs.Session{ID: "id-a"}},
+		{"busy", model.Session{Key: model.Key{SessionID: "id-a"}, Status: model.StatusBusy, StatusSince: ptr(NOW)}},
+		{"idle", model.Session{Key: model.Key{SessionID: "id-a"}, Status: model.StatusIdle, StatusSince: ptr(NOW)}},
+		{"a shell", model.Session{Key: model.Key{SessionID: "id-a"}, Status: model.StatusShell, StatusSince: ptr(NOW)}},
+		{"undetermined", model.Session{Key: model.Key{SessionID: "id-a"}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := New(Config{Policy: loud(), Now: now})
@@ -188,7 +188,7 @@ func TestNothingIsArmedForASessionThatWillNeverQualify(t *testing.T) {
 			if d, ok := s.WakeIn(); ok {
 				t.Errorf("armed an alarm for %v", d)
 			}
-			if got := len(s.Pending()); got != 0 {
+			if got := len(notesOf(t, s)); got != 0 {
 				t.Errorf("produced %d notifications", got)
 			}
 		})
@@ -204,8 +204,8 @@ func TestNothingIsArmedForASessionThatWillNeverQualify(t *testing.T) {
 func TestADelayThatCannotBeMeasuredSaysNothing(t *testing.T) {
 	now, _ := at(NOW)
 	s := New(Config{Policy: loud(), Now: now})
-	s.Observe(obs.Session{ID: "id-a", PID: 1, Status: obs.StatusWaiting})
-	if got := len(s.Pending()); got != 0 {
+	s.Observe(model.Session{Key: model.Key{SessionID: "id-a"}, PID: 1, Status: model.StatusWaiting})
+	if got := len(notesOf(t, s)); got != 0 {
 		t.Errorf("an unmeasurable wait produced %d notifications", got)
 	}
 	if d, ok := s.WakeIn(); ok {
@@ -218,8 +218,8 @@ func TestADelayThatCannotBeMeasuredSaysNothing(t *testing.T) {
 	p := loud()
 	p.Notify.Delay = 0
 	s = New(Config{Policy: p, Now: now})
-	s.Observe(obs.Session{ID: "id-a", PID: 1, Status: obs.StatusWaiting})
-	if got := len(s.Pending()); got != 1 {
+	s.Observe(model.Session{Key: model.Key{SessionID: "id-a"}, PID: 1, Status: model.StatusWaiting})
+	if got := len(notesOf(t, s)); got != 1 {
 		t.Errorf("with delay=0 an unmeasurable wait produced %d notifications, want 1", got)
 	}
 }
@@ -233,7 +233,7 @@ func TestQuietSuppressesAndSaysSo(t *testing.T) {
 	s := New(Config{Policy: loud(), Now: now})
 	s.Observe(waitingSince(night.Add(-10 * time.Minute)))
 
-	notes := s.Pending()
+	notes := notesOf(t, s)
 	if len(notes) != 1 {
 		t.Fatalf("quiet hours produced %d notes, want 1 — a suppressed notification is still "+
 			"DECIDED, and the record is the evidence that the filter worked", len(notes))
@@ -262,7 +262,7 @@ func TestQuietSuppressesRatherThanDefers(t *testing.T) {
 	since := night.Add(-10 * time.Minute)
 
 	s.Observe(waitingSince(since))
-	notes := s.Pending()
+	notes := notesOf(t, s)
 	if len(notes) != 1 || notes[0].Decision.Allowed {
 		t.Fatalf("expected one suppressed note at 23:00, got %+v", notes)
 	}
@@ -270,7 +270,7 @@ func TestQuietSuppressesRatherThanDefers(t *testing.T) {
 	// Morning. The same session, the same episode, still waiting.
 	advance(10 * time.Hour) // 09:00, outside the window
 	s.Observe(waitingSince(since))
-	if got := len(s.Pending()); got != 0 {
+	if got := len(notesOf(t, s)); got != 0 {
 		t.Fatalf("the suppressed notification was DELIVERED at 09:00 (%d notes). A night's "+
 			"worth arriving at breakfast is exactly the '30 sessions firing unfiltered' "+
 			"failure R4.4 names", got)
@@ -291,7 +291,7 @@ func TestTheDayIsSplitByTheClockAndNotByTheDate(t *testing.T) {
 		now, _ := at(when)
 		s := New(Config{Policy: loud(), Now: now})
 		s.Observe(waitingSince(when.Add(-10 * time.Minute)))
-		notes := s.Pending()
+		notes := notesOf(t, s)
 		if len(notes) != 1 {
 			t.Fatalf("%02d:30 produced %d notes", tt.hour, len(notes))
 		}
@@ -306,23 +306,23 @@ func TestTheDayIsSplitByTheClockAndNotByTheDate(t *testing.T) {
 // a trigger not in it must not raise anything.
 func TestOnlyTheConfiguredTriggersFire(t *testing.T) {
 	now, _ := at(NOW)
-	errored := obs.Session{
-		ID: "id-a", PID: 7, Status: obs.StatusBusy,
-		StatusSince: obs.Ptr(NOW.Add(-time.Hour)),
-		Fault:       obs.Fault{APIErrors: obs.Ptr(3)},
+	errored := model.Session{
+		Key: model.Key{SessionID: "id-a", PID: 7}, PID: 7, Status: model.StatusBusy,
+		StatusSince: ptr(NOW.Add(-time.Hour)),
+		Fault:       model.Fault{APIErrors: ptr(3)},
 	}
 
 	waitingOnly := loud()
 	waitingOnly.Notify.On = []act.NotifyOn{act.NotifyOnWaiting}
 	s := New(Config{Policy: waitingOnly, Now: now})
 	s.Observe(errored)
-	if got := len(s.Pending()); got != 0 {
+	if got := len(notesOf(t, s)); got != 0 {
 		t.Errorf("an error raised %d notifications under on=[waiting]", got)
 	}
 
 	s = New(Config{Policy: loud(), Now: now})
 	s.Observe(errored)
-	notes := s.Pending()
+	notes := notesOf(t, s)
 	if len(notes) != 1 || notes[0].On != act.NotifyOnError {
 		t.Fatalf("on=[waiting,error] produced %+v, want one error note", notes)
 	}
@@ -332,12 +332,12 @@ func TestOnlyTheConfiguredTriggersFire(t *testing.T) {
 
 	// Zero errors is a DETERMINED zero and must not fire; nil is nobody
 	// counted and must not either.
-	for _, faults := range []obs.Fault{{APIErrors: obs.Ptr(0)}, {}} {
+	for _, faults := range []model.Fault{{APIErrors: ptr(0)}, {}} {
 		s = New(Config{Policy: loud(), Now: now})
 		quiet := errored
 		quiet.Fault = faults
 		s.Observe(quiet)
-		if got := len(s.Pending()); got != 0 {
+		if got := len(notesOf(t, s)); got != 0 {
 			t.Errorf("fault %+v raised %d notifications", faults, got)
 		}
 	}
@@ -349,9 +349,9 @@ func TestWaitingBeatsErrorWhenBothAreTrue(t *testing.T) {
 	now, _ := at(NOW)
 	s := New(Config{Policy: loud(), Now: now})
 	both := waitingSince(NOW.Add(-10 * time.Minute))
-	both.Fault = obs.Fault{APIErrors: obs.Ptr(2)}
+	both.Fault = model.Fault{APIErrors: ptr(2)}
 	s.Observe(both)
-	notes := s.Pending()
+	notes := notesOf(t, s)
 	if len(notes) != 1 || notes[0].On != act.NotifyOnWaiting {
 		t.Fatalf("produced %+v, want one waiting note", notes)
 	}
@@ -365,23 +365,23 @@ func TestTheNoteSaysWhichErrandItIs(t *testing.T) {
 	// The expectations are built from the ENUM rather than written out,
 	// because that is the property under test: one vocabulary, in the
 	// notification and in the document. A table of literals here would also
-	// trip adapters.TestOnlySchemaFileDecodesClaudeStrings the moment somebody
+	// trip mux.TestNoClaudeLiteralOutsideTheLibrary the moment somebody
 	// reached for Claude's own spelling of the second one, which is what
 	// happened while this test was being written.
 	for _, tt := range []struct {
-		reason obs.WaitingReason
+		reason model.WaitingReason
 		want   string
 	}{
-		{obs.WaitingReasonInput, "waiting for " + obs.WaitingReasonInput.String()},
-		{obs.WaitingReasonPermission, "waiting for " + obs.WaitingReasonPermission.String()},
-		{obs.WaitingReasonUnknown, "waiting for you"},
-		{obs.WaitingReasonNone, "waiting for you"},
+		{model.WaitingInput, "waiting for " + model.WaitingInput.String()},
+		{model.WaitingPermission, "waiting for " + model.WaitingPermission.String()},
+		{model.WaitingUnknown, "waiting for you"},
+		{model.WaitingDialog, "waiting for you"},
 	} {
 		s := New(Config{Policy: loud(), Now: now})
 		sess := waitingSince(NOW.Add(-10 * time.Minute))
 		sess.Waiting = tt.reason
 		s.Observe(sess)
-		notes := s.Pending()
+		notes := notesOf(t, s)
 		if len(notes) != 1 {
 			t.Fatalf("%v produced %d notes", tt.reason, len(notes))
 		}
@@ -398,12 +398,12 @@ func TestTheNoteNamesTheSession(t *testing.T) {
 	now, _ := at(NOW)
 	for _, tt := range []struct {
 		name  string
-		sess  obs.Session
+		sess  model.Session
 		title string
 	}{
-		{"a named session", obs.Session{Name: "worktree-a"}, "worktree-a"},
-		{"an unnamed one", obs.Session{ID: "a1478d55-6e02-4bb9"}, "a1478d55"},
-		{"neither", obs.Session{PID: 4242}, "4242"},
+		{"a named session", model.Session{Name: "worktree-a"}, "worktree-a"},
+		{"an unnamed one", model.Session{Key: model.Key{SessionID: "a1478d55-6e02-4bb9"}}, "a1478d55"},
+		{"neither", model.Session{PID: 4242}, "4242"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_ = now
@@ -415,40 +415,40 @@ func TestTheNoteNamesTheSession(t *testing.T) {
 	}
 }
 
-// TestPendingDrains is what makes the hand-off exactly-once. A Pending that
+// TestEffectsDrains is what makes the hand-off exactly-once. An Effects that
 // returned the same slice twice would deliver every notification twice, and
 // the second delivery would look exactly like the repeat this design forbids.
-func TestPendingDrains(t *testing.T) {
+func TestEffectsDrains(t *testing.T) {
 	now, _ := at(NOW)
 	s := New(Config{Policy: loud(), Now: now})
 	s.Observe(waitingSince(NOW.Add(-10 * time.Minute)))
-	if got := len(s.Pending()); got != 1 {
-		t.Fatalf("first Pending returned %d", got)
+	if got := len(notesOf(t, s)); got != 1 {
+		t.Fatalf("first Effects returned %d", got)
 	}
-	if got := len(s.Pending()); got != 0 {
-		t.Fatalf("second Pending returned %d; the notes were not drained", got)
+	if got := len(notesOf(t, s)); got != 0 {
+		t.Fatalf("second Effects returned %d; the notes were not drained", got)
 	}
 }
 
 // TestTheNoteIsAFROZENCopyOfTheSession is freeze point 3 at this boundary.
 //
-// obs.Session is mostly pointers and the next observation replaces the whole
+// model.Session is mostly pointers and the next observation replaces the whole
 // fact set, so a note that shared them would describe whichever observation
 // happened to be current when the coordinator got round to delivering it.
 func TestTheNoteIsAFrozenCopyOfTheSession(t *testing.T) {
 	now, _ := at(NOW)
 	s := New(Config{Policy: loud(), Now: now})
 	in := waitingSince(NOW.Add(-10 * time.Minute))
-	in.SubagentCount = obs.Ptr(3)
+	in.Transcript = &model.TranscriptFacts{Subagents: ptr(3)}
 	s.Observe(in)
-	notes := s.Pending()
+	notes := notesOf(t, s)
 	if len(notes) != 1 {
 		t.Fatalf("produced %d notes", len(notes))
 	}
 	// Mutate through the caller's own pointer, as a careless middleware would.
-	*in.SubagentCount = 99
+	*in.Transcript.Subagents = 99
 	*in.StatusSince = NOW
-	if got := notes[0].Session.SubagentCount; got == nil || *got != 3 {
+	if got := notes[0].Session.Transcript.Subagents; got == nil || *got != 3 {
 		t.Errorf("the note's subagent count followed the caller's mutation to %v", got)
 	}
 	if notes[0].Session.StatusSince == nil || !notes[0].Session.StatusSince.Equal(NOW.Add(-10*time.Minute)) {
@@ -466,7 +466,7 @@ func TestObserveChangesNothingAboutTheSession(t *testing.T) {
 	s := New(Config{Policy: loud(), Now: now})
 	in := waitingSince(NOW.Add(-10 * time.Minute))
 	out := s.Observe(in)
-	if out.Status != in.Status || out.Waiting != in.Waiting || out.ID != in.ID ||
+	if out.Status != in.Status || out.Waiting != in.Waiting || out.Key != in.Key ||
 		out.Attention != in.Attention || out.Confidence != in.Confidence {
 		t.Errorf("the stage modified the fact set: in=%+v out=%+v", in, out)
 	}
@@ -479,7 +479,7 @@ func TestTheAuthorityNamesTheClauseThatDecided(t *testing.T) {
 	now, _ := at(NOW)
 	s := New(Config{Policy: loud(), Now: now})
 	s.Observe(waitingSince(NOW.Add(-10 * time.Minute)))
-	notes := s.Pending()
+	notes := notesOf(t, s)
 	if len(notes) != 1 {
 		t.Fatalf("produced %d notes", len(notes))
 	}
@@ -509,24 +509,100 @@ func TestAStaleRecordNeverNotifies(t *testing.T) {
 	now, _ := at(NOW)
 	for _, tt := range []struct {
 		name    string
-		process obs.Liveness
-		pane    obs.Liveness
+		process model.Liveness
+		pane    model.Liveness
 		notify  bool
 	}{
-		{"alive", obs.LivenessYes, obs.LivenessUnknown, true},
-		{"its process exited", obs.LivenessNo, obs.LivenessUnknown, false},
-		{"its pane was closed", obs.LivenessYes, obs.LivenessNo, false},
-		{"nobody could tell", obs.LivenessUnknown, obs.LivenessUnknown, true},
+		{"alive", model.LivenessYes, model.LivenessUnknown, true},
+		{"its process exited", model.LivenessNo, model.LivenessUnknown, false},
+		{"its pane was closed", model.LivenessYes, model.LivenessNo, false},
+		{"nobody could tell", model.LivenessUnknown, model.LivenessUnknown, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := New(Config{Policy: loud(), Now: now})
 			sess := waitingSince(NOW.Add(-10 * time.Minute))
 			sess.ProcessAlive, sess.PaneAlive = tt.process, tt.pane
 			s.Observe(sess)
-			got := len(s.Pending()) == 1
+			got := len(notesOf(t, s)) == 1
 			if got != tt.notify {
 				t.Errorf("notified=%v, want %v — a DETERMINED no rejects and an undetermined "+
 					"answer never does", got, tt.notify)
+			}
+		})
+	}
+}
+
+// notesOf drains the stage's effects and asserts each is a Note VALUE: the
+// pipeline hands OnEffects exactly what Effects returned, so the host's type
+// assertion is the hand-off, and a wrapper here would break it.
+func notesOf(t *testing.T, s *Stage) []Note {
+	t.Helper()
+	var out []Note
+	for _, e := range s.Effects() {
+		n, ok := e.(Note)
+		if !ok {
+			t.Fatalf("an effect is %T, not a notify.Note", e)
+		}
+		if e.EffectName() != EffectName {
+			t.Fatalf("a note names itself %q, want %q", e.EffectName(), EffectName)
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// TestABlockedJobAnnounces is D6 reaching the notifier: the effective status is
+// one vocabulary, and a background job whose record says it is blocked needs a
+// human exactly as a waiting session does. WaitingApplies is the trigger, not
+// StatusWaiting.
+func TestABlockedJobAnnounces(t *testing.T) {
+	now, _ := at(NOW)
+	s := New(Config{Policy: loud(), Now: now})
+	since := NOW.Add(-10 * time.Minute)
+	s.Observe(model.Session{
+		Key:         model.Key{SessionID: "id-job", Job: "abc12345"},
+		Status:      model.StatusBlocked,
+		StatusSince: &since,
+		Job:         &model.JobFacts{Short: "abc12345"},
+	})
+	notes := notesOf(t, s)
+	if len(notes) != 1 {
+		t.Fatalf("a blocked job produced %d notes, want 1", len(notes))
+	}
+	if got := notes[0].Body(); got != "waiting for you for 10m0s" {
+		t.Errorf("a blocked job's note says %q; it has no reason the wire names, so it is waiting for you", got)
+	}
+}
+
+// TestTheProcessGateIsForSessionsNoJobClaims mirrors verdict's Rule 1 scope.
+// For a job-backed session the process is the one that SERVED the job, and the
+// effective status has already weighed it: a dead twin over a blocked job is
+// still blocked. A dead process with no job is still never announced.
+func TestTheProcessGateIsForSessionsNoJobClaims(t *testing.T) {
+	now, _ := at(NOW)
+	since := NOW.Add(-10 * time.Minute)
+	for _, tt := range []struct {
+		name   string
+		job    *model.JobFacts
+		notify bool
+	}{
+		{"a dead twin over a blocked job", &model.JobFacts{Short: "abc12345", Twin: true}, true},
+		{"a dead process and no job", nil, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New(Config{Policy: loud(), Now: now})
+			s.Observe(model.Session{
+				Key:          model.Key{SessionID: "id-a", Job: "abc12345"},
+				PID:          4242,
+				Status:       model.StatusBlocked,
+				StatusSince:  &since,
+				ProcessAlive: model.LivenessNo,
+				Job:          tt.job,
+			})
+			if got := len(notesOf(t, s)) == 1; got != tt.notify {
+				t.Errorf("notified=%v, want %v", got, tt.notify)
 			}
 		})
 	}

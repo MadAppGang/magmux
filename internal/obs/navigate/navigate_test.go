@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
 	"github.com/MadAppGang/magmux/internal/obs/act"
 )
 
@@ -29,8 +29,10 @@ func (f *fakeFocuser) Focus(paneID int) (int, error) {
 	return previous, nil
 }
 
-func session(paneID *int, alive obs.Liveness) obs.Session {
-	return obs.Session{ID: "id-a", PID: 4242, PaneID: paneID, PaneAlive: alive}
+// session builds a session in the pane the library's gate resolved: its
+// PaneRef, magmux's id in decimal (ADR-X1), or "" for no pane.
+func session(pane model.PaneRef, alive model.Liveness) model.Session {
+	return model.Session{Key: model.Key{SessionID: "id-a", PID: 4242}, PID: 4242, Pane: pane, PaneAlive: alive}
 }
 
 // TestNothingIsDeclaredWhenNothingCanBeDone — the three absences, each of
@@ -45,12 +47,12 @@ func session(paneID *int, alive obs.Liveness) obs.Session {
 func TestNothingIsDeclaredWhenNothingCanBeDone(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		focuser obs.PaneFocuser
-		session obs.Session
+		focuser PaneFocuser
+		session model.Session
 	}{
-		{"no focuser in this process", nil, session(obs.Ptr(2), obs.LivenessYes)},
-		{"no pane for this session", &fakeFocuser{}, session(nil, obs.LivenessUnknown)},
-		{"the pane is gone", &fakeFocuser{}, session(obs.Ptr(2), obs.LivenessNo)},
+		{"no focuser in this process", nil, session("2", model.LivenessYes)},
+		{"no pane for this session", &fakeFocuser{}, session("", model.LivenessUnknown)},
+		{"the pane is gone", &fakeFocuser{}, session("2", model.LivenessNo)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := New(Config{Focuser: tc.focuser})
@@ -66,7 +68,7 @@ func TestNothingIsDeclaredWhenNothingCanBeDone(t *testing.T) {
 		// the real answer instead of having one assumed on its behalf, which
 		// is the tri-state rule the whole layer is built on.
 		s := New(Config{Focuser: &fakeFocuser{}})
-		s.Observe(session(obs.Ptr(2), obs.LivenessUnknown))
+		s.Observe(session("2", model.LivenessUnknown))
 		if caps := s.Capabilities(); len(caps) != 1 {
 			t.Fatalf("declared %+v for a session whose pane is undetermined", caps)
 		}
@@ -78,7 +80,7 @@ func TestNothingIsDeclaredWhenNothingCanBeDone(t *testing.T) {
 // saying so is what makes a retry after a timeout safe.
 func TestTheDeclarationSaysNavigateAndSaysItIsSafeToRetry(t *testing.T) {
 	s := New(Config{Focuser: &fakeFocuser{}})
-	s.Observe(session(obs.Ptr(3), obs.LivenessYes))
+	s.Observe(session("3", model.LivenessYes))
 
 	caps := s.Capabilities()
 	if len(caps) != 1 {
@@ -102,7 +104,7 @@ func TestTheDeclarationSaysNavigateAndSaysItIsSafeToRetry(t *testing.T) {
 func TestFocusMovesFocusAndSaysWhatWasDisplaced(t *testing.T) {
 	f := &fakeFocuser{focused: 1}
 	s := New(Config{Focuser: f})
-	s.Observe(session(obs.Ptr(2), obs.LivenessYes))
+	s.Observe(session("2", model.LivenessYes))
 
 	res, err := s.Do(context.Background(), act.Action{Verb: act.VerbFocus, Tier: act.TierNavigate})
 	if err != nil {
@@ -125,7 +127,7 @@ func TestFocusMovesFocusAndSaysWhatWasDisplaced(t *testing.T) {
 func TestFocusingTheFocusedPaneSucceeds(t *testing.T) {
 	f := &fakeFocuser{focused: 2}
 	s := New(Config{Focuser: f})
-	s.Observe(session(obs.Ptr(2), obs.LivenessYes))
+	s.Observe(session("2", model.LivenessYes))
 
 	res, err := s.Do(context.Background(), act.Action{Verb: act.VerbFocus, Tier: act.TierNavigate})
 	if err != nil || !res.Done {
@@ -144,7 +146,7 @@ func TestAFailingFocuserIsAFailedActionAndNotARefusal(t *testing.T) {
 	boom := errors.New("pane 2 is not on screen")
 	f := &fakeFocuser{err: boom}
 	s := New(Config{Focuser: f})
-	s.Observe(session(obs.Ptr(2), obs.LivenessYes))
+	s.Observe(session("2", model.LivenessYes))
 
 	_, err := s.Do(context.Background(), act.Action{Verb: act.VerbFocus, Tier: act.TierNavigate})
 	if err == nil {
@@ -160,7 +162,7 @@ func TestAFailingFocuserIsAFailedActionAndNotARefusal(t *testing.T) {
 // second actuator is added and the routing is one line more complicated.
 func TestDoRefusesAVerbThisStageDoesNotPerform(t *testing.T) {
 	s := New(Config{Focuser: &fakeFocuser{}})
-	s.Observe(session(obs.Ptr(2), obs.LivenessYes))
+	s.Observe(session("2", model.LivenessYes))
 
 	if _, err := s.Do(context.Background(), act.Action{Verb: "restart", Tier: act.TierLifecycle}); err == nil {
 		t.Fatal("the navigator performed a restart")
@@ -170,19 +172,19 @@ func TestDoRefusesAVerbThisStageDoesNotPerform(t *testing.T) {
 // TestObserveChangesNothingInTheDocument — this stage is in every chain, in
 // both directions of the process: inside magmux where it can act, and outside
 // where it cannot. A stage that contributed a fact would change what `magmux
-// obs` reports depending on whether actuation was configured, which is a read
+// agents` reports depending on whether actuation was configured, which is a read
 // path that depends on the write path.
 func TestObserveChangesNothingInTheDocument(t *testing.T) {
-	in := obs.Session{
-		ID: "id-a", PID: 4242, Name: "circl", PaneID: obs.Ptr(2),
-		Status: obs.StatusBusy, Confidence: obs.TierAuthoritative,
+	in := model.Session{
+		Key: model.Key{SessionID: "id-a", PID: 4242}, PID: 4242, Name: "circl", Pane: "2",
+		Status: model.StatusBusy, Confidence: model.ConfidenceAuthoritative,
 	}
 	out := New(Config{Focuser: &fakeFocuser{}}).Observe(in)
 	if out.Status != in.Status || out.Confidence != in.Confidence || out.Name != in.Name {
 		t.Fatalf("the navigator changed the fact set: %+v", out)
 	}
-	if out.PaneID != in.PaneID {
-		t.Fatal("the navigator replaced the pane pointer")
+	if out.Pane != in.Pane || out.Key != in.Key {
+		t.Fatal("the navigator changed the pane or the key")
 	}
 }
 
@@ -192,7 +194,7 @@ func TestObserveChangesNothingInTheDocument(t *testing.T) {
 func TestACancelledContextStopsTheActionBeforeItHappens(t *testing.T) {
 	f := &fakeFocuser{}
 	s := New(Config{Focuser: f})
-	s.Observe(session(obs.Ptr(2), obs.LivenessYes))
+	s.Observe(session("2", model.LivenessYes))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -201,5 +203,32 @@ func TestACancelledContextStopsTheActionBeforeItHappens(t *testing.T) {
 	}
 	if len(f.calls) != 0 {
 		t.Fatalf("focus moved for a cancelled action: %v", f.calls)
+	}
+}
+
+// TestAPaneRefThatIsNotAMagmuxIDDeclaresNothing — the handle is opaque to the
+// library and magmux's own decimal spelling here (ADR-X1). Anything else is not
+// an address in magmux's table, and is treated as no pane: "cannot", never a
+// focus of some other pane.
+func TestAPaneRefThatIsNotAMagmuxIDDeclaresNothing(t *testing.T) {
+	for _, ref := range []model.PaneRef{"%107", "-1", "02", "two", " 2"} {
+		s := New(Config{Focuser: &fakeFocuser{}})
+		s.Observe(session(ref, model.LivenessYes))
+		if caps := s.Capabilities(); len(caps) != 0 {
+			t.Errorf("pane ref %q declared %+v", ref, caps)
+		}
+	}
+}
+
+// TestTheFactoryBuildsOneStagePerSession — a shared instance would focus the
+// first session's pane for every session that asked.
+func TestTheFactoryBuildsOneStagePerSession(t *testing.T) {
+	f := Factory(Config{Focuser: &fakeFocuser{}})
+	a, b := f(model.Key{SessionID: "a"}), f(model.Key{SessionID: "b"})
+	if a == b {
+		t.Fatal("the factory returned one instance for two sessions")
+	}
+	if a.Name() != Name {
+		t.Errorf("the stage is named %q, want %q (hosts find it by name)", a.Name(), Name)
 	}
 }

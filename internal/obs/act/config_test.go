@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
 )
 
 // configData is the migrated test data. See testdata/config/PROVENANCE.md for
@@ -296,7 +296,7 @@ func TestARuleThatNamesAToolMatchesNothing(t *testing.T) {
 	if len(p.Rules) != 1 || p.Rules[0].Tool != "Read" {
 		t.Fatalf("rules are %+v, want one carrying Tool=Read", p.Rules)
 	}
-	inside := obs.Session{ID: "id-a", LaunchDir: "/home/someone/mag/magmux"}
+	inside := model.Session{Key: model.Key{SessionID: "id-a"}, LaunchDir: "/home/someone/mag/magmux"}
 	if p.Rules[0].Matches(inside) {
 		t.Error("a rule naming a tool matched a session; nothing in this build has a tool, so " +
 			"the only honest answer is no match")
@@ -426,7 +426,7 @@ func TestALoadedPolicyDecidesWithTheFileAsItsAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loading: %v", err)
 	}
-	d := p.Decide(TierNavigate, obs.Session{ID: "id-a"})
+	d := p.Decide(TierNavigate, model.Session{Key: model.Key{SessionID: "id-a"}})
 	if !d.Allowed {
 		t.Fatalf("navigate was refused by a file that says always: %+v", d)
 	}

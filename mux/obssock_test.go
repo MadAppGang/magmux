@@ -15,8 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
 	"github.com/MadAppGang/magmux/internal/obs/act"
+	"github.com/MadAppGang/magmux/obsview"
 )
 
 // The socket-backed pane table: what closes phase 6's gap, and what it refuses.
@@ -158,23 +159,23 @@ func TestTheSocketPaneTableIsBuiltFromTheConnectTimeAggregate(t *testing.T) {
 		700010: 900001, // the wrapper   -> the pane's own shell
 	})
 
-	id, live := loc.PaneFor(700100)
-	if live != obs.LivenessYes || id != 0 {
+	id, live := loc.paneForPID(700100)
+	if live != model.LivenessYes || id != 0 {
 		t.Fatalf("the walk resolved pane %d (%v), want pane 0", id, live)
 	}
-	if id, live := loc.PaneFor(900002); live != obs.LivenessYes || id != 2 {
+	if id, live := loc.paneForPID(900002); live != model.LivenessYes || id != 2 {
 		t.Fatalf("a pane's own pid resolved to %d (%v), want pane 2", id, live)
 	}
 	// The panel has no process at all, so it contributes nothing and cannot be
 	// walked to.
-	if got := loc.PaneAlive(1); got != obs.LivenessNo {
+	if got := loc.PaneAlive(obsview.PaneRef(1)); got != model.LivenessNo {
 		t.Errorf("the control panel is in the pane table as %v; it has no pid and cannot be "+
 			"an ancestor of anything", got)
 	}
 	// A pid belonging to nothing in any magmux is a determined NO, not an
 	// undetermined answer: the walk reached init without meeting one of ours.
 	loc.ppid = stagedTree(map[int]int{700200: 1})
-	if id, live := loc.PaneFor(700200); live != obs.LivenessNo {
+	if id, live := loc.paneForPID(700200); live != model.LivenessNo {
 		t.Errorf("a session in no magmux resolved to %d (%v), want a determined no", id, live)
 	}
 }
@@ -374,7 +375,7 @@ func TestForSessionNarrowsTheTableToOneMagmux(t *testing.T) {
 	}
 
 	one, live := loc.forSession(700100)
-	if live != obs.LivenessYes || one == nil {
+	if live != model.LivenessYes || one == nil {
 		t.Fatalf("forSession = %v, %v; want a table", one, live)
 	}
 	for id, refs := range one.byPaneID {
@@ -395,10 +396,10 @@ func TestForSessionNarrowsTheTableToOneMagmux(t *testing.T) {
 		t.Error("narrowing changed the table it was built from")
 	}
 
-	if one, live := loc.forSession(700200); one != nil || live != obs.LivenessNo {
+	if one, live := loc.forSession(700200); one != nil || live != model.LivenessNo {
 		t.Errorf("a session in no magmux narrowed to %v, %v; want nil, a determined no", one, live)
 	}
-	if one, live := loc.forSession(700300); one != nil || live != obs.LivenessUnknown {
+	if one, live := loc.forSession(700300); one != nil || live != model.LivenessUnknown {
 		t.Errorf("an unwalkable session narrowed to %v, %v; want nil, undetermined", one, live)
 	}
 	if tbl := loc.bindToSession(700200); tbl != nil {
@@ -537,8 +538,10 @@ type stubPaneTable struct {
 	focused []int
 }
 
-func (s *stubPaneTable) PaneFor(pid int) (int, obs.Liveness) { return s.pane, obs.LivenessYes }
-func (s *stubPaneTable) PaneAlive(paneID int) obs.Liveness   { return obs.LivenessYes }
+func (s *stubPaneTable) PaneFor(model.Session) (model.PaneRef, model.Liveness) {
+	return obsview.PaneRef(s.pane), model.LivenessYes
+}
+func (s *stubPaneTable) PaneAlive(model.PaneRef) model.Liveness { return model.LivenessYes }
 func (s *stubPaneTable) Focus(paneID int) (int, error) {
 	s.focused = append(s.focused, paneID)
 	return -1, nil

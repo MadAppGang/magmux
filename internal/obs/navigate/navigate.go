@@ -1,28 +1,30 @@
 // Package navigate is the observation layer's one live actuator: it focuses
 // the magmux pane a session is running in, and it does nothing else.
 //
-// It is the write-half counterpart to a read-only middleware — the same
-// per-session instance, the same actor goroutine, the same fact set — with an
+// It is a host stage in the claudestate pipeline's chain — a
+// [github.com/MadAppGang/magmux/claudestate/stage.Stage] built per session by
+// [Factory] — with an
 // [github.com/MadAppGang/magmux/internal/obs/act.Actuator] implementation
 // beside its Observe. That is the shape the whole write path was built for:
 // adding R5.3's `send` later is a package like this one, satisfying the same
 // interface, plus its verb filed in act's closed verb table — and no change to
-// the actor, the gate's logic, the audit trail or any other middleware. The
-// table entry is not optional: a verb it does not contain is refused whatever
-// its actuator declares.
+// the actor, the gate's logic, the audit trail or any other stage. The table
+// entry is not optional: a verb it does not contain is refused whatever its
+// actuator declares.
 //
 // # It reads the fact set rather than the pane table
 //
-// The pane a session is in is resolved once per cycle by the pane gate and
-// arrives here as [github.com/MadAppGang/magmux/internal/obs.Session].PaneID.
-// This stage therefore does no process-tree walk of its own and cannot
-// disagree with the document about which pane it is about — a navigate that
-// focused a pane the table said was a different session's would be a wrong
-// answer that looks exactly like a right one.
+// The pane a session is in is resolved once per cycle by the library's pane
+// gate and arrives here as the session's model.PaneRef, which is magmux's pane
+// id in its decimal spelling (ADR-X1). This stage therefore does no
+// process-tree walk of its own and cannot disagree with the document about
+// which pane it is about — a navigate that focused a pane the table said was a
+// different session's would be a wrong answer that looks exactly like a right
+// one.
 //
 // # Nothing here decides whether it MAY act
 //
-// Policy is the gate's, and this package never consults it. A middleware that
+// Policy is the gate's, and this package never consults it. A stage that
 // approved its own action would be a second policy nobody configured; see the
 // act package doc.
 package navigate
@@ -31,9 +33,28 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/claudestate/stage"
 	"github.com/MadAppGang/magmux/internal/obs/act"
+	"github.com/MadAppGang/magmux/obsview"
 )
+
+// Name is the stage's name in the chain, which is how a host finds it on an
+// actor (pipeline.Ops.Call's find).
+const Name = "navigate"
+
+// PaneFocuser moves keyboard focus to a magmux pane and reports which pane
+// held it before (-1 when none did, or when that cannot be seen).
+//
+// It is the observation layer's one WRITE port, and it lives here, beside the
+// one stage that calls it, because it is a host port: the claudestate library
+// has no write half at all.
+//
+// It is called from an actor goroutine, so an implementation must not block
+// indefinitely: one that waits on a socket bounds the wait.
+type PaneFocuser interface {
+	Focus(paneID int) (previous int, err error)
+}
 
 // Config is how a [Stage] is built. A plain value, copied on the way in.
 type Config struct {
@@ -41,47 +62,48 @@ type Config struct {
 	// can — which is the honest and normal case for anything running outside
 	// a magmux — and the stage then declares NO capability rather than
 	// declaring one and refusing it. "Cannot" and "will not" are different
-	// answers; see [obs.PaneFocuser].
-	Focuser obs.PaneFocuser
+	// answers.
+	Focuser PaneFocuser
+}
+
+// Factory builds one stage per session actor.
+//
+// A nil focuser does not remove the stage; it removes the stage's ability to
+// act, which it reports by declaring no capability. That is the honest shape
+// for a process with no pane table, and it is the difference between "nothing
+// here can do that" and "you may not", which act.ErrNotCapable and
+// act.ErrForbidden keep apart all the way out to the audit trail.
+func Factory(cfg Config) stage.Factory {
+	return func(model.Key) stage.Stage { return New(cfg) }
 }
 
 // Stage is one session's navigator.
 //
 // One instance per session, never shared: it remembers its session's pane, and
 // a shared instance would focus the first session's pane for every session
-// that asked. It satisfies pipeline.Middleware and act.Actuator STRUCTURALLY —
-// it names neither, because pipeline imports this package to append the stage
-// and Go's interfaces only need the dependency to run one way, which is the
-// same arrangement internal/obs/verdict has.
+// that asked.
 type Stage struct {
-	focuser obs.PaneFocuser
+	focuser PaneFocuser
 
 	// The per-session memory, written by Observe on the actor's goroutine and
-	// read by Capabilities and Do on the same one. No lock, because there is
-	// no second goroutine: the actor serialises its own messages, and a
-	// command cannot interleave with a chain run.
-	paneID    *int
-	paneAlive obs.Liveness
-	session   string
+	// read by Capabilities and Do on the same one (pipeline.Ops.Call runs
+	// there). No lock, because there is no second goroutine.
+	paneID    int
+	hasPane   bool
+	paneAlive model.Liveness
 }
 
 // New builds one session's stage.
 func New(cfg Config) *Stage { return &Stage{focuser: cfg.Focuser} }
 
-// Name identifies the stage in diagnostics.
-func (s *Stage) Name() string { return "navigate" }
+// Name identifies the stage in the chain.
+func (s *Stage) Name() string { return Name }
 
-// Observe adds NOTHING to the fact set and changes nothing in it.
-//
-// It is a read of the document rather than a contribution to it: this stage's
-// whole job is on the write side, and the only reason it is a middleware at
-// all is that a middleware is the thing an actor owns per session and
-// type-asserts for a write half. Returning the session unchanged is what a
-// stage with nothing to say does.
-func (s *Stage) Observe(sess obs.Session) obs.Session {
-	s.paneID = sess.PaneID
+// Observe adds NOTHING to the fact set and changes nothing in it. It remembers
+// the pane the gate resolved, which is the whole of what Do needs.
+func (s *Stage) Observe(sess model.Session) model.Session {
+	s.paneID, s.hasPane = obsview.PaneID(sess.Pane)
 	s.paneAlive = sess.PaneAlive
-	s.session = sess.ID
 	return sess
 }
 
@@ -100,7 +122,7 @@ func (s *Stage) Observe(sess obs.Session) obs.Session {
 //     declared — "nobody could tell" is not "no", and the focuser gets to
 //     give the real answer rather than having one assumed for it.
 func (s *Stage) Capabilities() []act.Capability {
-	if s.focuser == nil || s.paneID == nil || s.paneAlive == obs.LivenessNo {
+	if s.focuser == nil || !s.hasPane || s.paneAlive == model.LivenessNo {
 		return nil
 	}
 	return []act.Capability{{
@@ -112,7 +134,7 @@ func (s *Stage) Capabilities() []act.Capability {
 		// twice.
 		Reversible: true,
 		Idempotent: true,
-		Describe:   fmt.Sprintf("move keyboard focus to magmux pane %d", *s.paneID),
+		Describe:   fmt.Sprintf("move keyboard focus to magmux pane %d", s.paneID),
 	}}
 }
 
@@ -122,8 +144,8 @@ func (s *Stage) Capabilities() []act.Capability {
 // the gate called them in order. Both run on this actor's goroutine and
 // nothing can interleave between them today, which makes the re-check
 // unreachable — and it is here anyway, because the day something can
-// interleave, the alternative is dereferencing a nil pane id inside the one
-// function in this layer that changes something.
+// interleave, the alternative is focusing a pane nobody resolved inside the
+// one function in this layer that changes something.
 func (s *Stage) Do(ctx context.Context, a act.Action) (act.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return act.Result{}, err
@@ -134,14 +156,14 @@ func (s *Stage) Do(ctx context.Context, a act.Action) (act.Result, error) {
 	if s.focuser == nil {
 		return act.Result{}, fmt.Errorf("navigate: nothing in this process can move focus")
 	}
-	if s.paneID == nil {
+	if !s.hasPane {
 		return act.Result{}, fmt.Errorf("navigate: no magmux pane was resolved for this session")
 	}
-	if s.paneAlive == obs.LivenessNo {
-		return act.Result{}, fmt.Errorf("navigate: magmux pane %d is gone", *s.paneID)
+	if s.paneAlive == model.LivenessNo {
+		return act.Result{}, fmt.Errorf("navigate: magmux pane %d is gone", s.paneID)
 	}
 
-	pane := *s.paneID
+	pane := s.paneID
 	previous, err := s.focuser.Focus(pane)
 	if err != nil {
 		// Reported as a failed action rather than as a refusal: the gate

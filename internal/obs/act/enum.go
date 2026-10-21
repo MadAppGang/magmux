@@ -7,22 +7,22 @@ import (
 	"strings"
 )
 
-// The three enums in this package share the shape internal/obs established and
+// The three enums in this package share the shape obsview's wire enums have and
 // this file is the one place it is implemented here, so [Tier], [Stance] and
 // [Requester] cannot drift apart: index 0 is "nothing was determined", it
 // marshals to JSON null, and unmarshal does not accept its display name back.
 //
-// It is a SECOND COPY of obs.enumSpec, deliberately and with its cost stated.
-// The alternative is exporting that shape from internal/obs, which would make
-// a helper nobody outside this layer should use part of the vocabulary
-// package's API — and the vocabulary package is the one whose surface is most
-// worth keeping small, because every other package in the layer imports it.
+// It is a SECOND COPY of obsview's enumSpec, deliberately and with its cost
+// stated. The alternative is exporting that shape from obsview, which would
+// make a helper nobody outside this layer should use part of the wire
+// package's API — and the wire package is the one whose surface is most worth
+// keeping small, because every surface imports it.
 // Forty lines of duplication against a permanent API commitment is the cheaper
 // side of that trade, and the two copies are pinned to each other by
 // TestTheEnumShapeMatchesTheCoreVocabulary.
 //
 // The zero value of every enum here REFUSES rather than permits, which is the
-// difference that matters between this copy and the one it mirrors: in obs an
+// difference that matters between this copy and the one it mirrors: on the wire an
 // unknown value means "nobody determined this fact", and here it means
 // "nothing authorised this action".
 type enumSpec struct {

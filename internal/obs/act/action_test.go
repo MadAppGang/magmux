@@ -47,7 +47,7 @@ func TestEveryDeferredTierNamesTheRequirementThatDefersIt(t *testing.T) {
 }
 
 // TestTheEnumShapeMatchesTheCoreVocabulary pins this package's copy of
-// obs.enumSpec to the rules the original states, because a copy is only safe
+// obsview's enumSpec to the rules the original states, because a copy is only safe
 // while it still behaves like the thing it copied.
 //
 // Three rules, and the third is the one a naive implementation breaks: the

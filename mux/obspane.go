@@ -3,11 +3,14 @@ package mux
 // The magmux side of the observation layer's pane port, and the pipeline's
 // lifecycle.
 //
-// internal/obs may not import mux — TestImportDirection forbids it — so the
-// pane model reaches the observation layer through an interface obs declares
-// and this file implements. That is the whole of the coupling: obs knows
-// "something can tell me which pane owns a pid", and magmux knows what a pane
-// is. Neither knows the other's vocabulary.
+// The claudestate library cannot import magmux (it is its own module, and its
+// G10 pin makes the reverse structurally impossible), so the pane model reaches
+// the observation layer through the ports the library declares
+// (claudestate/ports) and this file implements. That is the whole of the
+// coupling: the library knows "something can tell me which pane a session runs
+// in", and magmux knows what a pane is. A pane is an opaque model.PaneRef on the
+// library's side — magmux's int id in decimal (ADR-X1) — so neither knows the
+// other's vocabulary.
 
 import (
 	"context"
@@ -17,13 +20,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/claudestate/pipeline"
+	"github.com/MadAppGang/magmux/claudestate/ports"
+	"github.com/MadAppGang/magmux/claudestate/stage"
 	"github.com/MadAppGang/magmux/hub"
-	"github.com/MadAppGang/magmux/internal/obs"
 	"github.com/MadAppGang/magmux/internal/obs/act"
-	"github.com/MadAppGang/magmux/internal/obs/claudecode"
+	"github.com/MadAppGang/magmux/internal/obs/navigate"
 	"github.com/MadAppGang/magmux/internal/obs/notify"
-	"github.com/MadAppGang/magmux/internal/obs/pipeline"
-	"github.com/MadAppGang/magmux/internal/obs/registry"
+	"github.com/MadAppGang/magmux/obsview"
 	"github.com/MadAppGang/magmux/proc"
 )
 
@@ -36,13 +41,14 @@ import (
 // tell", never "no": a walk that ran out of hops established nothing.
 const maxAncestryHops = 16
 
-// muxPaneLocator answers [obs.PaneLocator] against magmux's pane table.
+// muxPaneLocator answers ports.PaneLocator, ports.PaneActivity and
+// ports.PaneShell against magmux's pane table, and navigate.PaneFocuser beside
+// them.
 //
-// One of these is built per pipeline and handed to the pane-gate middleware,
+// One of these is built per pipeline and handed to the library's pane gate,
 // which calls it from an actor goroutine. It holds no state of its own beyond
-// the seams below, so it is safe to share between actors — unlike the
-// middleware itself, which remembers its session's pane and may never be
-// shared.
+// the seams below, so it is safe to share between actors — unlike a stage,
+// which may remember its session and is never shared.
 type muxPaneLocator struct {
 	m *Magmux
 	// ppid is the parent lookup, indirected so a test can stage a process
@@ -68,8 +74,18 @@ type muxPaneLocator struct {
 
 func newPaneLocator(m *Magmux) *muxPaneLocator { return &muxPaneLocator{m: m} }
 
-// PaneFor walks UP the process tree from pid until it reaches a pid that is a
-// pane's.
+// PaneFor answers ports.PaneLocator: the pane a session runs in, found from the
+// session's pid by paneForPID's walk, as a PaneRef.
+func (l *muxPaneLocator) PaneFor(s model.Session) (model.PaneRef, model.Liveness) {
+	id, found := l.paneForPID(s.PID)
+	if found != model.LivenessYes {
+		return "", found
+	}
+	return obsview.PaneRef(id), found
+}
+
+// paneForPID walks UP the process tree from pid until it reaches a pid that is
+// a pane's.
 //
 // # Why a walk and not a comparison
 //
@@ -90,10 +106,10 @@ func newPaneLocator(m *Magmux) *muxPaneLocator { return &muxPaneLocator{m: m} }
 // walk costs at worst one stale answer on one cycle, and the next cycle
 // re-asks; holding the lock instead would put every keystroke, SIGWINCH and
 // socket verb behind a process-tree walk.
-func (l *muxPaneLocator) PaneFor(pid int) (int, obs.Liveness) {
+func (l *muxPaneLocator) paneForPID(pid int) (int, model.Liveness) {
 	if pid <= 0 {
 		// Not a pid. Nothing was established, so nothing is claimed.
-		return 0, obs.LivenessUnknown
+		return 0, model.LivenessUnknown
 	}
 
 	byPID := l.panePIDs()
@@ -101,7 +117,7 @@ func (l *muxPaneLocator) PaneFor(pid int) (int, obs.Liveness) {
 		// No pane in this magmux has a process, so no pane owns this one.
 		// Determined, and worth answering without a single syscall: it is the
 		// answer for every session on a machine running some other magmux.
-		return 0, obs.LivenessNo
+		return 0, model.LivenessNo
 	}
 
 	return walkToPane(pid, byPID, l.ppid, l.hops)
@@ -132,7 +148,7 @@ func (l *muxPaneLocator) PaneFor(pid int) (int, obs.Liveness) {
 // `magmux agents focus` then refused most sessions on any machine with two
 // magmuxes as ambiguous. A miss returns the zero value, which is meaningless
 // unless the Liveness is LivenessYes, exactly as before.
-func walkToPane[V any](pid int, byPID map[int]V, lookup func(int) (int, error), hops int) (V, obs.Liveness) {
+func walkToPane[V any](pid int, byPID map[int]V, lookup func(int) (int, error), hops int) (V, model.Liveness) {
 	var none V
 	if lookup == nil {
 		lookup = proc.PPIDOf
@@ -145,12 +161,12 @@ func walkToPane[V any](pid int, byPID map[int]V, lookup func(int) (int, error), 
 	cur := pid
 	for i := 0; i < hops; i++ {
 		if id, ok := byPID[cur]; ok {
-			return id, obs.LivenessYes
+			return id, model.LivenessYes
 		}
 		if cur <= 1 {
 			// Walked all the way to init without meeting one of ours. A plain
 			// miss, and a determined one: this session is not magmux's.
-			return none, obs.LivenessNo
+			return none, model.LivenessNo
 		}
 		parent, err := lookup(cur)
 		if err != nil {
@@ -158,22 +174,22 @@ func walkToPane[V any](pid int, byPID map[int]V, lookup func(int) (int, error), 
 			// error means. Everything above this link is unreadable, so the
 			// pane may be up there and we cannot see it — undetermined, not
 			// absent.
-			return none, obs.LivenessUnknown
+			return none, model.LivenessUnknown
 		}
 		if parent <= 0 {
 			// The top of the tree, reached honestly.
-			return none, obs.LivenessNo
+			return none, model.LivenessNo
 		}
 		if seen[parent] {
 			// A cycle is impossible in a process tree and therefore means a
 			// bad read. Refusing to spin is the point of the bound; claiming
 			// "no" on the strength of a bad read is not.
-			return none, obs.LivenessUnknown
+			return none, model.LivenessUnknown
 		}
 		seen[parent] = true
 		cur = parent
 	}
-	return none, obs.LivenessUnknown
+	return none, model.LivenessUnknown
 }
 
 // PaneAlive reports whether the pane still EXISTS in magmux, which is a
@@ -189,7 +205,7 @@ func walkToPane[V any](pid int, byPID map[int]V, lookup func(int) (int, error), 
 //     no id will ever name it again.
 //   - dead — the process exited but the pane is still on screen with its
 //     ✓ DONE / ✗ FAIL overlay. LivenessYes. The process being gone is the
-//     OTHER gate, [obs.Session.ProcessAlive], and the two are separate fields
+//     OTHER gate, model.Session.ProcessAlive, and the two are separate fields
 //     precisely because they fail separately: "the agent finished but its pane
 //     is still there" and "the pane was closed out from under it" are
 //     different situations with different remedies, and answering No here
@@ -201,26 +217,28 @@ func walkToPane[V any](pid int, byPID map[int]V, lookup func(int) (int, error), 
 //     would make Ctrl-G p look like a session dying.
 //
 // An id past the end of the append-only table was never allocated, which is a
-// determined no. A NEGATIVE id is not an address at all, so it is answered
-// undetermined rather than no: "there is no such pane" would claim we looked.
+// determined no. A ref that is not a magmux id at all (empty, negative, not
+// decimal) is not an address, so it is answered undetermined rather than no:
+// "there is no such pane" would claim we looked.
 //
 // The resolution goes through paneByIDLocked because that and livePanesLocked
 // are the only legal ways to turn an int into a *Pane — Pane.id IS the index
 // into an append-only slot table, and a raw subscript reaches a detached pane
 // with no error, no repaint and no log.
-func (l *muxPaneLocator) PaneAlive(paneID int) obs.Liveness {
-	if paneID < 0 {
-		return obs.LivenessUnknown
+func (l *muxPaneLocator) PaneAlive(ref model.PaneRef) model.Liveness {
+	paneID, ok := obsview.PaneID(ref)
+	if !ok {
+		return model.LivenessUnknown
 	}
 	l.m.treeMu.RLock()
 	defer l.m.treeMu.RUnlock()
 	if l.m.paneByIDLocked(paneID) == nil {
-		return obs.LivenessNo
+		return model.LivenessNo
 	}
-	return obs.LivenessYes
+	return model.LivenessYes
 }
 
-// Activity answers [obs.PaneActivity]: when the pane last produced output, and
+// Activity answers ports.PaneActivity: when the pane last produced output, and
 // when something was last pushed into it. It is the whole of the inferred
 // tier's input.
 //
@@ -249,8 +267,9 @@ func (l *muxPaneLocator) PaneAlive(paneID int) obs.Liveness {
 // vanished pane must not report them. false is "there is no pane to ask
 // about", and the inferred tier then has no opinion at all rather than the
 // opinion that this pane has been silent since the epoch.
-func (l *muxPaneLocator) Activity(paneID int) (lastOutput, lastInput time.Time, ok bool) {
-	if paneID < 0 {
+func (l *muxPaneLocator) Activity(ref model.PaneRef) (lastOutput, lastInput time.Time, ok bool) {
+	paneID, valid := obsview.PaneID(ref)
+	if !valid {
 		// Not an address. Nothing was established, so nothing is claimed.
 		return time.Time{}, time.Time{}, false
 	}
@@ -264,7 +283,7 @@ func (l *muxPaneLocator) Activity(paneID int) (lastOutput, lastInput time.Time, 
 	return out, in, true
 }
 
-// Focus answers [obs.PaneFocuser]: it moves keyboard focus to a pane and
+// Focus answers navigate.PaneFocuser: it moves keyboard focus to a pane and
 // reports which pane held it before.
 //
 // # It is the ONLY thing in magmux the observation layer can change
@@ -355,22 +374,25 @@ func (l *muxPaneLocator) Focus(paneID int) (int, error) {
 // therefore the answer. magmux never chdirs, so it is stable for the life of
 // the process.
 //
-// # A wrong answer here costs a search, never a wrong session
+// # It locates nothing any more
 //
-// One case is knowingly imperfect: a pane launched as `cd /foo && claude …`
-// has an empty cmd.Dir and really starts in /foo, so this returns magmux's
-// directory instead. That is safe because a transcript is addressed by SESSION
-// ID — a wrong directory can only MISS, and a miss falls through to the scan,
-// which finds it. The same is true of a session that moved after startup. What
-// would not be safe is a resolver that picked a file by anything other than
-// the session id; see adapters.Transcripts.Locate.
+// Until the claudestate library, this value was the transcript resolver's fast
+// path. The library locates every transcript by SESSION ID, by a glob of
+// projects/*/<id>.jsonl (D5), so a wrong directory cannot even cost a search.
+// The value is still published, as the session's launchDir, and act's rules
+// match it — which is why the launchdir host stage below, and nothing else,
+// sets model.Session.LaunchDir (claudestate architecture §3.2).
+//
+// One case is knowingly imperfect, and it is the same as before: a pane
+// launched as `cd /foo && claude …` has an empty cmd.Dir and really starts in
+// /foo, so this returns magmux's directory instead.
 //
 // Ancestry, not identity: the session's pid is the tool's and the pane's is
-// the shell's, so the pane is found by the same walk PaneFor does rather than
-// by a comparison that never matches.
-func (l *muxPaneLocator) LaunchDir(pid int) (string, bool) {
-	id, found := l.PaneFor(pid)
-	if found != obs.LivenessYes {
+// the shell's, so the pane is found by the same walk the pane gate uses rather
+// than by a comparison that never matches.
+func (l *muxPaneLocator) launchDir(pid int) (string, bool) {
+	id, found := l.paneForPID(pid)
+	if found != model.LivenessYes {
 		return "", false
 	}
 
@@ -449,6 +471,47 @@ func (l *muxPaneLocator) panePIDs() map[int]int {
 	return byPID
 }
 
+// ── the launchdir host stage ────────────────────────────────────────────────
+
+// launchDirStageName is the stage's name in the chain.
+const launchDirStageName = "launchdir"
+
+// launchDirStage is the ONE source of model.Session.LaunchDir (claudestate
+// architecture §3.2). No Claude record states a launch directory — the
+// registry's cwd is the LIVE directory — and magmux is the one process that
+// knows it, for the panes it spawned. It replaces the library's deleted
+// LaunchDirs port without changing the value: its contract is the call site
+// and the body of the old fast path, exactly.
+//
+// It acts only when all four of the old call site's conditions hold: the
+// pipeline has a projects tree, the session has an id, it has no launch
+// directory yet, and it has a pid. Then it walks the pid's ancestry to a pane
+// (launchDir), and only a LivenessYes walk counts. It does NOT read s.Pane, so
+// a pane gate answering Unknown (under a failing CycleLocator, say) cannot
+// change the value.
+type launchDirStage struct {
+	loc      *muxPaneLocator
+	projects bool
+}
+
+// launchDirFactory builds the stage. projects is whether the pipeline was given
+// a projects tree, the first of the four conditions.
+func launchDirFactory(loc *muxPaneLocator, projects bool) stage.Factory {
+	return func(model.Key) stage.Stage { return &launchDirStage{loc: loc, projects: projects} }
+}
+
+func (st *launchDirStage) Name() string { return launchDirStageName }
+
+func (st *launchDirStage) Observe(s model.Session) model.Session {
+	if !st.projects || st.loc == nil || s.Key.SessionID == "" || s.LaunchDir != "" || s.PID <= 0 {
+		return s
+	}
+	if dir, ok := st.loc.launchDir(s.PID); ok && dir != "" {
+		s.LaunchDir = dir
+	}
+	return s
+}
+
 // ── lifecycle ───────────────────────────────────────────────────────────────
 
 // obsEnvVar switches the observation pipeline on.
@@ -471,11 +534,19 @@ func (l *muxPaneLocator) panePIDs() map[int]int {
 // has a registry root of its own to point at.
 const obsEnvVar = "MAGMUX_AGENTS"
 
+// obsHost is a running observation layer: the library's pipeline, and the
+// write path that runs on its coordinator (obsact.go).
+type obsHost struct {
+	p    *pipeline.Pipeline
+	acts *obsActions
+}
+
 // startObservationIfEnabled starts the pipeline when MAGMUX_AGENTS asked for it.
 //
 // enabled is Main's ONE read of MAGMUX_AGENTS, the same value it wrote into
 // panelPrivate on the struct literal; this function reads no environment
-// variable of its own, so the switch and the panel's privacy cannot disagree.
+// variable of its own beyond the Claude root's, so the switch and the panel's
+// privacy cannot disagree.
 //
 // Called from Main() AFTER the layout is built, the panel is attached and the
 // read loops are running — so pane ids are final. Starting it earlier would
@@ -496,47 +567,35 @@ const obsEnvVar = "MAGMUX_AGENTS"
 // # The oracle is a PARAMETER, and that is what keeps the test suite off live
 // pids
 //
-// It would be shorter to name obsOracle here. It used to, and the consequence
-// was that every test reaching this function — or startObservationWith beneath
-// it — sent kill(pid, 0) to whatever pid its temporary registry happened to
-// name, on the machine running the suite. That is forbidden outright by
-// testdata/PROVENANCE.md rule 2, and it was true of four call sites.
-//
-// Passing it in makes the rule STRUCTURAL rather than a habit: Main() is the
-// only caller that names obsOracle, a test physically cannot reach the signal
-// probe without naming it too, and TestNoTestCanReachTheSignalOracle fails if
-// one ever does. nil is a legitimate argument and means "nobody can answer",
-// which registry answers with LivenessUnknown rather than with a probe — see
-// registry.Config.Oracle, where phase 2 chose that default precisely so
-// forgetting to inject one is honest rather than dangerous.
-func (m *Magmux) startObservationIfEnabled(enabled bool, oracle registry.ProcessOracle) {
+// Main() is the only caller that names the real probe (proclive.New(), in
+// cli.go), a test physically cannot reach it without naming it too, and
+// TestNoTestCanReachTheSignalOracle fails if one ever does. nil is a
+// legitimate argument and means "nobody can answer", which the library answers
+// with LivenessUnknown rather than with a probe.
+func (m *Magmux) startObservationIfEnabled(enabled bool, oracle ports.ProcessOracle) {
 	if !enabled {
 		return
 	}
-	root, err := defaultRegistryRoot()
+	// The whole Claude root: sessions/, jobs/ and projects/ under
+	// $CLAUDE_CONFIG_DIR, else ~/.claude, with Base set so that creating jobs/
+	// later wakes the pipeline (tt's M12).
+	root, err := ports.RootFromEnv()
 	if err == nil {
-		// The transcript tree is resolved separately and its absence is not
-		// fatal: a machine with a registry and no transcripts yet is a machine
-		// with sessions that have not written one, and the harness-derived
-		// columns are undetermined rather than the layer being off.
-		projects, _ := defaultProjectsRoot()
-
 		// The action policy and the audit trail. Both are resolved HERE, in
 		// the one function that is a program entry point, for the same reason
 		// the oracle is a parameter: a default that reached the real home
 		// directory would put the developer's own audit trail into `go test .`
 		// through the back door, and the struct below is what a test points
 		// somewhere else.
-		//
 		policy, perr := loadObsPolicy()
 		if perr != nil {
-			// SAID OUT LOUD, and this is now reachable. A config the user
-			// wrote and mistyped that silently becomes the default is how
-			// somebody discovers months later that their rules never applied,
-			// which is the failure R6.3 is written against. It goes to stderr
-			// for the same reason the "observation is off" line does: under a
-			// tty it will be painted over by the next frame, and headless —
-			// where nobody is watching — it is the only report there is.
+			// SAID OUT LOUD. A config the user wrote and mistyped that
+			// silently becomes the default is how somebody discovers months
+			// later that their rules never applied, which is the failure R6.3
+			// is written against. It goes to stderr for the same reason the
+			// "observation is off" line does: under a tty it will be painted
+			// over by the next frame, and headless — where nobody is watching
+			// — it is the only report there is.
 			fmt.Fprintf(os.Stderr, "magmux: %v\n", perr)
 		}
 		auditPath, aerr := act.DefaultAuditPath()
@@ -547,8 +606,10 @@ func (m *Magmux) startObservationIfEnabled(enabled bool, oracle registry.Process
 			auditPath = ""
 		}
 		err = m.startObservationWith(obsConfig{
-			Root:      root,
-			Projects:  projects,
+			Root:      root.Sessions.Path,
+			Jobs:      root.Jobs.Path,
+			Projects:  root.Projects.Path,
+			Base:      root.Base,
 			Oracle:    oracle,
 			Policy:    policy,
 			AuditPath: auditPath,
@@ -576,9 +637,7 @@ func (m *Magmux) startObservationIfEnabled(enabled bool, oracle registry.Process
 // permissive one, and the error rides back BESIDE the policy rather than
 // instead of it — so a caller that ignores the error still gets the safe
 // posture, and one that reports it can say why the file it expected is not in
-// force. Phase 6 built that and tested it against injected failures; phase 7
-// added act.FileLoader underneath, and this function is the only place in
-// magmux that names it.
+// force.
 //
 // # Why it is a function and not four lines at each entry point
 //
@@ -617,20 +676,30 @@ type obsConfig struct {
 	// Root is the session registry directory. Required.
 	Root string
 
+	// Jobs is the background-jobs tree, or "" for none (the source is then
+	// reported Off). Empty is not an error: a machine that has never run a
+	// background session has no jobs/ directory.
+	Jobs string
+
 	// Projects is the transcript tree, or "" for none. Empty is not an error:
-	// the Claude Code middleware built with an empty root adds nothing at all,
-	// and every harness-derived fact stays undetermined — which is exactly
-	// what a machine with no transcripts looks like.
+	// every harness-derived fact stays undetermined, which is exactly what a
+	// machine with no transcripts looks like — and with no projects tree the
+	// launchdir stage sets nothing, as the old fast path did not run.
 	Projects string
+
+	// Base is the Claude root itself, when the three trees are its
+	// subdirectories: it is armed while jobs/ does not exist, so creating it
+	// wakes the pipeline (tt's M12). "" when the trees were given separately.
+	Base string
 
 	// Oracle answers the process-liveness gate.
 	//
-	// nil means NOBODY can answer, which yields obs.LivenessUnknown for every
-	// session — honest, and what a test that did not inject one should get
-	// rather than a probe that signals whatever pids happen to exist on the
-	// machine running the suite. The real probe is obsOracle, named by Main()
-	// and by nothing else in this file.
-	Oracle registry.ProcessOracle
+	// nil means NOBODY can answer, which yields model.LivenessUnknown for
+	// every session — honest, and what a test that did not inject one should
+	// get rather than a probe that signals whatever pids happen to exist on the
+	// machine running the suite. The real probe is proclive.New(), named by
+	// Main() and by nothing else in this file.
+	Oracle ports.ProcessOracle
 
 	// Policy is the action policy. THE ZERO VALUE REFUSES EVERYTHING, and a
 	// test that wants to exercise a navigate has to say act.Default() out
@@ -642,20 +711,14 @@ type obsConfig struct {
 	// AuditPath is the file every action and every refusal is recorded in.
 	//
 	// EMPTY MEANS NO TRAIL, and no trail means no action: the gate refuses
-	// with act.ErrUnaudited rather than acting unrecorded. It is spelled this
-	// way round for the same reason Oracle is — a default that resolved
-	// ${XDG_STATE_HOME:-~/.local/state} would have `go test .` appending to
-	// the developer's own audit trail, which is exactly the class of accident
-	// testdata/PROVENANCE.md exists to prevent. Main() names the real path;
-	// nothing else does.
+	// with act.ErrUnaudited rather than acting unrecorded. Main() names the
+	// real path; nothing else does.
 	AuditPath string
 
-	// Notify delivers a notification to a human.
-	//
-	// nil MEANS NOTHING IS DELIVERED, and it is the same kind of seam as
-	// Oracle and AuditPath: a default that reached the real notification
-	// centre would have `go test .` raising banners on the developer's own
-	// desktop. Main() names newNotifier(); nothing else does.
+	// Notify delivers a notification to a human. nil MEANS NOTHING IS
+	// DELIVERED: a default that reached the real notification centre would
+	// have `go test .` raising banners on the developer's own desktop. Main()
+	// names newNotifier(); nothing else does.
 	//
 	// It does not decide WHETHER to notify — Policy.Notify does, and its zero
 	// value is silence. A magmux with a port and no notify configuration says
@@ -663,21 +726,43 @@ type obsConfig struct {
 	Notify notify.Port
 }
 
+// claudeTree is one directory as a library Tree, or the zero Tree (an absent
+// source) for "".
+func claudeTree(dir string) (ports.Tree, error) {
+	if dir == "" {
+		return ports.Tree{}, nil
+	}
+	return ports.TreeAt(dir)
+}
+
+// claudeRoot builds the library's Root from the three directories and the
+// base. TreeAt resolves symlinks for the watcher and reads metadata only.
+func claudeRoot(sessions, jobs, projects, base string) (ports.Root, error) {
+	var r ports.Root
+	for _, t := range []struct {
+		dir string
+		dst *ports.Tree
+	}{{sessions, &r.Sessions}, {jobs, &r.Jobs}, {projects, &r.Projects}} {
+		tree, err := claudeTree(t.dir)
+		if err != nil {
+			return ports.Root{}, err
+		}
+		*t.dst = tree
+	}
+	r.Base = base
+	return r, nil
+}
+
 // startObservation starts the pipeline against a registry root and NOTHING
-// else: no transcript tree and no liveness oracle.
+// else: no jobs tree, no transcript tree and no liveness oracle.
 //
-// Both absences are the reason this form exists, and both are about the test
-// suite rather than about production. Nothing in this repository may read the
-// real ~/.claude, so a form that quietly defaulted to $HOME/.claude/projects
+// Every absence is the reason this form exists, and all of them are about the
+// test suite rather than about production. Nothing in this repository may read
+// the real ~/.claude, so a form that quietly defaulted to $HOME/.claude/projects
 // would put thirty live agents' transcripts into `go test .` through the back
 // door — and nothing in this repository may probe a live pid, so a form that
-// quietly defaulted to obsOracle would send kill(pid, 0) to whatever pid a
-// temporary registry happened to name. It used to, and that was a real
-// violation of testdata/PROVENANCE.md rule 2 rather than a hypothetical one.
-//
-// With neither, the harness-derived facts and both liveness answers are
-// undetermined, which is what a machine with no transcripts and no oracle
-// honestly looks like.
+// quietly defaulted to the real oracle would send kill(pid, 0) to whatever pid a
+// temporary registry happened to name.
 func (m *Magmux) startObservation(root string) error {
 	return m.startObservationWith(obsConfig{Root: root})
 }
@@ -703,13 +788,8 @@ func (m *Magmux) startObservationWith(cfg obsConfig) error {
 	// nothing — the directory and the file appear when the first record is
 	// written — so this is a path check and a refusal, and the refusal that
 	// matters is a path under ~/.claude, which NFR1 forbids without
-	// exception.
-	//
-	// A refused path stops the whole pipeline rather than starting one that
-	// cannot act. That is louder than degrading, and it is the right way
-	// round: the caller here is startObservationIfEnabled, which treats any
-	// error as "the instrument is off" and says so on stderr when headless.
-	// magmux itself is unaffected either way.
+	// exception. A refused path stops the whole pipeline rather than starting
+	// one that cannot act: louder than degrading, and the right way round.
 	var auditor act.Auditor
 	if cfg.AuditPath != "" {
 		w, err := act.NewWriter(act.WriterConfig{Path: cfg.AuditPath})
@@ -719,99 +799,70 @@ func (m *Magmux) startObservationWith(cfg obsConfig) error {
 		auditor = w
 	}
 
+	root, err := claudeRoot(cfg.Root, cfg.Jobs, cfg.Projects, cfg.Base)
+	if err != nil {
+		return err
+	}
+
 	locator := newPaneLocator(m)
+	acts := newObsActions(cfg.Policy, auditor, cfg.Notify, time.Now)
 	p, err := pipeline.Start(pipeline.Config{
-		Root: cfg.Root,
+		Root: root,
 		// Injected, never named here. A nil oracle leaves both liveness
-		// answers undetermined rather than probing, which is the honest
-		// answer for a caller that could not or would not supply one.
+		// answers undetermined rather than probing.
 		Oracle: cfg.Oracle,
-		// The pane gate. A nil locator here would be the honest answer for a
-		// process with no pane table; magmux is the one process that has one.
-		Locator: locator,
-		// The Claude Code middleware, after the gate. This is where a session
-		// stops being described from the outside: the colour, the API-error
-		// count and the subagent count are the tool's own record of itself.
+		// The locator serves as the pane port, the activity port and the
+		// shell port, and as the focuser of the navigate stage. It is the only
+		// object that knows the pane table, and every one of those questions
+		// is answered from it with no state OF ITS OWN, which is what makes it
+		// safe for every actor to share. The shell port advances a latch, but
+		// that latch lives on the PANE.
 		//
-		// The locator serves five times — as the pane port, the
-		// launch-directory port, the activity port, the shell port and the
-		// focuser — and that is deliberate. It is the only object that knows
-		// the pane table, and every one of those questions is answered from
-		// it with no state OF ITS OWN, which is what makes it safe for every
-		// actor to share. The shell port advances a latch, but that latch
-		// lives on the PANE; the locator still remembers nothing.
-		//
-		// This is the line that turns the inferred tier on. Inside magmux
-		// there is a pane to be silent, so the verdict stage has two tiers to
-		// weigh and a conflict is possible; `magmux agents`, running outside any
-		// magmux, passes nothing here and resolves on the authoritative tier
-		// alone.
+		// Activity is the line that turns the inferred tier on: inside magmux
+		// there is a pane to be silent, so the verdict has two tiers to weigh
+		// and a conflict is possible. Shell is the generic tier's direct
+		// evidence, and the one port here that would silently change the
+		// layer's answers by being left out.
+		Locator:  locator,
 		Activity: locator,
-		// The GENERIC tier's direct evidence: tcgetpgrp behind its latch, and
-		// the pane's OSC 133 marks. The same locator again, for the same
-		// reason — it is the object that knows the pane table — but with one
-		// difference worth naming here rather than only at the method: this
-		// port MUTATES. Calling it is what advances each pane's job-control
-		// latch, so it is the one line in this config that would silently
-		// change the layer's answers by being left out, rather than merely
-		// narrowing them.
-		Shell: locator,
-		// The WRITE port, and the last thing the one locator answers. This
-		// is the line that makes R5.1 possible at all inside magmux: a
-		// process that passes nothing here can observe every session and
-		// focus none of them, which is what `magmux agents` honestly is.
-		Focuser: locator,
-		// The posture and the trail. Both come from the caller, and the zero
-		// value of both refuses — a pipeline built by a test that says
-		// nothing about either cannot act, which is the safe direction and
-		// the one a struct literal falls into.
-		Policy: cfg.Policy,
-		Audit:  auditor,
-		// The notification port, and the fourth thing that is a PARAMETER
-		// rather than a default for the same reason the oracle is: a default
-		// that reached the real notification centre would have `go test .`
-		// raising banners on the developer's own desktop. Main() names
-		// newNotifier(); nothing else does.
-		//
-		// A nil port does not silence the notifier — cfg.Policy.Notify does,
-		// and its zero value is silence. A nil port means nothing here can
-		// DELIVER, which is recorded as such rather than passed off as sent.
-		Notify: cfg.Notify,
-		Chain: []pipeline.Factory{claudecode.Middleware(claudecode.Config{
-			Root:       cfg.Projects,
-			LaunchDirs: locator,
-		})},
-		Watch: true,
-		// Separate from Clock on purpose; see registry.Config.Now.
+		Shell:    locator,
+		// The host stages, after the library's transcript stage and before
+		// its verdict: launchdir (the one source of LaunchDir, first so the
+		// others see it), navigate (the WRITE half; a process that leaves it
+		// out can observe every session and focus none) and notify (the
+		// decision; the zero policy inside it is silence).
+		Chain: []stage.Factory{
+			launchDirFactory(locator, !root.Projects.IsZero()),
+			navigate.Factory(navigate.Config{Focuser: locator}),
+			notify.Factory(notify.Config{Policy: cfg.Policy}),
+		},
+		// The announcer: audit, then deliver, on the coordinator.
+		OnEffects: acts.onEffects,
+		Watch:     true,
+		Clock:     ports.RealClock(),
+		// Separate from the clock on purpose: the epoch is a fact about this
+		// READ, and the clock's job is to make one-shot timers.
 		Now: time.Now,
 	})
 	if err != nil {
 		return err
 	}
-	m.obs = p
+	m.obs = &obsHost{p: p, acts: acts}
 
 	// The chrome sink, subscribed BEFORE the refresh below. Nothing is
 	// replayed, so a sink that attaches after the first cycle waits for the
 	// next record change — which on a quiet machine is a long time to look at
 	// an empty panel.
-	//
-	// A failed subscribe stops the whole pipeline rather than starting one
-	// whose document nothing on magmux's side can see. It is only reachable
-	// against a hub that has already stopped, which cannot happen here.
 	if err := m.startObsSink(p); err != nil {
 		p.Stop()
 		m.obs = nil
 		return err
 	}
 
-	// One cycle now, and exactly one: it gives every session an actor and
-	// gives the source its first known-good state, so the first record change
-	// is a change against something rather than a first sighting. There is no
+	// One cycle now, and exactly one: it gives every session an actor and the
+	// sources their first known-good state, so the first record change is a
+	// change against something rather than a first sighting. There is no
 	// ticker behind it and no second one.
-	//
-	// It is NOT a document for later subscribers — nothing is replayed, and a
-	// sink that attaches after this has to ask for its own [Pipeline.Refresh].
-	// Subscribe first, then refresh, is the order; see consumeObs.
 	p.Refresh()
 	return nil
 }
@@ -821,22 +872,16 @@ func (m *Magmux) startObservationWith(cfg obsConfig) error {
 // On the quit path in Main(), not in restore(): restore() is terminal
 // restoration and returns early when headless, so stopping there would leak
 // every goroutine in a headless run. Pipeline.Stop is the shutdown barrier —
-// it returns only once the watcher, every actor and the hub have finished and
-// every subscription has been closed, so no sink can be mid-write when the
-// process exits. CLAUDE.md records the matching failure on the socket side: a
-// snapshot still queued when m.quit closes is simply lost, and that lost
-// snapshot was issue #2.
+// it returns only once the watcher, every actor and the coordinator have
+// finished and every subscription has been closed, so no sink can be mid-write
+// when the process exits.
 func (m *Magmux) stopObservation() {
 	if m.obs == nil {
 		return
 	}
-	m.obs.Stop()
+	m.obs.p.Stop()
 	// AFTER Pipeline.Stop, which closes every subscription — that close is
 	// what ends the sink's range, so waiting before it would wait for ever.
-	// The wait itself is the barrier extended over the one sink that lives on
-	// magmux's side of the hub: it writes into the control panel, and a panel
-	// written to after the terminal has been restored is a write nobody can
-	// see and a race nobody expected.
 	m.stopObsSink()
 	m.obs = nil
 }
@@ -844,41 +889,29 @@ func (m *Magmux) stopObservation() {
 // obsFocusSession focuses the magmux pane a session is running in.
 //
 // It is magmux's own entry to the write path and the only one: R5.1, through
-// the gate, with an audit record either way. There is no second route that
-// skips the gate, and the actor commands beneath it are unexported precisely
-// so that there cannot be.
-//
-// # What reaches it, and what reaches the same gate another way
+// the gate, with an audit record either way, run on the pipeline's coordinator
+// through Exec. There is no second route that skips the gate.
 //
 // Nothing on a keyboard or a socket calls this function yet; its callers are
-// the tests. A chord would be chrome, and nobody has asked for one or reviewed
-// one.
+// the tests. `magmux agents focus` reaches the SAME gate by another route —
+// see obsfocus.go — and it CAN focus a pane, over the socket.
 //
-// `magmux agents focus` reaches the SAME gate by another route, and it CAN focus
-// a pane. It runs outside any magmux, so it has no pane table of its own, and
-// it builds one over the socket instead — obssock.go reads every reachable
-// magmux's connect-time aggregate, which already carries each pane's id and its
-// child's pid, walks the session's ancestry to a pane, and sends the existing
-// `focus` verb to the one magmux the walk reached. No new verb was needed.
-//
-// This comment said, until fix round 2, that `magmux agents focus` "holds no pane
-// table, so it reports honestly that it cannot focus one", and described the
-// socket route as future work. That stopped being true in phase 7; README.md
-// and obsfocus.go said so, and this comment was the one place that still did
-// not. It now reports only what `magmux agents focus` does with NO magmux running:
-// no pane table, no capability, and a recorded refusal.
+// The session is named by its id. Two sessions on one id (D12) are refused
+// before the gate, naming both: there is no such thing as "the" session then.
+// An id nothing observes is asked of the gate anyway, which refuses it as
+// "nothing can do this" and records the refusal.
 //
 // The returned report carries every audit line written for the request, so a
 // caller can show the trail it just made. A refusal is an ERROR: nothing here
 // declines to act and returns nil.
 func (m *Magmux) obsFocusSession(ctx context.Context, sessionID string, by act.Requester) (act.Report, error) {
 	if m.obs == nil {
-		return act.Report{}, fmt.Errorf("session observation is not running")
+		return act.Report{}, errNotObserving
 	}
-	return m.obs.Do(ctx, act.Request{
+	return m.obs.acts.do(ctx, m.obs.p, act.Request{
 		Action: act.Action{Verb: act.VerbFocus, Tier: act.TierNavigate, Session: sessionID},
 		By:     by,
-	})
+	}, keyByID(sessionID))
 }
 
 // obsEnabled reads the switch. Anything that is not an obvious "off" counts as

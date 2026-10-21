@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
 )
 
 // Stance is what the policy says about one [Tier]. It is requirements.md R6's
@@ -131,7 +131,7 @@ type Rule struct {
 	// this changes nothing about that.
 	Do Tier
 
-	// LaunchDir matches [obs.Session.LaunchDir]. A trailing "/**" matches the
+	// LaunchDir matches [model.Session.LaunchDir]. A trailing "/**" matches the
 	// directory and everything beneath it; otherwise it is a path.Match
 	// pattern, so "*" does not cross a separator. No tilde expansion and no
 	// environment substitution happen HERE — the loader owns the file's
@@ -154,7 +154,7 @@ type Rule struct {
 }
 
 // Matches reports whether this rule applies to a session.
-func (r Rule) Matches(s obs.Session) bool {
+func (r Rule) Matches(s model.Session) bool {
 	if r.Tool != "" {
 		// Nothing in this build observes which tool a permission prompt is
 		// for, so there is nothing this term could be true of. Refusing here
@@ -399,7 +399,7 @@ type Decision struct {
 // gate and happens before this is called, because a deferral is not a policy
 // decision — no configuration can change it, and reporting it as a stance
 // would suggest one could.
-func (p Policy) Decide(t Tier, s obs.Session) Decision {
+func (p Policy) Decide(t Tier, s model.Session) Decision {
 	src := p.Source
 	if src == "" {
 		// A policy built as a literal with no source is still a policy and

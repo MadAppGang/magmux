@@ -10,6 +10,7 @@ import (
 
 	"github.com/MadAppGang/magmux/auth"
 	"github.com/MadAppGang/magmux/buildinfo"
+	"github.com/MadAppGang/magmux/claudestate/proclive"
 	"github.com/MadAppGang/magmux/sockdir"
 	"github.com/MadAppGang/magmux/theme"
 	"github.com/MadAppGang/magmux/transport/firebase"
@@ -804,11 +805,13 @@ func Main(args []string) int {
 	// startObservationIfEnabled.
 	//
 	// The signal oracle is passed IN, and this is one of only two places in
-	// the program that names it — the other is `magmux agents` (obscmd.go). It
-	// is a parameter rather than a default so that no test can reach
-	// kill(pid, 0) without naming obsOracle itself, which nothing under
-	// _test.go is allowed to do; see TestNoTestCanReachTheSignalOracle.
-	mux.startObservationIfEnabled(observeAgents, obsOracle{})
+	// the program that builds it — the other is `magmux agents` (obscmd.go). It
+	// is claudestate's proclive: kill(pid, 0), ESRCH is gone, EPERM and nil
+	// are alive, anything else undetermined. It is a parameter rather than a
+	// default so that no test can reach kill(pid, 0) without naming
+	// proclive.New itself, which nothing under _test.go is allowed to do; see
+	// TestNoTestCanReachTheSignalOracle.
+	mux.startObservationIfEnabled(observeAgents, proclive.New())
 
 	// The mirror subscribes HERE, on the same reasoning and one line later: its
 	// first write is the connect-time aggregate, and a mirror seeded from a

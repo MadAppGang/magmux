@@ -7,7 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/obsview"
 )
 
 // ── test doubles ────────────────────────────────────────────────────────────
@@ -92,8 +93,8 @@ func permissive() Policy {
 	}
 }
 
-func testSession() obs.Session {
-	return obs.Session{ID: "id-a", PID: 4242, Name: "circl", PaneID: obs.Ptr(2)}
+func testSession() model.Session {
+	return model.Session{Key: model.Key{SessionID: "id-a", PID: 4242}, PID: 4242, Name: "circl", Pane: "2"}
 }
 
 func request(verb string, tier Tier) Request {
@@ -509,7 +510,7 @@ func TestAnAuthorisedActionIsRecordedBeforeAndAfter(t *testing.T) {
 	if attempt.Outcome != nil {
 		t.Error("the attempt line carries an outcome; a crash after it must leave a null one")
 	}
-	if attempt.Before == nil || attempt.Before.Status != obs.StatusUnknown {
+	if attempt.Before == nil || attempt.Before.Status != obsview.StatusUnknown {
 		t.Errorf("the attempt line does not carry the session's state: %+v", attempt.Before)
 	}
 	if outcome.Outcome == nil || !outcome.Outcome.Done {
@@ -603,7 +604,7 @@ func TestTheGateCopiesItsPolicy(t *testing.T) {
 	rules[0].LaunchDir = "/**"
 
 	_, err := g.Do(context.Background(), request(VerbFocus, TierNavigate),
-		obs.Session{ID: "id-a", LaunchDir: "/anywhere"}, everyVerb())
+		model.Session{Key: model.Key{SessionID: "id-a"}, LaunchDir: "/anywhere"}, everyVerb())
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("mutating the caller's rules changed the gate's decision: %v", err)
 	}

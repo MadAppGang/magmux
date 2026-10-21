@@ -272,7 +272,7 @@ func (m *Magmux) dispatchSocketVerbExt(msg sockMsg, done func(map[string]any, er
 //
 // # It is the SAME document `magmux agents --json` prints
 //
-// Not a document like it. fleetPayload marshals the obs.Fleet the sink kept
+// Not a document like it. fleetPayload marshals the obsview.Fleet the sink kept
 // and re-reads it into the map this protocol's replies carry, so there is one
 // definition of every key and nothing here can spell one differently. R4.1
 // asks for "the identical document" from three surfaces and R4.3 says the

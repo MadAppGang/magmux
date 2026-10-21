@@ -5,15 +5,16 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/obsview"
 )
 
 // Gate is the one way an action reaches an [Actuator].
 //
 // It holds the policy, the audit trail and nothing else, and it is a
-// single-owner value with no lock: in magmux the pipeline's coordinator owns
-// it, and that is also the only goroutine that reaches an actor, so the
-// serialisation an audit counter needs is already there.
+// single-owner value with no lock: in magmux it is used only inside the
+// claudestate pipeline's Exec and OnEffects, which both run on the coordinator
+// goroutine, so the serialisation an audit counter needs is already there.
 //
 // # Why the gate and not the actuator evaluates policy
 //
@@ -136,7 +137,7 @@ type Report struct {
 // Refusals included — they are the interesting half of a trail. The only
 // exception is a context that was already cancelled when Do was called, which
 // is a caller that went away rather than an action anybody decided about.
-func (g *Gate) Do(ctx context.Context, req Request, before obs.Session, target Actuator) (Report, error) {
+func (g *Gate) Do(ctx context.Context, req Request, before model.Session, target Actuator) (Report, error) {
 	a := req.Action
 	rep := Report{}
 
@@ -335,14 +336,13 @@ func capabilityFor(target Actuator, verb string) (Capability, bool) {
 // targetOf records which session an action was aimed at. The session id comes
 // from the ACTION rather than from the fact set, because an action aimed at a
 // session nobody could observe must still say what it was aimed at.
-func targetOf(s obs.Session, sessionID string) Target {
+func targetOf(s model.Session, sessionID string) Target {
 	t := Target{SessionID: sessionID, PID: s.PID, Name: s.Name}
 	if t.SessionID == "" {
-		t.SessionID = s.ID
+		t.SessionID = s.Key.SessionID
 	}
-	if s.PaneID != nil {
-		v := *s.PaneID
-		t.PaneID = &v
+	if id, ok := obsview.PaneID(s.Pane); ok {
+		t.PaneID = &id
 	}
 	return t
 }

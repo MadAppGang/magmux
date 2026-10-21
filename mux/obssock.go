@@ -40,8 +40,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MadAppGang/magmux/claudestate/model"
 	"github.com/MadAppGang/magmux/client"
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/obsview"
 )
 
 // sockPaneDiscovery is how long the client will spend finding magmuxes.
@@ -56,8 +57,8 @@ const sockPaneDiscovery = 2 * time.Second
 
 // sockFocusTimeout bounds one `focus` round trip.
 //
-// obs.PaneFocuser's doc warns that an implementation waiting on a socket would
-// wedge the actor calling it. The rule underneath that warning is "must not
+// navigate.PaneFocuser's doc warns that an implementation waiting on a socket
+// would wedge the actor calling it. The rule underneath that warning is "must not
 // block indefinitely", and this is how this implementation obeys it: every
 // wait here has a deadline, and expiring is reported as a failure to focus
 // rather than as a focus.
@@ -68,15 +69,15 @@ const sockFocusTimeout = 5 * time.Second
 // The socket is carried beside the id because a PANE ID IS NOT UNIQUE ACROSS
 // MAGMUXES: pane 0 exists in every one of them. Everything below that resolves
 // an id therefore resolves a (socket, id) pair, and the one place that cannot
-// — obs.PaneFocuser.Focus, which takes a bare id — is reached only through a
+// — navigate.PaneFocuser.Focus, which takes a bare id — is reached only through a
 // table narrowed to ONE magmux (see forSession), where the id is unique.
 type sockPaneRef struct {
 	sock string
 	id   int
 }
 
-// sockPaneLocator answers obs.PaneLocator and obs.PaneFocuser against every
-// magmux reachable on this machine.
+// sockPaneLocator answers ports.PaneLocator and navigate.PaneFocuser against
+// every magmux reachable on this machine.
 //
 // Built once and read-only afterwards, so it is safe for every session's actor
 // to share — the same contract muxPaneLocator has, reached a different way.
@@ -178,12 +179,21 @@ func sockPaneReaped(entry map[string]any) bool {
 
 // PaneFor walks up the process tree from a session's pid until it reaches a
 // pane's own pid. See walkToPane, which both pane tables share.
-func (l *sockPaneLocator) PaneFor(pid int) (int, obs.Liveness) {
+func (l *sockPaneLocator) PaneFor(s model.Session) (model.PaneRef, model.Liveness) {
+	id, live := l.paneForPID(s.PID)
+	if live != model.LivenessYes {
+		return "", live
+	}
+	return obsview.PaneRef(id), live
+}
+
+// paneForPID is PaneFor on a bare pid: the pane id the walk reaches.
+func (l *sockPaneLocator) paneForPID(pid int) (int, model.Liveness) {
 	if pid <= 0 {
-		return 0, obs.LivenessUnknown
+		return 0, model.LivenessUnknown
 	}
 	if len(l.byPanePID) == 0 {
-		return 0, obs.LivenessNo
+		return 0, model.LivenessNo
 	}
 	ref, live := walkToPane(pid, l.byPanePID, l.ppid, l.hops)
 	return ref.id, live
@@ -192,7 +202,7 @@ func (l *sockPaneLocator) PaneFor(pid int) (int, obs.Liveness) {
 // forSession narrows the table to the ONE magmux whose pane is an ancestor of
 // pid, and reports whether there was one.
 //
-// This is the fix for the ambiguity Focus refuses. obs.PaneFocuser.Focus takes
+// This is the fix for the ambiguity Focus refuses. navigate.PaneFocuser.Focus takes
 // a bare pane id, and a bare id means nothing across magmuxes; within one it
 // is a permanent slot in an append-only table. So the command resolves the
 // session first, walks ONCE from its pid, keeps the socket that walk reached,
@@ -210,15 +220,15 @@ func (l *sockPaneLocator) PaneFor(pid int) (int, obs.Liveness) {
 // could not be completed. Neither is an error: the caller gives the pipeline
 // no focuser, the navigate stage declares nothing, and the gate records the
 // refusal as act.ErrNotCapable, which is the truth.
-func (l *sockPaneLocator) forSession(pid int) (*sockPaneLocator, obs.Liveness) {
+func (l *sockPaneLocator) forSession(pid int) (*sockPaneLocator, model.Liveness) {
 	if pid <= 0 {
-		return nil, obs.LivenessUnknown
+		return nil, model.LivenessUnknown
 	}
 	if len(l.byPanePID) == 0 {
-		return nil, obs.LivenessNo
+		return nil, model.LivenessNo
 	}
 	hit, live := walkToPane(pid, l.byPanePID, l.ppid, l.hops)
-	if live != obs.LivenessYes {
+	if live != model.LivenessYes {
 		return nil, live
 	}
 	one := &sockPaneLocator{
@@ -235,7 +245,7 @@ func (l *sockPaneLocator) forSession(pid int) (*sockPaneLocator, obs.Liveness) {
 		one.byPanePID[panePID] = ref
 		one.byPaneID[ref.id] = append(one.byPaneID[ref.id], ref)
 	}
-	return one, obs.LivenessYes
+	return one, model.LivenessYes
 }
 
 // bindToSession is forSession as obsFocus consumes it: an obsPaneTable, and a
@@ -243,7 +253,7 @@ func (l *sockPaneLocator) forSession(pid int) (*sockPaneLocator, obs.Liveness) {
 // obsPaneTableOrNil for what a typed nil does to the pipeline.
 func (l *sockPaneLocator) bindToSession(pid int) obsPaneTable {
 	one, live := l.forSession(pid)
-	if live != obs.LivenessYes || one == nil {
+	if live != model.LivenessYes || one == nil {
 		return nil
 	}
 	return one
@@ -261,15 +271,16 @@ func (l *sockPaneLocator) bindToSession(pid int) obsPaneTable {
 // of them has that pane. The pane gate asks it only about an id PaneFor just
 // resolved, and PaneFor resolves only panes present in this table, so the
 // answer it is asked for is always the one the walk already established.
-func (l *sockPaneLocator) PaneAlive(paneID int) obs.Liveness {
-	if paneID < 0 {
+func (l *sockPaneLocator) PaneAlive(ref model.PaneRef) model.Liveness {
+	paneID, ok := obsview.PaneID(ref)
+	if !ok {
 		// Not an address. "There is no such pane" would claim we looked.
-		return obs.LivenessUnknown
+		return model.LivenessUnknown
 	}
 	if len(l.byPaneID[paneID]) == 0 {
-		return obs.LivenessNo
+		return model.LivenessNo
 	}
-	return obs.LivenessYes
+	return model.LivenessYes
 }
 
 // Focus moves keyboard focus, over the socket.
@@ -277,7 +288,7 @@ func (l *sockPaneLocator) PaneAlive(paneID int) obs.Liveness {
 // # previous is always -1, and that is honest rather than lazy
 //
 // The `focus` verb replies `{"pane": N, "focused": true}` and does not say
-// which pane held focus before. obs.PaneFocuser documents -1 as "nothing held
+// which pane held focus before. navigate.PaneFocuser documents -1 as "nothing held
 // focus", which is not quite what this is — it is "we cannot see what held
 // focus" — and the two are close enough that inventing a value would be worse
 // than the small imprecision. What matters for an undo is in the audit trail
@@ -323,7 +334,7 @@ func (l *sockPaneLocator) Focus(paneID int) (int, error) {
 	if do == nil {
 		do = sockFocusOverSocket
 	}
-	// The bound obs.PaneFocuser's contract asks for. It is here and not in the
+	// The bound navigate.PaneFocuser's contract asks for. It is here and not in the
 	// caller because the caller is an actor goroutine with no deadline of its
 	// own, and "must not block indefinitely" is this implementation's promise
 	// to keep.

@@ -9,6 +9,7 @@ package mux
 // pipeline points it at a temporary directory.
 
 import (
+	"context"
 	"errors"
 	"github.com/MadAppGang/magmux/proc"
 	"os"
@@ -18,7 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/obsview"
 )
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -69,8 +71,8 @@ func TestPaneForWalksUpThroughTheShell(t *testing.T) {
 		300: 1,
 	})}
 
-	id, found := loc.PaneFor(900)
-	if found != obs.LivenessYes {
+	id, found := loc.paneForPID(900)
+	if found != model.LivenessYes {
 		t.Fatalf("PaneFor(900) reported %v; the tool's pid is never the pane's", found)
 	}
 	if id != 0 {
@@ -79,7 +81,7 @@ func TestPaneForWalksUpThroughTheShell(t *testing.T) {
 
 	// And the pane's own pid resolves too: a tool started without a shell in
 	// between is the same question with a shorter walk.
-	if id, found := loc.PaneFor(500); found != obs.LivenessYes || id != 1 {
+	if id, found := loc.paneForPID(500); found != model.LivenessYes || id != 1 {
 		t.Fatalf("PaneFor(500) resolved (%d, %v), want (1, yes)", id, found)
 	}
 }
@@ -92,13 +94,13 @@ func TestPaneForReachesInitAndReportsAMiss(t *testing.T) {
 	givePID(t, m.paneByID(0), 400)
 
 	loc := &muxPaneLocator{m: m, ppid: tree(map[int]int{900: 800, 800: 1})}
-	if id, found := loc.PaneFor(900); found != obs.LivenessNo {
+	if id, found := loc.paneForPID(900); found != model.LivenessNo {
 		t.Fatalf("a walk that reached init reported (%d, %v), want a determined no", id, found)
 	}
 
 	// The same answer when the tree tops out at 0 rather than at 1.
 	loc = &muxPaneLocator{m: m, ppid: tree(map[int]int{900: 800, 800: 0})}
-	if _, found := loc.PaneFor(900); found != obs.LivenessNo {
+	if _, found := loc.paneForPID(900); found != model.LivenessNo {
 		t.Fatalf("a walk that reached the top of the tree reported %v, want a determined no", found)
 	}
 }
@@ -110,14 +112,14 @@ func TestPaneForReachesInitAndReportsAMiss(t *testing.T) {
 // may be further up and unreadable — a restricted /proc, a container, a
 // transient sysctl failure — so the answer is "we could not tell". Reporting
 // "no" would hand a consumer acting on the gate a session it believes has no
-// pane, which is the exact failure obs.Liveness exists to prevent.
+// pane, which is the exact failure model.Liveness exists to prevent.
 func TestAnUnreadableLinkIsUndeterminedAndNeverNo(t *testing.T) {
 	m := newTestMux(t, ctrlPanes(1)...)
 	givePID(t, m.paneByID(0), 400)
 
 	// 900's parent is readable; 800's is not.
 	loc := &muxPaneLocator{m: m, ppid: tree(map[int]int{900: 800})}
-	if id, found := loc.PaneFor(900); found != obs.LivenessUnknown {
+	if id, found := loc.paneForPID(900); found != model.LivenessUnknown {
 		t.Fatalf("an unreadable link reported (%d, %v), want undetermined", id, found)
 	}
 }
@@ -131,14 +133,14 @@ func TestTheWalkIsBounded(t *testing.T) {
 
 	t.Run("a cycle", func(t *testing.T) {
 		loc := &muxPaneLocator{m: m, ppid: tree(map[int]int{900: 800, 800: 700, 700: 900})}
-		done := make(chan obs.Liveness, 1)
+		done := make(chan model.Liveness, 1)
 		go func() {
-			_, found := loc.PaneFor(900)
+			_, found := loc.paneForPID(900)
 			done <- found
 		}()
 		select {
 		case found := <-done:
-			if found != obs.LivenessUnknown {
+			if found != model.LivenessUnknown {
 				t.Fatalf("a cycle reported %v, want undetermined", found)
 			}
 		case <-time.After(5 * time.Second):
@@ -153,7 +155,7 @@ func TestTheWalkIsBounded(t *testing.T) {
 		}
 		links[1000+maxAncestryHops*3] = 400 // the pane, well past the bound
 		loc := &muxPaneLocator{m: m, ppid: tree(links)}
-		if _, found := loc.PaneFor(1000); found != obs.LivenessUnknown {
+		if _, found := loc.paneForPID(1000); found != model.LivenessUnknown {
 			t.Fatalf("a tree deeper than %d hops reported %v, want undetermined",
 				maxAncestryHops, found)
 		}
@@ -161,7 +163,7 @@ func TestTheWalkIsBounded(t *testing.T) {
 
 	t.Run("a short bound still finds a near pane", func(t *testing.T) {
 		loc := &muxPaneLocator{m: m, hops: 2, ppid: tree(map[int]int{900: 400})}
-		if id, found := loc.PaneFor(900); found != obs.LivenessYes || id != 0 {
+		if id, found := loc.paneForPID(900); found != model.LivenessYes || id != 0 {
 			t.Fatalf("resolved (%d, %v) within the bound, want (0, yes)", id, found)
 		}
 	})
@@ -174,7 +176,7 @@ func TestPaneForRefusesANonPID(t *testing.T) {
 	givePID(t, m.paneByID(0), 400)
 	loc := &muxPaneLocator{m: m, ppid: tree(map[int]int{})}
 	for _, pid := range []int{0, -1} {
-		if _, found := loc.PaneFor(pid); found != obs.LivenessUnknown {
+		if _, found := loc.paneForPID(pid); found != model.LivenessUnknown {
 			t.Errorf("PaneFor(%d) reported %v, want undetermined", pid, found)
 		}
 	}
@@ -191,7 +193,7 @@ func TestAMagmuxWithNoProcessesAnswersWithoutWalking(t *testing.T) {
 		walked = true
 		return 0, errors.New("should not be reached")
 	}}
-	if _, found := loc.PaneFor(900); found != obs.LivenessNo {
+	if _, found := loc.paneForPID(900); found != model.LivenessNo {
 		t.Errorf("a magmux with no child processes reported %v, want a determined no", found)
 	}
 	if walked {
@@ -228,7 +230,7 @@ func TestPaneForWalksWithTreeMuReleased(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		loc.PaneFor(900)
+		loc.paneForPID(900)
 	}()
 
 	select {
@@ -276,8 +278,8 @@ func TestTheDefaultLookupIsTheRealPPIDOf(t *testing.T) {
 	givePID(t, m.paneByID(0), os.Getpid())
 
 	loc := newPaneLocator(m) // no injected lookup: the production path
-	id, found := loc.PaneFor(child.Process.Pid)
-	if found != obs.LivenessYes || id != 0 {
+	id, found := loc.paneForPID(child.Process.Pid)
+	if found != model.LivenessYes || id != 0 {
 		t.Fatalf("PaneFor(%d) resolved (%d, %v) against a pane holding this process's pid %d, "+
 			"want (0, yes)", child.Process.Pid, id, found, os.Getpid())
 	}
@@ -298,7 +300,7 @@ func TestPaneAliveAcrossMagmuxThreePaneStates(t *testing.T) {
 	loc := newPaneLocator(m)
 
 	t.Run("a live pane", func(t *testing.T) {
-		if got := loc.PaneAlive(0); got != obs.LivenessYes {
+		if got := loc.PaneAlive(obsview.PaneRef(0)); got != model.LivenessYes {
 			t.Fatalf("PaneAlive(0) is %v for a live pane, want yes", got)
 		}
 	})
@@ -309,7 +311,7 @@ func TestPaneAliveAcrossMagmuxThreePaneStates(t *testing.T) {
 		p.dead = true
 		p.exitCode = 1
 		p.mu.Unlock()
-		if got := loc.PaneAlive(1); got != obs.LivenessYes {
+		if got := loc.PaneAlive(obsview.PaneRef(1)); got != model.LivenessYes {
 			t.Fatalf("PaneAlive(1) is %v for a dead-but-present pane, want yes — "+
 				"the process is the OTHER gate", got)
 		}
@@ -324,7 +326,7 @@ func TestPaneAliveAcrossMagmuxThreePaneStates(t *testing.T) {
 		if !hidden {
 			t.Fatal("installHiddenPanel produced a pane that is not hidden")
 		}
-		if got := loc.PaneAlive(id); got != obs.LivenessYes {
+		if got := loc.PaneAlive(obsview.PaneRef(id)); got != model.LivenessYes {
 			t.Fatalf("PaneAlive(%d) is %v for a hidden pane, want yes — hidden is a fact "+
 				"about magmux's chrome, not about the session", id, got)
 		}
@@ -334,7 +336,7 @@ func TestPaneAliveAcrossMagmuxThreePaneStates(t *testing.T) {
 		if err := m.ClosePane(2, false); err != nil {
 			t.Fatalf("ClosePane(2): %v", err)
 		}
-		if got := loc.PaneAlive(2); got != obs.LivenessNo {
+		if got := loc.PaneAlive(obsview.PaneRef(2)); got != model.LivenessNo {
 			t.Fatalf("PaneAlive(2) is %v for a tombstoned pane, want no", got)
 		}
 	})
@@ -347,10 +349,10 @@ func TestPaneAliveOnIdsOutsideTheTable(t *testing.T) {
 	m := newTestMux(t, ctrlPanes(1)...)
 	loc := newPaneLocator(m)
 
-	if got := loc.PaneAlive(99); got != obs.LivenessNo {
+	if got := loc.PaneAlive(obsview.PaneRef(99)); got != model.LivenessNo {
 		t.Errorf("PaneAlive(99) is %v for an id past the end of the table, want no", got)
 	}
-	if got := loc.PaneAlive(-1); got != obs.LivenessUnknown {
+	if got := loc.PaneAlive(obsview.PaneRef(-1)); got != model.LivenessUnknown {
 		t.Errorf("PaneAlive(-1) is %v, want undetermined", got)
 	}
 }
@@ -382,7 +384,7 @@ func TestObservationIsOffUnlessAskedFor(t *testing.T) {
 	// The nil oracle is the point of the argument and not noise: this is the
 	// one test that reaches the production startup hook, and a nil here means
 	// it cannot signal-probe a pid even if the switch were somehow on. Only
-	// main() names obsOracle. See TestNoTestCanReachTheSignalOracle.
+	// main() calls proclive.New(). See TestNoTestCanReachTheSignalOracle.
 	t.Setenv(obsEnvVar, "")
 	m := newTestMux(t, ctrlPanes(1)...)
 	m.startObservationIfEnabled(obsEnabled(os.Getenv(obsEnvVar)), nil)
@@ -424,11 +426,11 @@ func TestStartObservationAgainstATemporaryRegistry(t *testing.T) {
 		t.Error("a second startObservation started a second pipeline over the first")
 	}
 
-	sub, err := m.obs.Subscribe("test", 0)
+	sub, err := m.obs.p.Subscribe(context.Background(), "test", 0)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
-	m.obs.Refresh()
+	m.obs.p.Refresh()
 	select {
 	case d, ok := <-sub.C():
 		if !ok {
@@ -439,8 +441,8 @@ func TestStartObservationAgainstATemporaryRegistry(t *testing.T) {
 		}
 		// No pane owns pid 4242 — nothing in this magmux has a process — so
 		// the pane facts are a determined absence rather than a guess.
-		if d.Doc.Sessions[0].PaneID != nil {
-			t.Errorf("a session with no pane was given pane %d", *d.Doc.Sessions[0].PaneID)
+		if d.Doc.Sessions[0].Pane != "" {
+			t.Errorf("a session with no pane was given pane %q", d.Doc.Sessions[0].Pane)
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("no document arrived from the pipeline")

@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
-
-	"github.com/MadAppGang/magmux/internal/obs"
 )
 
 // Registry text reaching a person. Fix round 2, item 3, ported from mux's
@@ -74,41 +72,41 @@ func hexRune(r rune) string {
 // hostileSession is one session whose every registry-derived string is
 // hostile: its name, its raw status and waiting words, the reason the verdict
 // wrote (which embeds a transcript's own error text), and a conflict detail.
-func hostileSession() obs.Session {
+func hostileSession() Session {
 	since := obsEpoch.Add(-3 * time.Minute)
-	return obs.Session{
+	return Session{
 		ID: "a1478d55-6e02-4bb9-93cf-01d2e8f47a6b", PID: 4242,
 		Name:         hostileText,
-		PaneID:       obs.Ptr(1),
+		PaneID:       ptr(1),
 		StatusRaw:    hostileText,
 		WaitingRaw:   hostileText,
 		StatusSince:  &since,
-		ProcessAlive: obs.LivenessYes,
-		Attention: obs.Attention{
-			Needed: obs.Ptr(true),
+		ProcessAlive: LivenessYes,
+		Attention: Attention{
+			Needed: ptr(true),
 			Reason: "it has hit an API-level error: " + hostileText,
 		},
-		Conflict: &obs.Conflict{
-			Tier:   obs.TierInferred,
-			Status: obs.StatusIdle,
+		Conflict: &Conflict{
+			Tier:   TierInferred,
+			Status: StatusIdle,
 			Detail: hostileText,
 		},
 	}
 }
 
-func hostileFleet() obs.Fleet {
-	return obs.Fleet{Epoch: obsEpoch, Sessions: []obs.Session{hostileSession()}}
+func hostileFleet() Fleet {
+	return Fleet{Epoch: obsEpoch, Sessions: []Session{hostileSession()}}
 }
 
 // cleanFleet is the same shape with nothing hostile in it — the control that
 // proves a surface's OWN output passes the check, so that a failure below is
 // about the registry text and not about magmux's framing.
-func cleanFleet() obs.Fleet {
+func cleanFleet() Fleet {
 	s := hostileSession()
 	s.Name, s.StatusRaw, s.WaitingRaw = "plain-name", "compacting", "dialog open"
 	s.Attention.Reason = "it has hit an API-level error: overloaded"
 	s.Conflict.Detail = "the pane has produced nothing for 45m"
-	return obs.Fleet{Epoch: obsEpoch, Sessions: []obs.Session{s}}
+	return Fleet{Epoch: obsEpoch, Sessions: []Session{s}}
 }
 
 // TestRegistryTextReachesNoTerminalWithItsControlsIntact is item 3's test:
@@ -168,7 +166,7 @@ func TestJSONCarriesRegistryTextExactAndEscaped(t *testing.T) {
 		var b bytes.Buffer
 		WriteFleetJSON(&b, hostileFleet())
 		check(t, b.String())
-		var back obs.Fleet
+		var back Fleet
 		if err := json.Unmarshal(b.Bytes(), &back); err != nil {
 			t.Fatalf("the output is not a document: %v", err)
 		}
@@ -211,3 +209,5 @@ func TestDisplaySafeIsTheOneRule(t *testing.T) {
 		}
 	}
 }
+
+func ptr[T any](v T) *T { return &v }

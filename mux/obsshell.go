@@ -9,9 +9,9 @@ package mux
 // and vt.go three lines of parser dispatch, and everything that decides what those mean
 // is in this file.
 //
-// internal/obs may not import mux (TestImportDirection), so this is the same shape every
-// other port takes: obs declares the interface, this implements it, and the two
-// vocabularies never meet.
+// The claudestate library cannot import mux, so this is the same shape every
+// other port takes: the library declares the interface (ports.PaneShell), this
+// implements it, and the two vocabularies never meet.
 
 import (
 	"fmt"
@@ -19,7 +19,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/obsview"
 	"golang.org/x/sys/unix"
 )
 
@@ -38,7 +39,7 @@ import (
 type shellObs struct {
 	// mark is what OSC 133 last said. Zero is "this shell emits no marks",
 	// which is the common case and is not a negative.
-	mark obs.ShellMark
+	mark model.ShellMark
 
 	// exit is the status the last 133;D carried, and exitKnown says whether
 	// it carried one at all. Two fields rather than a *int deliberately: this
@@ -60,7 +61,7 @@ type shellObs struct {
 	// Both only ever go true. A pane that has proven job control does not
 	// un-prove it: the proof is about the SHELL — that it does job control at
 	// all — and nothing a shell does later makes that untrue. See
-	// obs.ShellState.AtPrompt for the measurement that makes the latch
+	// model.ShellState.AtPrompt for the measurement that makes the latch
 	// necessary.
 	sawForeign bool
 	proven     bool
@@ -120,17 +121,17 @@ func (p *Pane) noteShellMark(body string) {
 		// at a prompt with nothing running. They are not distinguished
 		// because the distinction is about DRAWING, and an observer only
 		// wants to know whether work is happening.
-		p.shell.mark = obs.ShellMarkPrompt
+		p.shell.mark = model.ShellMarkPrompt
 	case "C":
 		// Pre-execution. Whatever was typed is about to run.
-		p.shell.mark = obs.ShellMarkRunning
+		p.shell.mark = model.ShellMarkRunning
 		// The previous command's status stays exactly where it is. It is the
 		// last COMPLETED command's outcome, which is the only thing it could
 		// mean while another one runs.
 	case "D":
-		p.shell.mark = obs.ShellMarkPrompt
+		p.shell.mark = model.ShellMarkPrompt
 		// A bare 133;D is legal and common: the command finished and the
-		// shell did not say how. That is NOT a zero — see obs.ShellState.Exit
+		// shell did not say how. That is NOT a zero — see model.ShellState.Exit
 		// — so the previous status is cleared rather than replaced with a
 		// success nobody reported.
 		p.shell.exit, p.shell.exitKnown = 0, false
@@ -282,10 +283,10 @@ func tcgetpgrp(f *os.File) (int, error) {
 // an ambiguous reading into an unambiguous one.
 //
 // Caller holds p.mu.
-func (sh *shellObs) advance(fg, leader int) obs.Liveness {
+func (sh *shellObs) advance(fg, leader int) model.Liveness {
 	if fg != leader {
 		sh.sawForeign = true
-		return obs.LivenessNo
+		return model.LivenessNo
 	}
 	if sh.sawForeign {
 		// THE FLIP. It left the session leader and came back, so this shell
@@ -293,12 +294,12 @@ func (sh *shellObs) advance(fg, leader int) obs.Liveness {
 		sh.proven = true
 	}
 	if !sh.proven {
-		return obs.LivenessUnknown
+		return model.LivenessUnknown
 	}
-	return obs.LivenessYes
+	return model.LivenessYes
 }
 
-// Shell answers [obs.PaneShell]: the terminal facts for one pane.
+// Shell answers ports.PaneShell: the terminal facts for one pane.
 //
 // # It is the only port here that MUTATES, and the mutation is the latch
 //
@@ -322,15 +323,16 @@ func (sh *shellObs) advance(fg, leader int) obs.Liveness {
 // The control panel has no PTY and never will, and a closed pane's master is
 // closed. Neither is "nothing is running in there" — it is "there is nothing
 // to ask", and the model spells those differently.
-func (l *muxPaneLocator) Shell(paneID int) (obs.ShellState, bool) {
-	if paneID < 0 {
-		return obs.ShellState{}, false
+func (l *muxPaneLocator) Shell(ref model.PaneRef) (model.ShellState, bool) {
+	paneID, ok := obsview.PaneID(ref)
+	if !ok {
+		return model.ShellState{}, false
 	}
 	l.m.treeMu.RLock()
 	p := l.m.paneByIDLocked(paneID)
 	l.m.treeMu.RUnlock()
 	if p == nil {
-		return obs.ShellState{}, false
+		return model.ShellState{}, false
 	}
 
 	read := l.foreground
@@ -346,10 +348,10 @@ func (l *muxPaneLocator) Shell(paneID int) (obs.ShellState, bool) {
 		// rather than as an undetermined ShellState, because the marks would
 		// be undetermined too and a caller reading a struct full of zeroes
 		// cannot tell that from a shell that simply says nothing.
-		return obs.ShellState{}, false
+		return model.ShellState{}, false
 	}
 
-	st := obs.ShellState{Mark: p.shell.mark}
+	st := model.ShellState{Mark: p.shell.mark}
 	if ok {
 		st.AtPrompt = p.shell.advance(fg, leader)
 	}
@@ -358,7 +360,8 @@ func (l *muxPaneLocator) Shell(paneID int) (obs.ShellState, bool) {
 		// reported"; handing out a pointer into the pane would let a consumer
 		// read a value that changes underneath it, and would put the pane's
 		// lock in the caller's hands.
-		st.Exit = obs.Ptr(p.shell.exit)
+		exit := p.shell.exit
+		st.Exit = &exit
 	}
 	return st, true
 }

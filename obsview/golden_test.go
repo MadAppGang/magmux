@@ -1,21 +1,21 @@
 package obsview
 
 // H6: the wire is pinned. The JSON document `magmux agents --json` prints — the
-// same bytes the socket `agents` verb and MCP's list_agents carry — is recorded
-// before the claudestate library replaces the code that produces it. Every
-// later difference must be cited by decision in wirechanges.go; nothing else
-// may change.
+// same bytes the socket `agents` verb and MCP's list_agents carry — was
+// recorded before the claudestate library replaced the code that produced it.
+// Every later difference must be cited by decision in wirechanges.go; nothing
+// else may change.
 //
-// There are two golden SETS, recorded by the same pre-move code:
+// There are two golden SETS, both recorded by the PRE-MOVE code:
 //
 //   - testdata/golden/magmux (C0.6) over the magmux-origin corpus,
 //     internal/obs/testdata, where it lives;
 //   - testdata/golden/tt (M0) over every tt scenario root of the library's
-//     corpus, ../claudestate/testdata/roots/<scenario>, read by a RELATIVE
-//     path — the root module does not import claudestate to do it. The old
-//     code reads no jobs/ directory and no agents listing, so these goldens
-//     show no job rows; the rows and members the library adds are D6 changes
-//     M2 cites.
+//     corpus, ../claudestate/testdata/roots/<scenario>. The old code read no
+//     jobs/ directory and no agents listing, so those goldens show no job
+//     rows; the rows and members the library adds are D6 changes,
+//     wirechanges.go cites them, and this test now reads each scenario's jobs/
+//     tree as `magmux agents --root S --jobs J --projects P` does.
 //
 // Two things make that a guarantee rather than a hope:
 //
@@ -29,9 +29,16 @@ package obsview
 //     from the scenario's own recorded list. Nothing reads ~/.claude, probes a
 //     pid or depends on when the test runs.
 //
+// Every difference is cited EXACTLY: by golden, by row and by field, with the
+// decision row that made it (wirechanges.go). A citation that no longer names
+// a real difference fails too, so the table cannot accumulate cover for
+// differences that are gone — or for ones that have not happened yet.
+//
 // Re-recording is deliberate and visible: go test ./obsview -run Golden
 // -update -golden-source <commit> rewrites the goldens AND the MANIFESTs, and
-// both show up in the diff.
+// both show up in the diff. Since the library landed it would also erase the
+// baseline every citation is measured against, so it is not a way to make a
+// difference disappear: a re-recorded golden is a reviewer's question.
 
 import (
 	"bytes"
@@ -52,10 +59,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
-	"github.com/MadAppGang/magmux/internal/obs/act"
-	"github.com/MadAppGang/magmux/internal/obs/claudecode"
-	"github.com/MadAppGang/magmux/internal/obs/pipeline"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/claudestate/pipeline"
+	"github.com/MadAppGang/magmux/claudestate/ports"
 )
 
 var (
@@ -71,23 +77,32 @@ const (
 	corpus = "../internal/obs/testdata"
 
 	ttGoldenDir = "testdata/golden/tt"
-	// ttCorpus is the library's testdata, read where it lives. Only files
-	// are read from it: nothing in the root module imports claudestate.
+	// ttCorpus is the library's testdata, read where it lives, by a relative
+	// path.
 	ttCorpus = "../claudestate/testdata"
 )
 
-// goldenNow is every golden's epoch: the corpus's own reference instant
-// (1789545200000 ms, see internal/obs/adapters/instant_test.go), so the
-// durations in the document are the ones the corpus was written to produce.
+// goldenNow is the magmux set's epoch: that corpus's own reference instant
+// (1789545200000 ms), so the durations in the document are the ones the corpus
+// was written to produce.
 var goldenNow = time.UnixMilli(1789545200000).UTC()
 
 // ttGoldenNow is the tt set's epoch: the scenario roots' reference instant
 // (1789699211204 ms, claudestate/testdata/PROVENANCE.md).
 var ttGoldenNow = time.UnixMilli(1789699211204).UTC()
 
-// goldenInputs are the trees every scenario reads. The MANIFEST covers all of
-// them, whichever scenario reads which.
+// goldenInputs are the trees every magmux scenario reads. The MANIFEST covers
+// all of them, whichever scenario reads which.
 var goldenInputs = []string{"sessions", "projects"}
+
+// canonicalTree is one Claude tree of the corpus, read through os.DirFS and
+// named by a CANONICAL path that exists nowhere on a real machine: the
+// library compares a job's linkScanPath against Path lexically, and the
+// corpus's records name /testdata/projects. Dir is "", so the tree can be read
+// and never watched, which is all a one-shot document needs.
+func canonicalTree(dir, name string) ports.Tree {
+	return ports.Tree{Path: "/testdata/" + name, FS: os.DirFS(filepath.Join(dir, name))}
+}
 
 // goldenScenario is one recorded document.
 type goldenScenario struct {
@@ -103,20 +118,20 @@ var goldenScenarios = []goldenScenario{
 		name: "registry",
 		now:  goldenNow,
 		cfg: func() pipeline.Config {
-			return pipeline.Config{Root: filepath.Join(corpus, "sessions")}
+			return pipeline.Config{Root: ports.Root{Sessions: canonicalTree(corpus, "sessions")}}
 		},
 	},
 	{
-		// The registry and the transcripts, through the Claude Code
-		// middleware: the harness-derived columns (subagents, API errors,
-		// colour) are determined.
+		// The registry and the transcripts: the harness-derived columns
+		// (subagents, API errors, colour) come from the library's transcript
+		// stage.
 		name: "registry-and-transcripts",
 		now:  goldenNow,
 		cfg: func() pipeline.Config {
-			return pipeline.Config{
-				Root:  filepath.Join(corpus, "sessions"),
-				Chain: []pipeline.Factory{claudecode.Middleware(claudecode.Config{Root: filepath.Join(corpus, "projects")})},
-			}
+			return pipeline.Config{Root: ports.Root{
+				Sessions: canonicalTree(corpus, "sessions"),
+				Projects: canonicalTree(corpus, "projects"),
+			}}
 		},
 	},
 }
@@ -157,19 +172,19 @@ var ttNotScenarios = map[string]string{
 // construction). Its scenario-table row names no dead pid, so every pid it
 // names is alive: the two filenames and the body pid.
 var ttLivenessWithoutFile = map[string]goldenOracle{
-	"k3-duplicate-99-100": {99: obs.LivenessYes, 100: obs.LivenessYes, 200: obs.LivenessYes},
+	"k3-duplicate-99-100": {99: model.LivenessYes, 100: model.LivenessYes, 200: model.LivenessYes},
 }
 
 // goldenOracle is the fake liveness oracle: it answers only for the pids the
 // scenario's own list names, and undetermined for any other. It probes
 // nothing.
-type goldenOracle map[int]obs.Liveness
+type goldenOracle map[int]model.Liveness
 
-func (o goldenOracle) Alive(pid int) obs.Liveness {
+func (o goldenOracle) Alive(pid int) model.Liveness {
 	if l, ok := o[pid]; ok {
 		return l
 	}
-	return obs.LivenessUnknown
+	return model.LivenessUnknown
 }
 
 // livenessFile is the path, relative to ttCorpus, of a scenario's recorded
@@ -203,9 +218,9 @@ func ttOracle(t *testing.T, scenario string) goldenOracle {
 		}
 		switch v {
 		case "alive":
-			o[pid] = obs.LivenessYes
+			o[pid] = model.LivenessYes
 		case "dead":
-			o[pid] = obs.LivenessNo
+			o[pid] = model.LivenessNo
 		default:
 			t.Fatalf("scenario %s: pid %d is %q, want alive or dead", scenario, pid, v)
 		}
@@ -226,11 +241,11 @@ func ttInputs() []string {
 	return out
 }
 
-// ttGoldenScenarios builds the tt set's scenarios: the registry and the
-// transcripts through the Claude Code middleware, as `magmux agents --root
-// <scenario>/sessions` runs with the projects tree beside it, with the fake
-// oracle. A scenario with no sessions/ or projects/ directory is read as
-// exactly that.
+// ttGoldenScenarios builds the tt set's scenarios: the registry, the jobs and
+// the transcripts, as `magmux agents --root <s>/sessions --jobs <s>/jobs
+// --projects <s>/projects --once --json` reads them, with the fake oracle. A
+// scenario with no sessions/, jobs/ or projects/ directory is read as exactly
+// that: an absent source.
 func ttGoldenScenarios(t *testing.T) []goldenScenario {
 	t.Helper()
 	out := make([]goldenScenario, 0, len(ttScenarios))
@@ -242,9 +257,12 @@ func ttGoldenScenarios(t *testing.T) []goldenScenario {
 			now:  ttGoldenNow,
 			cfg: func() pipeline.Config {
 				return pipeline.Config{
-					Root:   filepath.Join(root, "sessions"),
+					Root: ports.Root{
+						Sessions: canonicalTree(root, "sessions"),
+						Jobs:     canonicalTree(root, "jobs"),
+						Projects: canonicalTree(root, "projects"),
+					},
 					Oracle: oracle,
-					Chain:  []pipeline.Factory{claudecode.Middleware(claudecode.Config{Root: filepath.Join(root, "projects")})},
 				}
 			},
 		})
@@ -338,18 +356,28 @@ var ttSet = goldenSet{
 
 var goldenSets = []goldenSet{magmuxSet, ttSet}
 
-// firstDocument starts a pipeline with cfg (plus the epoch now and no
-// watcher), takes its first document, and stops it.
+// goldenRetry is the torn-read retry the golden runs use: the corpus holds
+// torn records on purpose, and the retry waits on the real clock (the
+// pipeline blocks its cycle on it), so it is kept short.
+const goldenRetry = time.Millisecond
+
+// firstDocument starts a pipeline with cfg (plus the epoch now, the real
+// clock for the torn-read retry, and no watcher), takes its first document,
+// and stops it.
 func firstDocument(t *testing.T, cfg pipeline.Config, now time.Time) pipeline.Delivery {
 	t.Helper()
 	cfg.Watch = false
 	cfg.Now = func() time.Time { return now }
+	cfg.Clock = ports.RealClock()
+	cfg.RetryDelay = goldenRetry
 	p, err := pipeline.Start(cfg)
 	if err != nil {
 		t.Fatalf("pipeline.Start: %v", err)
 	}
 	defer p.Stop()
-	sub, err := p.Subscribe("golden", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	sub, err := p.Subscribe(ctx, "golden", 1)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -360,14 +388,14 @@ func firstDocument(t *testing.T, cfg pipeline.Config, now time.Time) pipeline.De
 			t.Fatal("the pipeline stopped before it published")
 		}
 		return d
-	case <-time.After(20 * time.Second):
+	case <-ctx.Done():
 		t.Fatal("no document within 20s")
 	}
 	return pipeline.Delivery{}
 }
 
 // wireOf renders a document exactly as `magmux agents --json` does.
-func wireOf(doc obs.Fleet) []byte {
+func wireOf(doc Fleet) []byte {
 	var b bytes.Buffer
 	WriteFleetJSON(&b, doc)
 	return b.Bytes()
@@ -510,10 +538,64 @@ func scenarioFiles(scs []goldenScenario) map[string]string {
 
 // ── the field diff ──────────────────────────────────────────────────────────
 
-// goldenDiff compares two wire documents field by field and returns every
-// difference wireChanges does not cite. A session is identified by "id/pid",
-// because the wire's id is not unique on its own (an id-less row has "").
-func goldenDiff(want, got []byte, cited map[string]string) ([]string, error) {
+// wireDiff is one difference between a golden and the current document.
+type wireDiff struct {
+	row   string // the row's key (rowKey), or "" for the document itself
+	field string // a member name, or rowAdded / rowRemoved / rowOrder / "epoch"
+	text  string // what changed, for a person
+}
+
+// The pseudo-fields a whole-row difference is cited under.
+const (
+	rowAdded   = "+row" // a row the golden does not have
+	rowRemoved = "-row" // a golden row the document no longer has
+	rowOrder   = "*order"
+)
+
+// citationKey is how a difference is named in wirechanges.go:
+// "<golden>|<row>|<field>", <golden> being the golden file's name without
+// .json (the scenario), which is unique across both sets.
+func citationKey(golden string, d wireDiff) string {
+	return golden + "|" + d.row + "|" + d.field
+}
+
+// rowKeys names every row of a document, in order.
+//
+// A row is "<id>/<pid>", plus "/job:<job>" when it carries the job member, and
+// "#<n>" for the n-th later row with the same name. The wire's id is not
+// unique on its own: an id-less row has "", a resumed job shares its id with
+// the job it resumed, and two id-less job rows share everything but the
+// directory, which the wire does not carry. The occurrence suffix is
+// deterministic because the document's order is (Fleet.Sort).
+func rowKeys(list []map[string]json.RawMessage) []string {
+	seen := map[string]int{}
+	out := make([]string, len(list))
+	for i, s := range list {
+		var id, job string
+		_ = json.Unmarshal(s["id"], &id)
+		_ = json.Unmarshal(s["job"], &job)
+		k := id + "/" + string(s["pid"])
+		if job != "" {
+			k += "/job:" + job
+		}
+		if n := seen[k]; n > 0 {
+			seen[k] = n + 1
+			k += "#" + strconv.Itoa(n)
+		} else {
+			seen[k] = 1
+		}
+		out[i] = k
+	}
+	return out
+}
+
+// goldenDiff compares two wire documents row by row and field by field.
+//
+// The order of the rows is part of the wire too: the rows present in both
+// must keep their relative order. A row added or removed is one difference,
+// cited as a row; its fields are not compared, because there is nothing to
+// compare them with.
+func goldenDiff(want, got []byte) ([]wireDiff, error) {
 	type doc struct {
 		Epoch    json.RawMessage              `json:"epoch"`
 		Sessions []map[string]json.RawMessage `json:"sessions"`
@@ -525,36 +607,23 @@ func goldenDiff(want, got []byte, cited map[string]string) ([]string, error) {
 	if err := json.Unmarshal(got, &g); err != nil {
 		return nil, fmt.Errorf("the output is not a document: %w", err)
 	}
-	var out []string
+	var out []wireDiff
 	if !bytes.Equal(w.Epoch, g.Epoch) {
-		out = append(out, fmt.Sprintf("epoch: %s -> %s", w.Epoch, g.Epoch))
+		out = append(out, wireDiff{field: "epoch", text: fmt.Sprintf("epoch: %s -> %s", w.Epoch, g.Epoch)})
 	}
-	key := func(s map[string]json.RawMessage) (string, string) {
-		var id string
-		_ = json.Unmarshal(s["id"], &id)
-		return id + "/" + string(s["pid"]), id
+	wk, gk := rowKeys(w.Sessions), rowKeys(g.Sessions)
+	wm, gm := map[string]map[string]json.RawMessage{}, map[string]map[string]json.RawMessage{}
+	for i, k := range wk {
+		wm[k] = w.Sessions[i]
 	}
-	byKey := func(list []map[string]json.RawMessage) map[string]map[string]json.RawMessage {
-		m := map[string]map[string]json.RawMessage{}
-		for _, s := range list {
-			k, _ := key(s)
-			m[k] = s
-		}
-		return m
+	for i, k := range gk {
+		gm[k] = g.Sessions[i]
 	}
-	wm, gm := byKey(w.Sessions), byKey(g.Sessions)
-	isCited := func(id, field string) bool {
-		_, one := cited[id+"/"+field]
-		_, all := cited["*/"+field]
-		return one || all
-	}
-	for k, ws := range wm {
+	for _, k := range wk {
+		ws := wm[k]
 		gs, ok := gm[k]
-		_, id := key(ws)
 		if !ok {
-			if !isCited(id, "*row") {
-				out = append(out, "session "+k+" is missing")
-			}
+			out = append(out, wireDiff{row: k, field: rowRemoved, text: "session " + k + " is missing"})
 			continue
 		}
 		fields := map[string]bool{}
@@ -565,33 +634,53 @@ func goldenDiff(want, got []byte, cited map[string]string) ([]string, error) {
 			fields[f] = true
 		}
 		for f := range fields {
-			if bytes.Equal(ws[f], gs[f]) || isCited(id, f) {
+			if bytes.Equal(ws[f], gs[f]) {
 				continue
 			}
-			out = append(out, fmt.Sprintf("session %s field %q: %s -> %s", k, f, orAbsent(ws[f]), orAbsent(gs[f])))
+			out = append(out, wireDiff{row: k, field: f,
+				text: fmt.Sprintf("session %s field %q: %s -> %s", k, f, orAbsent(ws[f]), orAbsent(gs[f]))})
 		}
 	}
-	for k, gs := range gm {
+	for _, k := range gk {
 		if _, ok := wm[k]; !ok {
-			if _, id := key(gs); !isCited(id, "*row") {
-				out = append(out, "session "+k+" is new")
-			}
+			out = append(out, wireDiff{row: k, field: rowAdded, text: "session " + k + " is new"})
 		}
 	}
-	// The ORDER of the sessions is part of the wire too.
-	if len(out) == 0 && !reflect.DeepEqual(order(w.Sessions, key), order(g.Sessions, key)) {
-		out = append(out, "the sessions are in a different order")
+	var wOrder, gOrder []string
+	for _, k := range wk {
+		if _, ok := gm[k]; ok {
+			wOrder = append(wOrder, k)
+		}
 	}
-	sort.Strings(out)
+	for _, k := range gk {
+		if _, ok := wm[k]; ok {
+			gOrder = append(gOrder, k)
+		}
+	}
+	if !reflect.DeepEqual(wOrder, gOrder) {
+		out = append(out, wireDiff{field: rowOrder, text: fmt.Sprintf("the sessions are in a different order: %v -> %v", wOrder, gOrder)})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].row != out[j].row {
+			return out[i].row < out[j].row
+		}
+		return out[i].field < out[j].field
+	})
 	return out, nil
 }
 
-func order(list []map[string]json.RawMessage, key func(map[string]json.RawMessage) (string, string)) []string {
-	out := make([]string, len(list))
-	for i, s := range list {
-		out[i], _ = key(s)
+// uncited is every difference wirechanges.go does not cite for this golden,
+// and the citations it used.
+func uncited(golden string, diffs []wireDiff, cited map[string]string) (missing []string, used []string) {
+	for _, d := range diffs {
+		k := citationKey(golden, d)
+		if _, ok := cited[k]; ok {
+			used = append(used, k)
+			continue
+		}
+		missing = append(missing, d.text+"  [cite as "+strconv.Quote(k)+"]")
 	}
-	return out
+	return missing, used
 }
 
 func orAbsent(b json.RawMessage) string {
@@ -603,15 +692,36 @@ func orAbsent(b json.RawMessage) string {
 
 // ── the tests ───────────────────────────────────────────────────────────────
 
-// TestWireGoldens is H6, over both golden sets.
+// TestWireGoldens is H6, over both golden sets. Every difference must be cited,
+// and every citation must name a difference that exists.
 func TestWireGoldens(t *testing.T) {
 	checkTTScenarioSet(t)
+	used := map[string]bool{}
 	for _, set := range goldenSets {
-		t.Run(set.name, func(t *testing.T) { testGoldenSet(t, set) })
+		t.Run(set.name, func(t *testing.T) {
+			for _, k := range testGoldenSet(t, set) {
+				used[k] = true
+			}
+		})
+	}
+	if t.Failed() {
+		return // a stale citation is only meaningful once every golden ran clean
+	}
+	for k, why := range wireChanges {
+		if !used[k] {
+			t.Errorf("wirechanges.go cites %q (%s), and no golden differs there: a citation must name a real difference, so remove it", k, why)
+		}
+		if !citedRow.MatchString(why) {
+			t.Errorf("wirechanges.go cites %q as %q, which names no decision row (want it to begin \"D<n>\")", k, why)
+		}
 	}
 }
 
-func testGoldenSet(t *testing.T, set goldenSet) {
+// citedRow is what every citation begins with: the decision row that made the
+// difference, D1..D15 with an optional suffix (D6-lone, D12c).
+var citedRow = regexp.MustCompile(`^D(1[0-5]|[1-9])[a-z]?(-[a-z]+)?\b`)
+
+func testGoldenSet(t *testing.T, set goldenSet) []string {
 	scenarios := set.scenarios(t)
 	current := manifest{hashes: hashInputs(t, set.corpus, set.inputs)}
 	if set.sourced {
@@ -671,12 +781,13 @@ func testGoldenSet(t *testing.T, set goldenSet) {
 		t.Fatalf("%s carries source or scenario lines, which this set does not record", manifestPath)
 	}
 
+	var used []string
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
-			got := wireOf(firstDocument(t, sc.cfg(), sc.now).Doc)
+			got := wireOf(FromModel(firstDocument(t, sc.cfg(), sc.now).Doc))
 			// Deterministic or worthless: the same inputs twice must give the
 			// same bytes, or the golden is pinning noise.
-			if again := wireOf(firstDocument(t, sc.cfg(), sc.now).Doc); !bytes.Equal(got, again) {
+			if again := wireOf(FromModel(firstDocument(t, sc.cfg(), sc.now).Doc)); !bytes.Equal(got, again) {
 				t.Fatalf("two runs over the same corpus produced different documents:\n%s\n---\n%s", got, again)
 			}
 			path := filepath.Join(set.dir, sc.name+".json")
@@ -689,23 +800,27 @@ func testGoldenSet(t *testing.T, set goldenSet) {
 			if err != nil {
 				t.Fatalf("reading %s: %v", path, err)
 			}
-			if bytes.Equal(want, got) {
-				return
-			}
-			diff, err := goldenDiff(want, got, wireChanges)
+			diffs, err := goldenDiff(want, got)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(diff) > 0 {
-				t.Errorf("the wire changed, and wirechanges.go cites none of it:\n  %s", strings.Join(diff, "\n  "))
+			missing, u := uncited(sc.name, diffs, wireChanges)
+			used = append(used, u...)
+			if len(missing) > 0 {
+				t.Errorf("the wire changed, and wirechanges.go cites none of it:\n  %s", strings.Join(missing, "\n  "))
+			}
+			if len(diffs) == 0 && !bytes.Equal(want, got) {
+				t.Errorf("the document differs from %s in its bytes and in no field, row or order; "+
+					"the field diff is missing a case", path)
 			}
 		})
 	}
+	return used
 }
 
 // TestTheGoldenGuardCatchesAPlantedChange: for each set, the field diff must
-// see one field of one session move, and must let it through only when it is
-// cited.
+// see one field of one session move, and must let it through only when that
+// exact (golden, row, field) is cited.
 func TestTheGoldenGuardCatchesAPlantedChange(t *testing.T) {
 	for _, set := range goldenSets {
 		t.Run(set.name, func(t *testing.T) {
@@ -713,7 +828,7 @@ func TestTheGoldenGuardCatchesAPlantedChange(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reading the golden: %v", err)
 			}
-			var doc obs.Fleet
+			var doc Fleet
 			if err := json.Unmarshal(want, &doc); err != nil {
 				t.Fatalf("the golden does not decode: %v", err)
 			}
@@ -723,24 +838,73 @@ func TestTheGoldenGuardCatchesAPlantedChange(t *testing.T) {
 			if !bytes.Equal(wireOf(doc), want) {
 				t.Fatal("the golden does not survive a decode and re-encode, so a plant in it would move more than one field")
 			}
+			golden := strings.TrimSuffix(set.planted, ".json")
 			doc.Sessions[0].Name = doc.Sessions[0].Name + "-planted"
 			planted := wireOf(doc)
 
-			diff, err := goldenDiff(want, planted, map[string]string{})
+			diffs, err := goldenDiff(want, planted)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(diff) != 1 || !strings.Contains(diff[0], `"name"`) {
-				t.Fatalf("a planted name change produced %v, want exactly one uncited difference on name", diff)
+			missing, _ := uncited(golden, diffs, map[string]string{})
+			if len(missing) != 1 || !strings.Contains(missing[0], `"name"`) {
+				t.Fatalf("a planted name change produced %v, want exactly one uncited difference on name", missing)
 			}
-			cited := map[string]string{doc.Sessions[0].ID + "/name": "D-test"}
-			if diff, _ := goldenDiff(want, planted, cited); len(diff) != 0 {
-				t.Errorf("a CITED change was still reported: %v", diff)
+			exact := map[string]string{citationKey(golden, diffs[0]): "D-test"}
+			if missing, _ := uncited(golden, diffs, exact); len(missing) != 0 {
+				t.Errorf("a CITED change was still reported: %v", missing)
 			}
-			if diff, _ := goldenDiff(want, want, map[string]string{}); len(diff) != 0 {
-				t.Errorf("the golden differs from itself: %v", diff)
+			// A citation for another golden, row or field covers nothing.
+			for _, wrong := range []wireDiff{
+				{row: diffs[0].row, field: "status"},
+				{row: diffs[0].row + "x", field: diffs[0].field},
+			} {
+				if missing, _ := uncited(golden, diffs, map[string]string{citationKey(golden, wrong): "D-test"}); len(missing) != 1 {
+					t.Errorf("a citation of %+v covered the name change", wrong)
+				}
+			}
+			if missing, _ := uncited("another-golden", diffs, exact); len(missing) != 1 {
+				t.Error("a citation for one golden covered the same change in another")
+			}
+			if diffs, _ := goldenDiff(want, want); len(diffs) != 0 {
+				t.Errorf("the golden differs from itself: %v", diffs)
 			}
 		})
+	}
+}
+
+// TestTheGoldenGuardSeesRowsAndOrder: an added row, a removed row and a moved
+// row are each a difference of their own, and a row's identity includes its
+// job so two rows on one id are two rows.
+func TestTheGoldenGuardSeesRowsAndOrder(t *testing.T) {
+	one := func(id string, pid int, job string) Session { return Session{ID: id, PID: pid, Job: job} }
+	doc := func(ss ...Session) []byte { return wireOf(Fleet{Epoch: goldenNow, Sessions: ss}) }
+	base := doc(one("a", 1, ""), one("b", 2, ""))
+
+	kinds := func(d []wireDiff) []string {
+		var out []string
+		for _, x := range d {
+			out = append(out, x.row+" "+x.field)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name string
+		got  []byte
+		want []string
+	}{
+		{"an added job row on an existing id", doc(one("a", 1, ""), one("a", 0, "j1"), one("b", 2, "")), []string{"a/0/job:j1 " + rowAdded}},
+		{"a removed row", doc(one("b", 2, "")), []string{"a/1 " + rowRemoved}},
+		{"a moved row", doc(one("b", 2, ""), one("a", 1, "")), []string{" " + rowOrder}},
+		{"two id-less rows are two rows", doc(one("a", 1, ""), one("b", 2, ""), one("", 0, ""), one("", 0, "")), []string{"/0 " + rowAdded, "/0#1 " + rowAdded}},
+	} {
+		d, err := goldenDiff(base, tc.got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := kinds(d); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -797,102 +961,5 @@ func TestTheGoldenGuardCatchesAPlantedInputChange(t *testing.T) {
 				t.Errorf("a one-byte change to %s produced %v", set.victim, diff)
 			}
 		})
-	}
-}
-
-// ── the audit line ──────────────────────────────────────────────────────────
-
-// goldenPanes is the pane table the recorded focus runs against: the target
-// session's pid is in pane 3, and pane 1 held focus before. Nothing else is in
-// any pane. No process is involved: the pids are the corpus's.
-type goldenPanes struct{ pid int }
-
-func (g goldenPanes) PaneFor(pid int) (int, obs.Liveness) {
-	if pid == g.pid {
-		return 3, obs.LivenessYes
-	}
-	return 0, obs.LivenessNo
-}
-
-func (goldenPanes) PaneAlive(id int) obs.Liveness {
-	if id == 3 {
-		return obs.LivenessYes
-	}
-	return obs.LivenessNo
-}
-
-func (goldenPanes) Focus(id int) (int, error) {
-	if id != 3 {
-		return -1, fmt.Errorf("no pane %d", id)
-	}
-	return 1, nil
-}
-
-// TestAnAuditLineIsByteIdenticalAcrossTheMove records the audit trail of one
-// focus — the attempt line and its outcome — through the real pipeline, gate
-// and writer, over the corpus, with a fixed clock and pid. The library move
-// re-points act at the library's session type; this golden is what says the
-// trail it writes is the same bytes as before (claudestate architecture §2.2).
-func TestAnAuditLineIsByteIdenticalAcrossTheMove(t *testing.T) {
-	const targetPID = 1724
-	const targetID = "8e2d4b17-0c93-4a6f-b512-77c3ad9e4f60"
-
-	trail := filepath.Join(t.TempDir(), "trail.jsonl")
-	w, err := act.NewWriter(act.WriterConfig{Path: trail, Now: func() time.Time { return goldenNow }, PID: 4242})
-	if err != nil {
-		t.Fatalf("NewWriter: %v", err)
-	}
-	panes := goldenPanes{pid: targetPID}
-	cfg := pipeline.Config{
-		Root:    filepath.Join(corpus, "sessions"),
-		Chain:   []pipeline.Factory{claudecode.Middleware(claudecode.Config{Root: filepath.Join(corpus, "projects")})},
-		Locator: panes,
-		Focuser: panes,
-		Policy:  act.Default(),
-		Audit:   w,
-		Watch:   false,
-		Now:     func() time.Time { return goldenNow },
-	}
-	p, err := pipeline.Start(cfg)
-	if err != nil {
-		t.Fatalf("pipeline.Start: %v", err)
-	}
-	defer p.Stop()
-	sub, err := p.Subscribe("golden", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p.Refresh()
-	select {
-	case <-sub.C():
-	case <-time.After(20 * time.Second):
-		t.Fatal("no document within 20s")
-	}
-	if _, err := p.Do(context.Background(), act.Request{
-		Action: act.Action{Verb: act.VerbFocus, Tier: act.TierNavigate, Session: targetID},
-		By:     act.RequesterCLI,
-	}); err != nil {
-		t.Fatalf("the recorded focus was refused: %v", err)
-	}
-	got, err := os.ReadFile(trail)
-	if err != nil {
-		t.Fatalf("reading the trail: %v", err)
-	}
-	if n := bytes.Count(got, []byte("\n")); n != 2 {
-		t.Fatalf("the trail has %d lines, want the attempt and its outcome:\n%s", n, got)
-	}
-
-	path := filepath.Join(goldenDir, "audit-focus.jsonl")
-	if *update {
-		if err := os.WriteFile(path, got, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
-	}
-	if !bytes.Equal(want, got) {
-		t.Errorf("the audit trail of a recorded focus changed:\n got %s\nwant %s", got, want)
 	}
 }

@@ -5,7 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/obsview"
 )
 
 // A finished pane must not claim a session through a pid it no longer owns.
@@ -55,22 +56,22 @@ func TestAReapedPaneClaimsNoSessionThroughItsOldPID(t *testing.T) {
 			920: 600,
 		})}
 
-		if id, found := loc.PaneFor(900); found != obs.LivenessNo {
+		if id, found := loc.paneForPID(900); found != model.LivenessNo {
 			t.Errorf("session 900 was attributed to pane %d (%v) through pid 400, which pane 0's "+
 				"child held until it was reaped; after that the number belongs to whoever the "+
 				"kernel gave it to", id, found)
 		}
-		if id, found := loc.PaneFor(910); found != obs.LivenessYes || id != 1 {
+		if id, found := loc.paneForPID(910); found != model.LivenessYes || id != 1 {
 			t.Errorf("PaneFor(910) = (%d, %v), want (1, yes): a DEAD pane that is not reaped still "+
 				"holds its pid, and a child that closed its PTY can still be running", id, found)
 		}
-		if id, found := loc.PaneFor(920); found != obs.LivenessYes || id != 2 {
+		if id, found := loc.paneForPID(920); found != model.LivenessYes || id != 2 {
 			t.Errorf("PaneFor(920) = (%d, %v), want (2, yes)", id, found)
 		}
 		// The pane is still a pane. Reaped is a fact about its PID, not about
 		// whether it exists: `dead` is not `closed`, and a finished pane stays on
 		// screen with its tombstone.
-		if got := loc.PaneAlive(0); got != obs.LivenessYes {
+		if got := loc.PaneAlive(obsview.PaneRef(0)); got != model.LivenessYes {
 			t.Errorf("PaneAlive(0) = %v, want yes — only closed makes a pane not alive", got)
 		}
 	})
@@ -99,20 +100,20 @@ func TestAReapedPaneClaimsNoSessionThroughItsOldPID(t *testing.T) {
 		})
 
 		for _, pid := range []int{700100, 700200} {
-			if id, live := loc.PaneFor(pid); live != obs.LivenessNo {
+			if id, live := loc.paneForPID(pid); live != model.LivenessNo {
 				t.Errorf("session %d was attributed to pane %d (%v) through the pid of a pane "+
 					"whose child has been reaped", pid, id, live)
 			}
-			if one, live := loc.forSession(pid); one != nil || live != obs.LivenessNo {
+			if one, live := loc.forSession(pid); one != nil || live != model.LivenessNo {
 				t.Errorf("forSession(%d) bound to a magmux (%v) through a reaped pane's pid; "+
 					"`magmux agents focus` would focus a finished pane", pid, live)
 			}
 		}
-		if id, live := loc.PaneFor(700300); live != obs.LivenessYes || id != 2 {
+		if id, live := loc.paneForPID(700300); live != model.LivenessYes || id != 2 {
 			t.Errorf("PaneFor(700300) = (%d, %v), want (2, yes): dead and not reaped still holds "+
 				"its pid", id, live)
 		}
-		if id, live := loc.PaneFor(700400); live != obs.LivenessYes || id != 3 {
+		if id, live := loc.paneForPID(700400); live != model.LivenessYes || id != 3 {
 			t.Errorf("PaneFor(700400) = (%d, %v), want (3, yes)", id, live)
 		}
 	})

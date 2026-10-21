@@ -2,8 +2,9 @@
 // action, the policy that decides whether it may run, the gate that enforces
 // that decision, and the audit trail that records it either way.
 //
-// Everything else under internal/obs observes. This package is the first thing
-// in the layer that changes anything, and almost all of it is machinery for
+// Everything else in the observation layer — the claudestate library and the
+// other host stages — observes. This package is the first thing in the layer
+// that changes anything, and almost all of it is machinery for
 // NOT changing things.
 //
 // # Scope: one tier of four is live, and the other three cannot execute
@@ -112,8 +113,8 @@
 //
 // No goroutines, no mutexes, no atomics — the same rule as the rest of the
 // layer. [Gate] and [Writer] are single-owner values: in magmux they are owned
-// by the pipeline's coordinator goroutine, which is also the only goroutine
-// that reaches an actor. A second owner would need synchronisation, so there
+// by the claudestate pipeline's coordinator goroutine, on which Pipeline.Exec
+// and OnEffects run the host's code. A second owner would need synchronisation, so there
 // is not one, and the doc comment on each type says so where somebody would
 // otherwise have to guess.
 package act

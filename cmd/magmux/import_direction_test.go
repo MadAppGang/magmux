@@ -1,8 +1,11 @@
 package main
 
 import (
+	"go/parser"
+	"go/token"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -92,5 +95,74 @@ func TestImportDirection(t *testing.T) {
 			t.Errorf("%s depends on %s (imported directly by %s); mux registers INTO the lower packages, never the reverse",
 				pkg, muxPath, strings.Join(importers, ", "))
 		}
+	}
+}
+
+// libraryPipeline is the claudestate runtime. §2.3's host rules: only mux's
+// obs*.go files import it, and obsview and internal/obs/... never import mux
+// (guardedPatterns above), and obsview never imports internal/obs/act.
+const libraryPipeline = modulePath + "/claudestate/pipeline"
+
+// pipelineImporters lists every non-test file of the root module that imports
+// claudestate/pipeline, as "<package>/<file>".
+func pipelineImporters(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	for _, line := range goList(t, "-f", "{{.ImportPath}} {{.Dir}}{{range .GoFiles}} {{.}}{{end}}", modulePath+"/...") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		pkg, dir := fields[0], fields[1]
+		for _, f := range fields[2:] {
+			if fileImports(t, dir+"/"+f, libraryPipeline) {
+				out = append(out, strings.TrimPrefix(pkg, modulePath+"/")+"/"+f)
+			}
+		}
+	}
+	return out
+}
+
+func fileImports(t *testing.T, path, imp string) bool {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+	for _, s := range f.Imports {
+		if p, err := strconv.Unquote(s.Path.Value); err == nil && p == imp {
+			return true
+		}
+	}
+	return false
+}
+
+// pipelineImportAllowed is the rule as a predicate, so the self-test holds it.
+func pipelineImportAllowed(file string) bool {
+	rest, ok := strings.CutPrefix(file, "mux/")
+	return ok && !strings.Contains(rest, "/") && strings.HasPrefix(rest, "obs")
+}
+
+func TestOnlyMuxObsFilesImportTheLibraryPipeline(t *testing.T) {
+	importers := pipelineImporters(t)
+	if len(importers) == 0 {
+		t.Fatal("no file imports claudestate/pipeline; the scan is blind")
+	}
+	for _, f := range importers {
+		if !pipelineImportAllowed(f) {
+			t.Errorf("%s imports %s; only mux/obs*.go may (architecture §2.3)", f, libraryPipeline)
+		}
+	}
+	t.Logf("importers: %v", importers)
+	for _, tc := range []struct {
+		file string
+		ok   bool
+	}{{"mux/obspane.go", true}, {"mux/grid.go", false}, {"mcp/obs.go", false}, {"obsview/table.go", false}} {
+		if pipelineImportAllowed(tc.file) != tc.ok {
+			t.Errorf("the rule says %s is %v, want %v", tc.file, !tc.ok, tc.ok)
+		}
+	}
+	if got := goList(t, "-deps", "-f", "{{.ImportPath}}", modulePath+"/obsview"); slices.Contains(got, modulePath+"/internal/obs/act") {
+		t.Error("obsview imports internal/obs/act; act may import obsview, never the reverse (§2.3)")
 	}
 }

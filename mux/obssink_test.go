@@ -1,6 +1,7 @@
 package mux
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"go/ast"
@@ -15,10 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/claudestate/pipeline"
 	"github.com/MadAppGang/magmux/internal/obs/act"
-	"github.com/MadAppGang/magmux/internal/obs/pipeline"
-	"github.com/MadAppGang/magmux/internal/obs/registry"
 	"github.com/MadAppGang/magmux/obsview"
 )
 
@@ -35,47 +35,47 @@ import (
 // It is built as a value rather than read from a registry because the subject
 // under test is the RENDERING, and a staged document is the only way all three
 // surfaces can be shown the identical input.
-func stagedFleet() obs.Fleet {
+func stagedFleet() obsview.Fleet {
 	since := func(d time.Duration) *time.Time {
 		t := obsEpoch.Add(-d)
 		return &t
 	}
-	return obs.Fleet{
+	return obsview.Fleet{
 		Epoch: obsEpoch,
-		Sessions: []obs.Session{
+		Sessions: []obsview.Session{
 			{
 				ID: "a1478d55-6e02-4bb9-93cf-01d2e8f47a6b", PID: 4242, Name: "worktree-a",
-				PaneID:        obs.Ptr(1),
-				Status:        obs.StatusWaiting,
-				Waiting:       obs.WaitingReasonInput,
+				PaneID:        obsPtr(1),
+				Status:        obsview.StatusWaiting,
+				Waiting:       obsview.WaitingReasonInput,
 				StatusSince:   since(9 * time.Minute),
-				Confidence:    obs.TierAuthoritative,
-				ProcessAlive:  obs.LivenessYes,
-				PaneAlive:     obs.LivenessYes,
-				SubagentCount: obs.Ptr(3),
-				Fault:         obs.Fault{APIErrors: obs.Ptr(0)},
-				Attention:     obs.Attention{Needed: obs.Ptr(true), Reason: "it is waiting for input"},
+				Confidence:    obsview.TierAuthoritative,
+				ProcessAlive:  obsview.LivenessYes,
+				PaneAlive:     obsview.LivenessYes,
+				SubagentCount: obsPtr(3),
+				Fault:         obsview.Fault{APIErrors: obsPtr(0)},
+				Attention:     obsview.Attention{Needed: obsPtr(true), Reason: "it is waiting for input"},
 			},
 			{
 				ID: "c874de20-33c1-480a-ba90-8ae3f2f332c4", PID: 98198, Name: "worktree-b",
-				Status:       obs.StatusBusy,
+				Status:       obsview.StatusBusy,
 				StatusSince:  since(31 * time.Minute),
-				Confidence:   obs.TierAuthoritative,
-				ProcessAlive: obs.LivenessYes,
-				Attention:    obs.Attention{Needed: obs.Ptr(false), Reason: "it is working"},
+				Confidence:   obsview.TierAuthoritative,
+				ProcessAlive: obsview.LivenessYes,
+				Attention:    obsview.Attention{Needed: obsPtr(false), Reason: "it is working"},
 			},
 			{
 				ID: "d0c31e88-4f17-4a52-8e6d-b9a70c55f213", PID: 1724,
-				Status:       obs.StatusBusy,
+				Status:       obsview.StatusBusy,
 				StatusSince:  since(45 * time.Minute),
-				Confidence:   obs.TierAuthoritative,
-				ProcessAlive: obs.LivenessUnknown,
-				Conflict: &obs.Conflict{
-					Tier:   obs.TierInferred,
-					Status: obs.StatusIdle,
+				Confidence:   obsview.TierAuthoritative,
+				ProcessAlive: obsview.LivenessUnknown,
+				Conflict: &obsview.Conflict{
+					Tier:   obsview.TierInferred,
+					Status: obsview.StatusIdle,
 					Detail: "the pane has produced nothing for 45m",
 				},
-				Attention: obs.Attention{Reason: "the two tiers disagree"},
+				Attention: obsview.Attention{Reason: "the two tiers disagree"},
 			},
 		},
 	}
@@ -104,14 +104,14 @@ func TestTheThreeSurfacesAgree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the obs verb: %v", err)
 	}
-	// The payload IS the document: it decodes back into an obs.Fleet whose
+	// The payload IS the document: it decodes back into an obsview.Fleet whose
 	// every field equals the one that went in. That is the property R4.1's
 	// "identical document" needs, and it is what a hand-built map would break.
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("re-encoding the reply: %v", err)
 	}
-	var overWire obs.Fleet
+	var overWire obsview.Fleet
 	if err := json.Unmarshal(raw, &overWire); err != nil {
 		t.Fatalf("decoding the reply as a document: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestTheThreeSurfacesAgree(t *testing.T) {
 	}
 
 	// ── surface 2: the MCP tool's rendering ─────────────────────────────
-	// The tool decodes the wire into obs.Fleet and renders it with the CLI's
+	// The tool decodes the wire into obsview.Fleet and renders it with the CLI's
 	// own writeFleetTable, so what is exercised here is that decode-and-render
 	// path over the document that actually crossed the wire.
 	var mcpOut strings.Builder
@@ -252,28 +252,28 @@ func TestTheAttentionViewLeadsWithWhatNeedsAHuman(t *testing.T) {
 // therefore a detail line under its row, five nobody could decide about, and
 // fifteen that are fine. It is the machine the attention view is FOR, and the
 // shape that overflowed it.
-func busyFleet() obs.Fleet {
+func busyFleet() obsview.Fleet {
 	since := obsEpoch.Add(-time.Hour)
-	var sessions []obs.Session
+	var sessions []obsview.Session
 	for i := 0; i < 30; i++ {
-		s := obs.Session{
+		s := obsview.Session{
 			ID:          fmt.Sprintf("id-%02d", i),
 			PID:         71000 + i,
 			Name:        fmt.Sprintf("sess-%02d", i),
-			Status:      obs.StatusIdle,
-			StatusSince: obs.Ptr(since.Add(time.Duration(i) * time.Minute)),
-			Attention:   obs.Attention{Needed: obs.Ptr(false), Reason: "its own record says it is idle"},
+			Status:      obsview.StatusIdle,
+			StatusSince: obsPtr(since.Add(time.Duration(i) * time.Minute)),
+			Attention:   obsview.Attention{Needed: obsPtr(false), Reason: "its own record says it is idle"},
 		}
 		switch {
 		case i < 10:
-			s.Status, s.Waiting = obs.StatusWaiting, obs.WaitingReasonInput
-			s.Attention = obs.Attention{Needed: obs.Ptr(true), Reason: "it is waiting for input"}
+			s.Status, s.Waiting = obsview.StatusWaiting, obsview.WaitingReasonInput
+			s.Attention = obsview.Attention{Needed: obsPtr(true), Reason: "it is waiting for input"}
 		case i < 15:
-			s.Attention = obs.Attention{Reason: "nothing known about it"}
+			s.Attention = obsview.Attention{Reason: "nothing known about it"}
 		}
 		sessions = append(sessions, s)
 	}
-	return obs.Fleet{Epoch: obsEpoch, Sessions: sessions}
+	return obsview.Fleet{Epoch: obsEpoch, Sessions: sessions}
 }
 
 // attentionScreen is what a person sees: the frame, clipped exactly as
@@ -494,7 +494,7 @@ func TestAnEmptyDocumentAndNoDocumentAreDifferentAnswers(t *testing.T) {
 		t.Errorf("a panel that has received nothing does not say so:\n%s", never)
 	}
 
-	cp.setAttention(attentionOf(obs.Fleet{Epoch: obsEpoch}, obsEpoch, pipeline.Delivery{}))
+	cp.setAttention(attentionOf(obsview.Fleet{Epoch: obsEpoch}, obsEpoch, pipeline.Delivery{}))
 	cp.mu.Lock()
 	snap = cp.snapshotLocked()
 	cp.mu.Unlock()
@@ -560,9 +560,11 @@ func TestTheAttentionViewIsNotPartOfTheWireTap(t *testing.T) {
 func TestTheSinkNeverHoldsALockAcrossTheHub(t *testing.T) {
 	defer deadlineWatchdog(t, 60*time.Second)()
 
-	hub := pipeline.StartHub()
-	defer hub.Stop()
-	sub, err := hub.Subscribe("chrome", 0)
+	// The library's pipeline over one staged record is the hub here: a real
+	// subscription, published to by a real cycle.
+	p := startHostPipeline(t, newSilentPaneRegistry(t, 4242, "busy"), pipeline.Config{})
+	defer p.Stop()
+	sub, err := p.Subscribe(context.Background(), "chrome", 0)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -576,7 +578,7 @@ func TestTheSinkNeverHoldsALockAcrossTheHub(t *testing.T) {
 
 	// One document, so the sink has run its body at least once and is now
 	// parked on the receive — which is the state the break would poison.
-	hub.Publish(stagedFleet(), nil)
+	p.Refresh()
 	deadline := time.Now().Add(10 * time.Second)
 	for m.control.digest().active || !m.control.hasAttention() {
 		if time.Now().After(deadline) {
@@ -598,7 +600,9 @@ func TestTheSinkNeverHoldsALockAcrossTheHub(t *testing.T) {
 		}
 	}
 
-	hub.Unsubscribe(sub)
+	if err := p.Unsubscribe(context.Background(), sub); err != nil {
+		t.Fatalf("Unsubscribe: %v", err)
+	}
 	<-done
 }
 
@@ -680,39 +684,56 @@ func TestTheStoreTellsOffApartFromNothingYet(t *testing.T) {
 }
 
 // TestTheSinkKeepsItsOwnCopy is freeze point 3 at magmux's boundary: the
-// obs.Fleet in a Delivery is shared with every other subscriber of that
-// broadcast, so a sink that retained it would be holding something another
-// sink may be reading — and would see it change underneath the socket verb.
+// document in a Delivery must be one no other subscriber can reach, so a
+// sink's stored document cannot change underneath the socket verb when some
+// other subscriber mutates its own.
 func TestTheSinkKeepsItsOwnCopy(t *testing.T) {
 	defer deadlineWatchdog(t, 60*time.Second)()
 
-	hub := pipeline.StartHub()
-	defer hub.Stop()
-	sub, _ := hub.Subscribe("chrome", 0)
+	p := startHostPipeline(t, newSilentPaneRegistry(t, 4242, "busy"), pipeline.Config{})
+	defer p.Stop()
+	sub, err := p.Subscribe(context.Background(), "chrome", 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	// A second subscriber of the same broadcast: what it may do to its own
+	// copy is what a careless sink would do.
+	other, err := p.Subscribe(context.Background(), "other", 1)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 	m := newTestMux(t, ctrlPanes(1)...)
 	done := make(chan struct{})
 	go func() { defer close(done); m.obsSinkLoop(sub) }()
 
-	fleet := stagedFleet()
-	hub.Publish(fleet, nil)
+	p.Refresh()
 	waitUntilObs(t, func() bool { return m.obsDoc.snapshot().Have }, "the document to arrive")
+	var theirs pipeline.Delivery
+	select {
+	case theirs = <-other.C():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second subscriber received nothing")
+	}
+	if len(theirs.Doc.Sessions) != 1 {
+		t.Fatalf("the document holds %d sessions", len(theirs.Doc.Sessions))
+	}
+	wantName := theirs.Doc.Sessions[0].Name
 
-	// Mutate through the publisher's own pointers, as a careless middleware
-	// would. Publish already deep-copied once; this proves the SINK's copy is
-	// independent of that copy too.
-	*fleet.Sessions[0].Attention.Needed = false
-	fleet.Sessions[0].Name = "renamed"
+	// Mutate through the other subscriber's pointers and slices.
+	theirs.Doc.Sessions[0].Name = "renamed"
+	theirs.Doc.Sessions[0].Status = model.StatusIdle
 
 	got := m.obsDoc.snapshot().Doc
-	if got.Sessions[0].Name != "worktree-a" {
-		t.Errorf("the stored document followed a mutation: name is %q", got.Sessions[0].Name)
+	if got.Sessions[0].Name != wantName {
+		t.Errorf("the stored document followed another subscriber's mutation: name is %q", got.Sessions[0].Name)
 	}
-	if got.Sessions[0].Attention.Needed == nil || !*got.Sessions[0].Attention.Needed {
-		t.Errorf("the stored document's verdict followed a mutation to %v",
-			got.Sessions[0].Attention.Needed)
+	if got.Sessions[0].Status != obsview.StatusBusy {
+		t.Errorf("the stored document followed another subscriber's mutation: status is %v", got.Sessions[0].Status)
 	}
 
-	hub.Unsubscribe(sub)
+	if err := p.Unsubscribe(context.Background(), sub); err != nil {
+		t.Fatalf("Unsubscribe: %v", err)
+	}
 	<-done
 }
 
@@ -840,7 +861,7 @@ func TestTheAttentionKeyShowsThePanelWithoutStealingFocus(t *testing.T) {
 // value of the report.
 func TestTheSinkReportsProblemsRatherThanSwallowingThem(t *testing.T) {
 	view := attentionOf(stagedFleet(), obsEpoch, pipeline.Delivery{
-		Problems: []registry.Problem{{Path: "/tmp/x.json", Kind: registry.ProblemUnreadable}},
+		Problems: []model.Problem{{Scope: model.ScopeRecord, Kind: model.ProblemUnreadable, Path: "x.json"}},
 	})
 	if view.problems != 1 {
 		t.Fatalf("the view counted %d problems, want 1", view.problems)
@@ -1063,5 +1084,83 @@ func TestTheConfigFileIsActuallyInForce(t *testing.T) {
 		t.Fatalf("an unparseable config left the posture at %+v, want the default. R6.3 forbids "+
 			"a MORE PERMISSIVE outcome and this file's permissive stanza parses cleanly before "+
 			"the error", policy.Actions)
+	}
+}
+
+// TestAHostProblemFromOnEffectsReachesTheSinkThePanelAndTheCLI is H7's new half
+// (claudestate architecture §3.2): a problem magmux's announcer returns from
+// OnEffects — here, a notification that could not be recorded, planted with an
+// audit path whose parent is a regular file — rides out on the NEXT delivery
+// to every subscriber (C13). The sink keeps it for the panel, whose attention
+// view counts it; a streaming `magmux agents` prints it on stderr. The socket
+// and MCP payloads carry the fleet document only, as they always have: adding
+// a problems member would be a wire change this run does not make.
+func TestAHostProblemFromOnEffectsReachesTheSinkThePanelAndTheCLI(t *testing.T) {
+	defer deadlineWatchdog(t, 60*time.Second)()
+	dir := t.TempDir()
+	// BUSY first: the notification must be decided AFTER this test has
+	// subscribed, or the delivery that carries its problem goes out (to the
+	// sink) before there is a subscriber here to see it.
+	writeHostRecord(t, dir, 4242, "id-a", "session-a", "busy")
+	notADir := filepath.Join(t.TempDir(), "a-file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newTestMux(t, ctrlPanes(1)...)
+	m.panelPrivate = true
+	if err := m.startObservationWith(obsConfig{
+		Root: dir, Policy: notifyPolicy(0), Notify: &recordingPort{},
+		AuditPath: filepath.Join(notADir, "trail.jsonl"),
+	}); err != nil {
+		t.Fatalf("startObservationWith: %v", err)
+	}
+	t.Cleanup(m.stopObservation)
+	sub, err := m.obs.p.Subscribe(context.Background(), "cli", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeHostRecord(t, dir, 4242, "id-a", "session-a", "waiting")
+	m.obs.p.Refresh()
+
+	var withProblem pipeline.Delivery
+	deadline := time.After(20 * time.Second)
+	for withProblem.Problems == nil {
+		select {
+		case d, ok := <-sub.C():
+			if !ok {
+				t.Fatal("the subscription closed")
+			}
+			for _, pr := range d.Problems {
+				if pr.Scope == model.ScopeHost {
+					withProblem = d
+				}
+			}
+		case <-deadline:
+			t.Fatal("no delivery carried the host's problem")
+		}
+	}
+
+	// The CLI's renderer of a delivery's problems, on its stderr.
+	var stderr strings.Builder
+	writeObsProblems(&stderr, withProblem)
+	if !strings.Contains(stderr.String(), "could not be recorded") {
+		t.Errorf("the streaming CLI would print:\n%s\nwhich does not say the notification was dropped", stderr.String())
+	}
+
+	// The panel counts it.
+	waitUntilObs(t, func() bool {
+		m.control.mu.Lock()
+		defer m.control.mu.Unlock()
+		return m.control.attention.problems > 0
+	}, "the panel to count the problem")
+
+	// And the socket document is the fleet and nothing else.
+	payload, err := m.sockObs()
+	if err != nil {
+		t.Fatalf("the agents verb: %v", err)
+	}
+	if len(payload) != 2 || payload["problems"] != nil {
+		t.Errorf("the socket document carries %v; it is the fleet document only", keysOfPayload(payload))
 	}
 }

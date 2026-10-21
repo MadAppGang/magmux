@@ -29,27 +29,29 @@ package mux
 // this goroutine, take each lock, copy, release, and never hold one across a
 // channel operation.
 //
-// Freeze point 3 is the other half: the obs.Fleet in a Delivery is SHARED with
-// every other subscriber of that broadcast, so what this sink keeps is a
-// CLONE and what it derives is derived before anything is stored.
+// Freeze point 3 is the other half: the library's hub hands every subscriber its
+// own deep copy of the document, and this sink keeps the WIRE form of it —
+// obsview.FromModel, the one mapping every surface uses — derived on this
+// goroutine before anything is stored.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
-	"github.com/MadAppGang/magmux/internal/obs/pipeline"
+	"github.com/MadAppGang/magmux/claudestate/pipeline"
+	"github.com/MadAppGang/magmux/obsview"
 )
 
 // obsStore is the newest document, for the surfaces that answer a question.
 //
 // # Why magmux keeps one at all, when the pipeline deliberately does not
 //
-// pipeline.Hub has no "latest document" accessor on purpose: the copy the
-// sinks share has to be unreachable from any writer, which is stronger than
-// conventionally read-only and is the part a test can assert. A socket verb
+// The pipeline's hub has no "latest document" accessor for a socket goroutine:
+// the only reader of the coordinator's state is Exec, which serialises behind
+// every cycle, and a socket verb must not queue behind one. A socket verb
 // still has to answer NOW, with the last thing that was published, so the
 // holding is done on THIS side of the hub by an ordinary subscriber — which
 // is exactly the shape the hub's contract invites, rather than an exception
@@ -74,7 +76,7 @@ type obsStore struct {
 	running bool
 
 	have bool
-	doc  obs.Fleet
+	doc  obsview.Fleet
 	at   time.Time
 
 	// dropped is how many documents the hub threw away for this sink over its
@@ -91,7 +93,7 @@ func (s *obsStore) start() {
 	defer s.mu.Unlock()
 	s.running = true
 	s.have = false
-	s.doc = obs.Fleet{}
+	s.doc = obsview.Fleet{}
 	s.dropped = 0
 }
 
@@ -107,11 +109,11 @@ func (s *obsStore) stop() {
 	defer s.mu.Unlock()
 	s.running = false
 	s.have = false
-	s.doc = obs.Fleet{}
+	s.doc = obsview.Fleet{}
 }
 
 // set stores one delivery. The document must already be this sink's own copy.
-func (s *obsStore) set(doc obs.Fleet, at time.Time, dropped int) {
+func (s *obsStore) set(doc obsview.Fleet, at time.Time, dropped int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.doc = doc
@@ -123,7 +125,7 @@ func (s *obsStore) set(doc obs.Fleet, at time.Time, dropped int) {
 // obsSnapshot is what a surface gets: the document, when it arrived, and the
 // two facts that say whether it means anything.
 type obsSnapshot struct {
-	Doc     obs.Fleet
+	Doc     obsview.Fleet
 	At      time.Time
 	Running bool
 	Have    bool
@@ -152,7 +154,7 @@ func (s *obsStore) snapshot() obsSnapshot {
 // the order everywhere in this layer, because nothing is replayed and a
 // document published before anybody subscribed is a document nobody receives.
 func (m *Magmux) startObsSink(p *pipeline.Pipeline) error {
-	sub, err := p.Subscribe("chrome", 0)
+	sub, err := p.Subscribe(context.Background(), "chrome", 0)
 	if err != nil {
 		return err
 	}
@@ -175,10 +177,9 @@ func (m *Magmux) startObsSink(p *pipeline.Pipeline) error {
 // the rule at the top of this file.
 func (m *Magmux) obsSinkLoop(sub *pipeline.Subscription) {
 	for d := range sub.C() {
-		// Freeze point 3: d.Doc is shared with every other subscriber of this
-		// broadcast, so nothing here retains it. The clone is what is kept and
-		// the view is derived from the clone.
-		doc := d.Doc.Clone()
+		// The wire form, once, here: the socket verb, MCP and the panel all
+		// read this one value, so they cannot render the session differently.
+		doc := obsview.FromModel(d.Doc)
 		at := time.Now()
 		view := attentionOf(doc, at, d)
 
@@ -211,7 +212,7 @@ func (m *Magmux) stopObsSink() {
 // requirements.md R4.1 says the socket verb, the MCP tool and the CLI return
 // "the identical document", and R4.3 says the panel's content must match it
 // exactly. The cheapest way to make that a PROPERTY rather than a promise is
-// for every surface to render the same obs.Fleet, and for the wire one to be
+// for every surface to render the same obsview.Fleet, and for the wire one to be
 // the marshalled Fleet itself rather than a map assembled by hand beside it.
 // A hand-built map is a second copy of architecture-v4 §9's key table, and a
 // second copy of a table is how two spellings drift.
@@ -219,7 +220,7 @@ func (m *Magmux) stopObsSink() {
 // The cost is one marshal and one unmarshal per request, at human rate, on a
 // socket goroutine. The socket protocol's reply type is a map, so something
 // has to produce one; this produces it from the only definition there is.
-func fleetPayload(f obs.Fleet) (map[string]any, error) {
+func fleetPayload(f obsview.Fleet) (map[string]any, error) {
 	data, err := json.Marshal(f)
 	if err != nil {
 		return nil, fmt.Errorf("encoding the session document: %w", err)

@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"text/tabwriter"
 	"time"
-
-	"github.com/MadAppGang/magmux/internal/obs"
 )
 
 // The fleet table and its JSON form, shared by every surface that shows the
@@ -28,7 +26,7 @@ import (
 // Every string is carried EXACT — this is the document, not a rendering of
 // it — and TerminalSafeJSON escapes the DEL and C1 characters encoding/json
 // would otherwise write raw, which changes no decoded value.
-func WriteFleetJSON(out io.Writer, fleet obs.Fleet) {
+func WriteFleetJSON(out io.Writer, fleet Fleet) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetIndent("", "  ")
@@ -47,7 +45,7 @@ func WriteFleetJSON(out io.Writer, fleet obs.Fleet) {
 // column being there: "we did not determine this" and "no" are different
 // answers, and a table that printed an empty cell for both would throw the
 // distinction away at the last possible moment.
-func WriteFleetTable(out io.Writer, fleet obs.Fleet) {
+func WriteFleetTable(out io.Writer, fleet Fleet) {
 	if len(fleet.Sessions) == 0 {
 		fmt.Fprintf(out, "no sessions at %s\n", fleet.Epoch.Format(time.RFC3339))
 		return
@@ -102,7 +100,7 @@ func WriteFleetTable(out io.Writer, fleet obs.Fleet) {
 // The case is doing work too: YES is the answer a reader is scanning for, and
 // "no" in lower case lets it recede. There is nothing else in the table in
 // capitals.
-func attentionText(s obs.Session) string {
+func attentionText(s Session) string {
 	switch {
 	case s.Attention.Needed == nil:
 		return "?"
@@ -120,8 +118,8 @@ func attentionText(s obs.Session) string {
 // to map back to the JSON. An undetermined tier prints empty, so OrDash turns
 // it into the same "-" as every other undetermined column — that one IS a
 // plain absence of an answer and reads correctly as one.
-func tierText(t obs.Tier) string {
-	if t == obs.TierUnknown {
+func tierText(t Tier) string {
+	if t == TierUnknown {
 		return ""
 	}
 	return t.String()
@@ -144,8 +142,8 @@ func tierText(t obs.Tier) string {
 // its reason is already legible from the row — "it is working", "nothing
 // outstanding" — and thirty of them would bury the two lines that matter.
 // `--json` carries every reason regardless; this is the triage view.
-func writeAttentionWhy(out io.Writer, fleet obs.Fleet) {
-	var shown []obs.Session
+func writeAttentionWhy(out io.Writer, fleet Fleet) {
+	var shown []Session
 	for _, s := range fleet.Sessions {
 		if s.Conflict != nil || s.Attention.Needed == nil || *s.Attention.Needed {
 			shown = append(shown, s)
@@ -181,8 +179,8 @@ func writeAttentionWhy(out io.Writer, fleet obs.Fleet) {
 // becomes display text: both the table and the attention panel render through
 // this function, so neither can forget it. The document itself keeps the raw
 // value exact.
-func StatusText(s obs.Session) string {
-	if s.Status != obs.StatusUnknown {
+func StatusText(s Session) string {
+	if s.Status != StatusUnknown {
 		return s.Status.String()
 	}
 	if s.StatusRaw != "" {
@@ -192,8 +190,8 @@ func StatusText(s obs.Session) string {
 }
 
 // WaitingText is StatusText for the waiting reason, on the same terms.
-func WaitingText(s obs.Session) string {
-	if s.Waiting != obs.WaitingReasonUnknown {
+func WaitingText(s Session) string {
+	if s.Waiting != WaitingReasonUnknown {
 		return s.Waiting.String()
 	}
 	if s.WaitingRaw != "" {
@@ -209,7 +207,7 @@ func WaitingText(s obs.Session) string {
 // not start, and this command, running outside any magmux, sees nothing else.
 // They are shown rather than filtered, because whether to show them is the
 // reader's decision and dropping them here would remove the choice.
-func paneIDText(s obs.Session) string {
+func paneIDText(s Session) string {
 	if s.PaneID == nil {
 		return ""
 	}
@@ -227,13 +225,13 @@ func paneIDText(s obs.Session) string {
 // An UNDETERMINED gate never rejects. "Nobody could tell" is not "no", and a
 // session excluded because nobody looked is the failure the whole tri-state
 // exists to prevent.
-func gateText(s obs.Session) string {
+func gateText(s Session) string {
 	switch {
-	case s.ProcessAlive == obs.LivenessNo && s.PaneAlive == obs.LivenessNo:
+	case s.ProcessAlive == LivenessNo && s.PaneAlive == LivenessNo:
 		return "process+pane"
-	case s.ProcessAlive == obs.LivenessNo:
+	case s.ProcessAlive == LivenessNo:
 		return "process"
-	case s.PaneAlive == obs.LivenessNo:
+	case s.PaneAlive == LivenessNo:
 		return "pane"
 	}
 	return ""
@@ -244,14 +242,14 @@ func gateText(s obs.Session) string {
 // spells it "unknown", which is right for a log line and wrong in a column
 // beside "yes" and "no": it reads as a third determined state rather than as
 // the absence of an answer.
-func livenessText(l obs.Liveness) string {
-	if l == obs.LivenessUnknown {
+func livenessText(l Liveness) string {
+	if l == LivenessUnknown {
 		return ""
 	}
 	return l.String()
 }
 
-func inStatusForText(s obs.Session, epoch time.Time) string {
+func inStatusForText(s Session, epoch time.Time) string {
 	d, ok := s.InStatusFor(epoch)
 	if !ok {
 		return ""

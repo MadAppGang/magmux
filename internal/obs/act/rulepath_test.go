@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
 )
 
 // A rule's `match.cwd` as a person writes it. Fix round 2, item 5.
@@ -39,13 +39,13 @@ func TestARuleWrittenAsTheSpecWritesItMatches(t *testing.T) {
 			"can never match a launch directory", got)
 	}
 
-	inside := obs.Session{ID: "id-a", LaunchDir: "/home/someone/dev/magmux"}
+	inside := model.Session{Key: model.Key{SessionID: "id-a"}, LaunchDir: "/home/someone/dev/magmux"}
 	if d := p.Decide(TierNavigate, inside); !d.Allowed {
 		t.Errorf("a rule written as R6 writes it did not match %s: %s", inside.LaunchDir, d.Rule)
 	}
 	// And the expansion is to THIS home, not a match on anything ending in
 	// mag/: another user's tree is outside the rule.
-	outside := obs.Session{ID: "id-b", LaunchDir: "/home/else/dev/magmux"}
+	outside := model.Session{Key: model.Key{SessionID: "id-b"}, LaunchDir: "/home/else/dev/magmux"}
 	if d := p.Decide(TierNavigate, outside); d.Allowed {
 		t.Errorf("the rule matched %s, which is not under the home it names", outside.LaunchDir)
 	}

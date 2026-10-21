@@ -10,7 +10,8 @@
 // display rule, is how two of three renderers once forgot to neutralise a
 // session name.
 //
-// It imports internal/obs for the document's types and nothing from mux, and
+// It defines the document's WIRE (wire.go) and the one mapping onto it from
+// the claudestate library's model (frommodel.go), imports nothing from mux, and
 // it writes nothing anywhere but the io.Writer it is handed (and os.Stderr for
 // an encoding failure, as `magmux agents` always has).
 package obsview

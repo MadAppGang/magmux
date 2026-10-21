@@ -37,8 +37,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/MadAppGang/magmux/internal/obs"
-	"github.com/MadAppGang/magmux/internal/obs/adapters"
+	"github.com/MadAppGang/magmux/claudestate/claude"
+	"github.com/MadAppGang/magmux/claudestate/model"
 	"github.com/MadAppGang/magmux/protocol"
 	"github.com/MadAppGang/magmux/pty"
 )
@@ -172,9 +172,9 @@ func (c *ClaudeCodeController) transcriptSeq() uint64 {
 // dequeued prompt becomes is dated by its enqueue (dequeuedAt), not by when
 // it ran: the run time of an older queued `continue` must never confirm a new
 // one (r3 internal M2).
-func (c *ClaudeCodeController) noteQueued(l adapters.Line) {
+func (c *ClaudeCodeController) noteQueued(l ctrlLine) {
 	at := l.Timestamp
-	if l.Kind == adapters.LineAttachment {
+	if l.Kind == claude.LineAttachment {
 		if !l.QueuedCommand {
 			return
 		}
@@ -190,10 +190,13 @@ func (c *ClaudeCodeController) noteQueued(l adapters.Line) {
 		}
 		return
 	}
-	content := l.QueueContent
+	if l.Queue == nil {
+		return
+	}
+	content := l.Queue.Content
 	key := inputKey(content)
-	switch l.QueueOp {
-	case adapters.QueueOpEnqueue:
+	switch l.Queue.Op {
+	case claude.QueueEnqueue:
 		if content == "" {
 			return
 		}
@@ -202,7 +205,7 @@ func (c *ClaudeCodeController) noteQueued(l adapters.Line) {
 			c.queue = c.queue[1:]
 		}
 		c.queue = append(c.queue, queuedPrompt{key: key, at: at})
-	case adapters.QueueOpRemove:
+	case claude.QueueRemove:
 		// The oldest pending enqueue of this content; with no content, the
 		// oldest pending one of any — the conservative reading, since it
 		// makes a later user entry OLDER, never fresher. A prompt removed
@@ -211,7 +214,7 @@ func (c *ClaudeCodeController) noteQueued(l adapters.Line) {
 		// left to misdate the next identical send's own entry.
 		for i := range c.queue {
 			if !c.queue[i].dequeued && (content == "" || c.queue[i].key == key) {
-				if l.QueueAbsorbed {
+				if l.Queue.AbsorbedMidTurn {
 					c.queue = slices.Delete(c.queue, i, i+1)
 				} else {
 					c.queue[i].dequeued = true
@@ -327,9 +330,9 @@ func decideReadiness(in readinessInput) InputReadiness {
 	case sc.Dialog != "":
 		r.Dismissable = sc.Dismissable
 		return refuse(protocol.ReasonDialogPrefix+sc.Dialog, "a "+sc.Dialog+" dialog is showing")
-	case !sc.BoxVisible && regStatusIs(in.reg.Status, obs.StatusWaiting):
+	case !sc.BoxVisible && regStatusIs(in.reg.Status, model.StatusWaiting):
 		kind := "question"
-		if adapters.LooksLikePermission(in.reg.WaitingFor) {
+		if claude.LooksLikePermission(in.reg.WaitingFor) {
 			kind = "permission"
 		}
 		return refuse(protocol.ReasonDialogPrefix+kind,
@@ -445,7 +448,7 @@ func (c *ClaudeCodeController) InputReadiness(q ReadinessQuery) InputReadiness {
 	return r
 }
 
-// A registry status of "busy" (obs.StatusBusy through adapters.DecodeStatus)
+// A registry status of "busy" (model.StatusBusy through claude.MapRegistryStatus)
 // is a session running a turn (F4).
 
 // convChange reports what changed on sc since the pre-typing baseline pre
@@ -465,7 +468,7 @@ func convChange(sc claudeScreen, pre AcceptBaseline, reg regEntry) string {
 		return "the conversation above the input box changed"
 	case sc.Working && !cd.working:
 		return "a turn started (Claude's spinner appeared above the input box)"
-	case regStatusIs(reg.Status, obs.StatusBusy) && !regStatusIs(cd.regStatus, obs.StatusBusy):
+	case regStatusIs(reg.Status, model.StatusBusy) && !regStatusIs(cd.regStatus, model.StatusBusy):
 		return "a turn started (Claude's session registry went busy)"
 	}
 	return ""
@@ -872,8 +875,8 @@ func writtenSince(written, at time.Time) bool {
 // acceptance evidence.
 
 // regEntry is the part of a registry file readiness reads, as the RAW words
-// the tool wrote. It is decoded by adapters.DecodeReadinessFields, and Status is
-// compared through adapters.DecodeStatus (regStatusIs), so nothing here spells
+// the tool wrote. It is decoded by claude.DecodeRecord (readRegEntry), and Status
+// is compared through claude.MapRegistryStatus (regStatusIs), so nothing here spells
 // one of Claude's keys or values.
 type regEntry struct {
 	Status     string
@@ -882,9 +885,9 @@ type regEntry struct {
 }
 
 // regStatusIs reports whether a raw registry status word decodes to want.
-func regStatusIs(raw string, want obs.Status) bool {
-	s, ok := adapters.DecodeStatus(raw)
-	return ok && s == want
+func regStatusIs(raw string, want model.Status) bool {
+	s, _ := claude.MapRegistryStatus(raw, "")
+	return want != model.StatusUnknown && s == want
 }
 
 type regCached struct {
@@ -920,11 +923,11 @@ func (c *ClaudeCodeController) registry(now time.Time) regEntry {
 	if config == "" {
 		config = c.claudeConfigDir()
 	}
-	dir := filepath.Join(config, adapters.SessionsDirName)
+	dir := filepath.Join(config, claudeSessionsDir)
 	var e regEntry
 	found := false
 	if p := c.pane; p != nil && p.cmd != nil && p.cmd.Process != nil {
-		e, found = readRegEntry(filepath.Join(dir, strconv.Itoa(p.cmd.Process.Pid)+adapters.RecordSuffix))
+		e, found = readRegEntry(filepath.Join(dir, strconv.Itoa(p.cmd.Process.Pid)+claude.RecordSuffix))
 		// A declared session is the authority on whose entry this is: a pid
 		// file naming another session is not this pane's.
 		if found && c.bindID != "" && e.SessionID != c.bindID {
@@ -953,7 +956,7 @@ func (c *ClaudeCodeController) registrySessionID() string {
 		return c.bindID
 	}
 	if path := c.published.Load(); path != nil && *path != "" {
-		return strings.TrimSuffix(filepath.Base(*path), adapters.TranscriptSuffix)
+		return strings.TrimSuffix(filepath.Base(*path), claude.TranscriptSuffix)
 	}
 	return ""
 }
@@ -993,11 +996,41 @@ func readRegEntry(path string) (regEntry, bool) {
 	if err != nil {
 		return regEntry{}, false
 	}
-	fields, ok := adapters.DecodeReadinessFields(b)
-	if !ok {
+	return regEntryOf(filepath.Base(path), b)
+}
+
+// regEntryOf decodes one registry file's bytes through claude.DecodeRecord, by
+// the table in claudestate architecture §2.2, so "not found" means what it
+// always meant to the cache and the scan:
+//
+//   - not a JSON object (ErrTorn: torn, cut at regFileMax, or a body of JSON
+//     null), or any other decode error: not found;
+//   - a value of the wrong JSON type on status, waitingFor or sessionId
+//     (ProblemUndecoded): not found, as json.Unmarshal into string fields
+//     failed on one;
+//   - any other problem: found, the problem ignored — the controller has no
+//     problem channel, and readiness is not an observation;
+//   - a status word the library does not know: found, and neither waiting nor
+//     busy.
+//
+// The one difference from the json.Unmarshal reader it replaced is the null
+// body: Unmarshal found a zero entry there, and the library refuses it as not
+// an object. Claude Code never writes one.
+func regEntryOf(name string, b []byte) (regEntry, bool) {
+	r, problems, err := claude.DecodeRecord(name, b)
+	if err != nil {
 		return regEntry{}, false
 	}
-	return regEntry{Status: fields.Status, WaitingFor: fields.WaitingFor, SessionID: fields.SessionID}, true
+	for _, p := range problems {
+		if p.Kind != model.ProblemUndecoded {
+			continue
+		}
+		switch p.Field {
+		case claude.KeyStatus, claude.KeyWaitingFor, claude.KeySessionID:
+			return regEntry{}, false
+		}
+	}
+	return regEntry{Status: r.StatusRaw, WaitingFor: r.WaitingRaw, SessionID: r.SessionID}, true
 }
 
 func scanRegistry(dir, sessionID string) regEntry {
@@ -1009,7 +1042,7 @@ func scanRegistry(dir, sessionID string) regEntry {
 		return regEntry{}
 	}
 	for _, de := range ents {
-		if !de.Type().IsRegular() || !strings.HasSuffix(de.Name(), adapters.RecordSuffix) {
+		if !de.Type().IsRegular() || !claude.IsRecordName(de.Name()) {
 			continue
 		}
 		if e, ok := readRegEntry(filepath.Join(dir, de.Name())); ok && e.SessionID == sessionID {

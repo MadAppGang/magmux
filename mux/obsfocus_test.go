@@ -21,8 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/model"
 	"github.com/MadAppGang/magmux/internal/obs/act"
+	"github.com/MadAppGang/magmux/obsview"
 )
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -199,11 +200,11 @@ func TestNavigateInsideMagmuxMovesFocusAndIsAudited(t *testing.T) {
 	}
 	t.Cleanup(m.stopObservation)
 
-	sub, err := m.obs.Subscribe("test", 0)
+	sub, err := m.obs.p.Subscribe(context.Background(), "test", 0)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
-	m.obs.Refresh()
+	m.obs.p.Refresh()
 	select {
 	case d, ok := <-sub.C():
 		if !ok {
@@ -212,8 +213,8 @@ func TestNavigateInsideMagmuxMovesFocusAndIsAudited(t *testing.T) {
 		if len(d.Doc.Sessions) != 1 {
 			t.Fatalf("the document holds %d sessions", len(d.Doc.Sessions))
 		}
-		if d.Doc.Sessions[0].PaneID == nil || *d.Doc.Sessions[0].PaneID != 1 {
-			t.Fatalf("the session was not matched to pane 1: %+v", d.Doc.Sessions[0].PaneID)
+		if d.Doc.Sessions[0].Pane != obsview.PaneRef(1) {
+			t.Fatalf("the session was not matched to pane 1: %q", d.Doc.Sessions[0].Pane)
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("no document arrived")
@@ -260,7 +261,7 @@ func TestNavigateInsideMagmuxMovesFocusAndIsAudited(t *testing.T) {
 	if attempt.Target.PaneID == nil || *attempt.Target.PaneID != 1 {
 		t.Errorf("the record does not say which pane: %+v", attempt.Target.PaneID)
 	}
-	if attempt.Before == nil || attempt.Before.Status != obs.StatusWaiting {
+	if attempt.Before == nil || attempt.Before.Status != obsview.StatusWaiting {
 		t.Errorf("the record does not say what the session was doing: %+v", attempt.Before)
 	}
 	if !strings.Contains(attempt.Policy.Rule, "default posture") {
@@ -297,8 +298,8 @@ func TestNavigateIsRefusedWhenTheZeroPolicyIsInForce(t *testing.T) {
 	}
 	t.Cleanup(m.stopObservation)
 
-	sub, _ := m.obs.Subscribe("test", 0)
-	m.obs.Refresh()
+	sub, _ := m.obs.p.Subscribe(context.Background(), "test", 0)
+	m.obs.p.Refresh()
 	select {
 	case <-sub.C():
 	case <-time.After(20 * time.Second):
@@ -336,8 +337,8 @@ func TestAnActionIsRefusedWhenThereIsNoTrailToRecordItIn(t *testing.T) {
 	}
 	t.Cleanup(m.stopObservation)
 
-	sub, _ := m.obs.Subscribe("test", 0)
-	m.obs.Refresh()
+	sub, _ := m.obs.p.Subscribe(context.Background(), "test", 0)
+	m.obs.p.Refresh()
 	select {
 	case <-sub.C():
 	case <-time.After(20 * time.Second):
@@ -530,10 +531,13 @@ func TestObsFocusRefusesARelativeAuditPathFromInsideClaude(t *testing.T) {
 // and a six-character prefix that matches two sessions is exactly the shape
 // that produces it.
 func TestResolveObsTargetNamesOneSessionOrRefuses(t *testing.T) {
-	fleet := obs.Fleet{Sessions: []obs.Session{
-		{ID: "abc12300-1111", PID: 100, Name: "alpha"},
-		{ID: "abc12399-2222", PID: 200, Name: "beta"},
-		{ID: "zz999900-3333", PID: 300, Name: "alpha"},
+	sess := func(id string, pid int, name string) model.Session {
+		return model.Session{Key: model.Key{SessionID: id, PID: pid}, PID: pid, Name: name}
+	}
+	fleet := model.Fleet{Sessions: []model.Session{
+		sess("abc12300-1111", 100, "alpha"),
+		sess("abc12399-2222", 200, "beta"),
+		sess("zz999900-3333", 300, "alpha"),
 	}}
 
 	for _, tc := range []struct {
@@ -572,4 +576,123 @@ func TestResolveObsTargetNamesOneSessionOrRefuses(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFocusByIDWithTwoProcessesIsRefusedAndNamesBothPIDs is D12's refusal.
+// Since the library, two interactive processes on one session id are two
+// sessions with keys of their own, and so are a job and the job that resumed
+// it. An exact id then names nobody in particular: it is refused through
+// oneOf, naming every pid and every job short, never answered with whichever
+// came first — which is what resolveObsTarget did before (it returned the
+// first exact-id match without counting).
+func TestFocusByIDWithTwoProcessesIsRefusedAndNamesBothPIDs(t *testing.T) {
+	const id = "6c5b2f09-3a81-4d76-99e4-0f8c1b3a7d52"
+	fleet := model.Fleet{Sessions: []model.Session{
+		{Key: model.Key{SessionID: id, PID: 1828}, PID: 1828},
+		{Key: model.Key{SessionID: id, PID: 2000}, PID: 2000},
+		{Key: model.Key{SessionID: id, Job: "a1b2c3d4"}, Job: &model.JobFacts{Short: "a1b2c3d4"}},
+	}}
+	_, err := resolveObsTarget(fleet, id)
+	if err == nil {
+		t.Fatal("an exact id on three sessions resolved to one")
+	}
+	for _, want := range []string{"matches 3 sessions", "pid 1828", "pid 2000", "job a1b2c3d4"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not say %q", err, want)
+		}
+	}
+	// The same rule inside magmux, on the coordinator: keyByID refuses before
+	// the gate is asked, so nothing can be focused on a guess.
+	if _, err := keyByID(id)(fleet); err == nil || !strings.Contains(err.Error(), "pid 2000") {
+		t.Errorf("keyByID answered %v for an id on three sessions", err)
+	}
+	// A pid names exactly one of them.
+	if got, err := resolveObsTarget(fleet, "2000"); err != nil || got.Key.PID != 2000 {
+		t.Errorf("pid 2000 resolved to %+v, %v", got.Key, err)
+	}
+}
+
+// TestAPidReachesAJobThroughAnyClaimantAndPidZeroNamesNothing: a pid target
+// matches Session.PID or any Claimants entry, so the process a person sees in
+// `ps` reaches the job it serves even when another claimant speaks. pid 0 is
+// what a job no process claims carries, and is refused rather than matched
+// against every such job.
+func TestAPidReachesAJobThroughAnyClaimantAndPidZeroNamesNothing(t *testing.T) {
+	fleet := model.Fleet{Sessions: []model.Session{
+		{Key: model.Key{SessionID: "id-job", Job: "j1"}, PID: 70012, Claimants: []int{70011, 70012}},
+		{Key: model.Key{SessionID: "id-solo", Job: "j2"}, PID: 0},
+	}}
+	got, err := resolveObsTarget(fleet, "70011")
+	if err != nil || got.Key.Job != "j1" {
+		t.Errorf("the non-speaking claimant 70011 resolved to %+v, %v; it serves job j1", got.Key, err)
+	}
+	if _, err := resolveObsTarget(fleet, "0"); err == nil || !strings.Contains(err.Error(), "names no process") {
+		t.Errorf("pid 0 answered %v, want a refusal", err)
+	}
+}
+
+// TestFocusByPIDReachesThatProcessAcrossTheSecondRead: obsFocus names the
+// session on its FIRST read and acts on the second by that exact model.Key
+// (§4.9). Two processes share one id here; the pid names one, and the action
+// lands on that one — not on the other process, which an id re-match would
+// pick whenever its file sorts first.
+func TestFocusByPIDReachesThatProcessAcrossTheSecondRead(t *testing.T) {
+	defer deadlineWatchdog(t, 60*time.Second)()
+
+	const id = "6c5b2f09-3a81-4d76-99e4-0f8c1b3a7d52"
+	dir := t.TempDir()
+	stageRegistry(t, dir, 1828, id, "first")
+	stageRegistry(t, dir, 2000, id, "second")
+	trail := trailPath(t)
+
+	panes := &fakeBindingPanes{paneOf: map[int]int{2000: 7}}
+	var out, errOut strings.Builder
+	code := obsFocus(obsFocusConfig{
+		Root: dir, AuditPath: trail, Target: "2000", Policy: act.Default(),
+		Panes: panes, Out: &out, Err: &errOut,
+	})
+	if code != 0 {
+		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", code, out.String(), errOut.String())
+	}
+	if panes.bound != 2000 || len(panes.focused) != 1 || panes.focused[0] != 7 {
+		t.Fatalf("bound to pid %d and focused %v; want pid 2000's pane 7, once", panes.bound, panes.focused)
+	}
+	records := readTrail(t, trail)
+	if len(records) == 0 || records[0].Target.PID != 2000 {
+		t.Fatalf("the audit trail names %+v, want the process 2000", records)
+	}
+}
+
+// fakeBindingPanes is a pane table that spans "several magmuxes", so obsFocus
+// takes its two-read path: it maps a session pid straight to a pane id, binds
+// to the pid it is asked about, and records every focus. No socket, no
+// process: the pids are only map keys.
+type fakeBindingPanes struct {
+	paneOf  map[int]int
+	bound   int
+	focused []int
+}
+
+func (f *fakeBindingPanes) PaneFor(s model.Session) (model.PaneRef, model.Liveness) {
+	if id, ok := f.paneOf[s.PID]; ok {
+		return obsview.PaneRef(id), model.LivenessYes
+	}
+	return "", model.LivenessNo
+}
+
+func (f *fakeBindingPanes) PaneAlive(ref model.PaneRef) model.Liveness {
+	if _, ok := obsview.PaneID(ref); ok {
+		return model.LivenessYes
+	}
+	return model.LivenessUnknown
+}
+
+func (f *fakeBindingPanes) Focus(paneID int) (int, error) {
+	f.focused = append(f.focused, paneID)
+	return -1, nil
+}
+
+func (f *fakeBindingPanes) bindToSession(pid int) obsPaneTable {
+	f.bound = pid
+	return f
 }

@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/join"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/obsview"
 )
 
 // AuditFileName is the audit trail's file name inside magmux's state
@@ -80,9 +82,9 @@ func (e *Event) UnmarshalJSON(b []byte) error {
 // The keys are the DOCUMENT's — `id`, `pid`, `name`, `paneId` — and not
 // Claude's, which spells the first `sessionId`. Two reasons, and the second is
 // enforced: a consumer joining an audit line to a session document should not
-// have to translate a key, and adapters.TestOnlySchemaFileDecodesClaudeStrings
-// fails when any file outside schema.go names one of Claude's. It caught this
-// struct's first spelling.
+// have to translate a key, and mux.TestNoClaudeLiteralOutsideTheLibrary
+// fails when a decode site outside claudestate names one of Claude's. Its
+// predecessor caught this struct's first spelling.
 type Target struct {
 	SessionID string `json:"id"`
 	PID       int    `json:"pid"`
@@ -102,25 +104,33 @@ type Target struct {
 // is the one place a derived duration is worth freezing, because the instant
 // it was derived at is the instant the record is about.
 type Before struct {
-	Status      obs.Status        `json:"status"`
-	Waiting     obs.WaitingReason `json:"waitingOn"`
-	InStatusFor string            `json:"inStatusFor,omitempty"`
-	Confidence  obs.Tier          `json:"confidence"`
-	Attention   *bool             `json:"attentionNeeded"`
+	Status      obsview.Status        `json:"status"`
+	Waiting     obsview.WaitingReason `json:"waitingOn"`
+	InStatusFor string                `json:"inStatusFor,omitempty"`
+	Confidence  obsview.Tier          `json:"confidence"`
+	Attention   *bool                 `json:"attentionNeeded"`
 }
 
 // StateOf captures the part of a session an audit record keeps.
-func StateOf(s obs.Session, now time.Time) Before {
+//
+// It spells the session EXACTLY as `magmux agents --json` does, because it
+// reads it through obsview.FromModelSession — the one mapping every surface
+// uses — rather than mapping the library's enums a second time. A trail that
+// said "blocked" where the document says "waiting" would be a second
+// vocabulary for one session (claudestate architecture §2.2). The time in
+// status is join.AgesAt's, which derives it from the effective StatusSince.
+func StateOf(s model.Session, now time.Time) Before {
+	w := obsview.FromModelSession(s)
 	b := Before{
-		Status:     s.Status,
-		Waiting:    s.Waiting,
-		Confidence: s.Confidence,
+		Status:     w.Status,
+		Waiting:    w.Waiting,
+		Confidence: w.Confidence,
 	}
-	if s.Attention.Needed != nil {
-		v := *s.Attention.Needed
+	if w.Attention.Needed != nil {
+		v := *w.Attention.Needed
 		b.Attention = &v
 	}
-	if d, ok := s.InStatusFor(now); ok {
+	if d := join.AgesAt(s, now).InStatus; d != nil {
 		b.InStatusFor = d.Round(time.Second).String()
 	}
 	return b
@@ -205,9 +215,9 @@ type Auditor interface {
 // # Single owner, no lock
 //
 // It holds a sequence counter and no mutex, so one goroutine owns it. In
-// magmux that is the pipeline's coordinator, which is also the only goroutine
-// that reaches an actor, so an action and its audit line are already
-// serialised by the same channel. Two writers in one process would need
+// magmux that is the claudestate pipeline's coordinator: actions run inside
+// Pipeline.Exec and notifications inside OnEffects, and both run on it, so an
+// action and its audit line are already serialised by the same channel. Two writers in one process would need
 // synchronisation and this layer has none; two PROCESSES are fine, because
 // every line is one O_APPEND write.
 //

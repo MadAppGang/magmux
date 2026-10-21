@@ -9,7 +9,7 @@
 //
 // It is NOT A POLL. `delay = "2m"` means "tell me when a session has been
 // waiting two minutes", and the obvious implementation checks every session on
-// a timer. [Stage] implements the pipeline's optional Waker instead: when a
+// a timer. [Stage] implements claudestate's optional stage.Waker instead: when a
 // session qualifies but has not waited long enough yet, it reports how long is
 // left, its actor arms ONE one-shot alarm for exactly that, and the deadline
 // produces one cycle. A session that has already been announced, or that will
@@ -17,7 +17,7 @@
 //
 // It is NOT A REPEAT. A session that sits `waiting` for an hour is one
 // notification, not thirty. What remembers that is [Stage.announced], and it
-// is per-session state living in a per-session middleware — the same rule as
+// is per-session state living in a per-session stage — the same rule as
 // every other stage in the chain, and the reason this is a stage rather than a
 // sink. A sink sees the whole fleet and would have to keep a map keyed by
 // session id, which is a second lifetime to get wrong beside the actor table
@@ -27,9 +27,10 @@
 //
 // Not once per session and not once per process: once per EPISODE. An episode
 // is one spell of one trigger, identified by the instant the session entered
-// the status it is in — [obs.Session.StatusSince], which architecture-v4 §0.4
-// establishes is an ANSWER rather than a lower bound, because Claude Code
-// writes the record on a transition and not on a heartbeat. So a session that
+// the status it is in — the EFFECTIVE model.Session.StatusSince, a record's own
+// instant (the registry's statusUpdatedAt, or a job's updatedAt when the job
+// decides), which is an ANSWER rather than a lower bound, because Claude Code
+// writes the record on a transition and not on a heartbeat (D7). So a session that
 // goes waiting, is answered, works, and goes waiting again is two episodes and
 // two notifications, and a session nobody answers is one.
 //
@@ -38,10 +39,11 @@
 // Everything above happens here, on the actor's goroutine, with no I/O at all.
 // What comes out is a [Note] carrying an act.Decision that says allowed or
 // suppressed AND WHY, in the words of the notify clause that decided. The
-// pipeline's coordinator then writes the audit record and calls the [Port],
-// in that order, because a notification is an outward-facing act and
-// requirements.md R5.A's trail is not optional for one — see
-// pipeline.Config.Notify, where the consequence of an unwritable trail is
+// Note is a stage.Effect: the claudestate pipeline hands it, unwrapped, to
+// magmux's OnEffects on the coordinator goroutine, which writes the audit
+// record and calls the [Port], in that order, because a notification is an
+// outward-facing act and requirements.md R5.A's trail is not optional for one
+// — see mux's obsAnnouncer, where the consequence of an unwritable trail is
 // stated.
 //
 // That split is the same one Gate.Do makes between deciding and acting, for
@@ -54,7 +56,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/MadAppGang/magmux/internal/obs"
+	"github.com/MadAppGang/magmux/claudestate/join"
+	"github.com/MadAppGang/magmux/claudestate/model"
+	"github.com/MadAppGang/magmux/claudestate/stage"
 	"github.com/MadAppGang/magmux/internal/obs/act"
 )
 
@@ -68,8 +72,7 @@ import (
 // servicing events, so a Send that never returns wedges every session's next
 // cycle. The ctx carries cancellation and an implementation that waits on
 // anything MUST select on it — and must ALSO bound itself, because the
-// pipeline creates no timers and deliberately does not start one here. See
-// pipeline.Config.Notify.
+// pipeline creates no timers and deliberately does not start one here.
 //
 // An error is reported into the audit trail as the outcome of the attempt.
 // It is not retried: a notification that was late is worth less than one that
@@ -82,14 +85,14 @@ type Port interface {
 // Note is one notification, decided but not yet delivered.
 //
 // It carries a CLONE of the session rather than a pointer into the chain's
-// fact set. obs.Session is mostly pointers and freeze point 1 replaces the
+// fact set. model.Session is mostly pointers and freeze point 1 replaces the
 // whole fact set on the next observation; a note that shared those pointers
 // would be describing whichever observation happened to be current when the
 // coordinator got round to it, which is not the observation it was decided
 // from.
 type Note struct {
 	// Session is what the note is about, frozen at the instant it was decided.
-	Session obs.Session
+	Session model.Session
 
 	// On is which of requirements.md R6's `notify.on` triggers raised it.
 	On act.NotifyOn
@@ -118,7 +121,7 @@ type Note struct {
 func (n Note) Title() string {
 	name := n.Session.Name
 	if name == "" {
-		name = shortID(n.Session.ID)
+		name = shortID(n.Session.Key.SessionID)
 	}
 	if name == "" {
 		return fmt.Sprintf("Claude session %d", n.Session.PID)
@@ -151,8 +154,12 @@ func (n Note) Body() string {
 		// here, so a person reading a notification and then the document sees
 		// one vocabulary. A table of prose here would be a second one, and
 		// phase 6 already caught a test writing Claude's own spelling of it.
+		// Only the two errands magmux's wire has a word for: a dialog, or a
+		// blocked background job, is "waiting for you", exactly as before the
+		// library, when neither had a reason the wire could name.
 		what := "waiting for you"
-		if n.Session.Waiting != obs.WaitingReasonUnknown && n.Session.Waiting != obs.WaitingReasonNone {
+		switch n.Session.Waiting {
+		case model.WaitingInput, model.WaitingPermission:
 			what = "waiting for " + n.Session.Waiting.String()
 		}
 		if n.For > 0 {
@@ -202,19 +209,13 @@ type Config struct {
 
 	// Now is the clock the delay is measured against. nil takes time.Now.
 	//
-	// It is a func and not an obs.Clock because this stage never waits: it
-	// reports how long is left and something else owns the alarm. See
-	// registry.Config.Now, which documents the trap in having one value do
-	// both jobs.
+	// It is a func and not a ports.Clock because this stage never waits: it
+	// reports how long is left and the actor owns the alarm.
 	Now func() time.Time
 }
 
-// Stage is one session's notifier: a pipeline Middleware, a Waker, and the
-// source of the notes the coordinator delivers.
-//
-// It satisfies those interfaces STRUCTURALLY and names none of them, so the
-// dependency runs one way — the pipeline imports this package to build the
-// stage, exactly as it imports navigate and verdict.
+// Stage is one session's notifier: a claudestate stage.Stage, a stage.Waker,
+// and a stage.Effecting whose effects are the [Note]s magmux delivers.
 //
 // One instance per session, never shared. It remembers which episode it has
 // announced, and a shared instance would answer one session's question with
@@ -251,6 +252,14 @@ type episode struct {
 
 func (e episode) live() bool { return e.on != act.NotifyOnUnknown }
 
+// Factory builds one notifier per session actor. The zero policy inside cfg
+// is silence, and that is the switch the USER holds: a process with no way to
+// reach a human still decides, and the port's absence is recorded where the
+// note would be delivered.
+func Factory(cfg Config) stage.Factory {
+	return func(model.Key) stage.Stage { return New(cfg) }
+}
+
 // New builds one session's notifier.
 func New(cfg Config) *Stage {
 	now := cfg.Now
@@ -270,7 +279,7 @@ func (s *Stage) Name() string { return "notify" }
 // document's keys and a `notified` field would be magmux reporting on its own
 // behaviour in a document that is otherwise entirely about the session — the
 // same line the control panel's wire-tap rule draws, in the other surface.
-func (s *Stage) Observe(in obs.Session) obs.Session {
+func (s *Stage) Observe(in model.Session) model.Session {
 	s.wake, s.hasWake = 0, false
 
 	on := s.trigger(in)
@@ -291,7 +300,11 @@ func (s *Stage) Observe(in obs.Session) obs.Session {
 		return in // already said, once, for this episode
 	}
 
-	waited, measured := in.InStatusFor(now)
+	var waited time.Duration
+	measured := false
+	if d := join.AgesAt(in, now).InStatus; d != nil {
+		waited, measured = *d, true
+	}
 	delay := s.policy.Notify.Delay
 	if delay > 0 {
 		if !measured {
@@ -357,11 +370,28 @@ func (s *Stage) Observe(in obs.Session) obs.Session {
 //
 // This was found by running the real binary against a staged registry of dead
 // pids and watching it decide to notify about both of them.
-func (s *Stage) trigger(in obs.Session) act.NotifyOn {
-	if in.ProcessAlive == obs.LivenessNo || in.PaneAlive == obs.LivenessNo {
+//
+// # The process gate applies only to a session no job claims
+//
+// For a session with a job record, ProcessAlive describes the process that
+// SERVED the job, and the job's own record has already been weighed against it
+// by the effective status (claudestate's twinStatus): a blocked job whose
+// serving process exited is still blocked, and still needs a human. That is
+// the scope verdict's Rule 1 has, for the same reason (§3.4's consumers
+// table), and a notifier that dismissed what the attention verdict raises
+// would contradict the panel beside it.
+//
+// # Waiting is WaitingApplies, so a blocked job announces
+//
+// The effective status is one vocabulary, and "needs a human" is
+// Status.IsWaiting(): waiting, or a background job blocked (D6, D14). Reading
+// only StatusWaiting would announce every interactive session and not one
+// blocked job.
+func (s *Stage) trigger(in model.Session) act.NotifyOn {
+	if (in.Job == nil && in.ProcessAlive == model.LivenessNo) || in.PaneAlive == model.LivenessNo {
 		return act.NotifyOnUnknown
 	}
-	if in.Status == obs.StatusWaiting && s.policy.Notify.Fires(act.NotifyOnWaiting) {
+	if in.WaitingApplies() && s.policy.Notify.Fires(act.NotifyOnWaiting) {
 		return act.NotifyOnWaiting
 	}
 	if in.Fault.APIErrors != nil && *in.Fault.APIErrors > 0 && s.policy.Notify.Fires(act.NotifyOnError) {
@@ -403,16 +433,22 @@ func (s *Stage) decide(on act.NotifyOn, waited time.Duration, now time.Time) act
 	return act.Decision{Rule: rule, Allowed: true}
 }
 
-// Pending hands over the notes decided since the last call and forgets them.
+// Effects hands over the notes decided since the last call and forgets them
+// (stage.Effecting).
 //
-// Draining is what makes the hand-off exactly-once: the coordinator takes them
-// and is then the only thing that holds them, so a note cannot be delivered
-// twice by a cycle that ran while the first delivery was in flight.
-func (s *Stage) Pending() []Note {
+// Draining is what makes the hand-off exactly-once: the actor takes them and
+// is then the only thing that holds them, so a note cannot be delivered twice
+// by a cycle that ran while the first delivery was in flight. Each is the
+// [Note] VALUE, never a wrapper, so the host's type assertion in OnEffects is
+// the hand-off (claudestate's stage.Effect contract).
+func (s *Stage) Effects() []stage.Effect {
 	if len(s.pending) == 0 {
 		return nil
 	}
-	out := s.pending
+	out := make([]stage.Effect, len(s.pending))
+	for i, n := range s.pending {
+		out[i] = n
+	}
 	s.pending = nil
 	return out
 }
@@ -425,3 +461,10 @@ func (s *Stage) Pending() []Note {
 // time. A stage that answered a constant duration would turn its actor into a
 // poll loop, which is the one thing this layer forbids outright.
 func (s *Stage) WakeIn() (time.Duration, bool) { return s.wake, s.hasWake }
+
+// EffectName names the effect: a Note is a stage.Effect, and this is the only
+// effect magmux's chain produces.
+func (n Note) EffectName() string { return EffectName }
+
+// EffectName is [Note.EffectName]'s answer, for a host to compare against.
+const EffectName = "notify"

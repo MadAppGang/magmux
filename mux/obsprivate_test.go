@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/MadAppGang/magmux/hub"
-	"github.com/MadAppGang/magmux/internal/obs/pipeline"
 	"github.com/MadAppGang/magmux/protocol"
 )
 
@@ -187,7 +186,7 @@ func TestObservationRefusesToStartOnAPublicPanel(t *testing.T) {
 
 	// First: "already running" wins over both. A non-nil pipeline pointer is
 	// enough, because the check returns before anything reads it.
-	m.obs = &pipeline.Pipeline{}
+	m.obs = &obsHost{}
 	err = m.startObservation(dir)
 	m.obs = nil
 	if err == nil || errors.Is(err, errPanelPublic) {

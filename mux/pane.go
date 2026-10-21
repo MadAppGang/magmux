@@ -132,7 +132,7 @@ type Pane struct {
 	deadAt time.Time
 	// lastOutputAt is when BYTES LAST ARRIVED FROM THE CHILD, and it is the
 	// instant the observation layer's staleness cascade is armed from
-	// (internal/obs/termev). It is stamped in exactly ONE place — readLoop,
+	// (claudestate's internal/termev, inside its verdict stage). It is stamped in exactly ONE place — readLoop,
 	// inside the p.mu it already holds — and the reasoning for that site is
 	// written there, where the next person will be looking.
 	//
@@ -531,7 +531,7 @@ func (p *Pane) clearCompletionLocked() {
 	// is why it exists, and why writePTY and injectPTY cannot drift about what
 	// "no longer done" means. The observation layer needs the same act
 	// recorded for a different reason: input CANCELS the staleness cascade
-	// (internal/obs/termev), because a pane somebody just typed into is not a
+	// (claudestate's internal/termev, inside its verdict stage), because a pane somebody just typed into is not a
 	// pane whose silence is its own to explain.
 	//
 	// The guard below is about CHROME: a pane that was not marked done has no
@@ -641,7 +641,7 @@ func (p *Pane) replyLocked(data []byte) {
 // pushed into it.
 //
 // This is the SEAM, and it stayed one. Every session's actor has a
-// termev.Cascade — it lives in the verdict stage, under internal/obs/verdict —
+// termev.Cascade — it lives in the verdict stage, in claudestate/verdict —
 // and an earlier design had the actor replace this accessor with a PUSH, the
 // stamp sites signalling it directly. It did not, and should not: a channel
 // send per PTY read would put an instrument on the hottest path in the

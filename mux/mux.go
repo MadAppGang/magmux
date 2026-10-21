@@ -21,9 +21,8 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/MadAppGang/magmux/claudestate/claude"
 	"github.com/MadAppGang/magmux/hub"
-	"github.com/MadAppGang/magmux/internal/obs/adapters"
-	"github.com/MadAppGang/magmux/internal/obs/pipeline"
 	"github.com/MadAppGang/magmux/plugin"
 	"github.com/MadAppGang/magmux/theme"
 	"github.com/MadAppGang/magmux/transport/firebase"
@@ -400,7 +399,8 @@ type Magmux struct {
 	// failure ahead of the reader deterministically instead of by load.
 	sockBeforeRead func(conn net.Conn)
 
-	// obs is the session-observation pipeline (internal/obs/pipeline), or nil
+	// obs is the session-observation layer (the claudestate pipeline and the
+	// write path on its coordinator, obsHost in obspane.go), or nil
 	// when it was never started — which is the default. See
 	// startObservationIfEnabled in obspane.go for the switch and for why the
 	// switch exists.
@@ -410,7 +410,7 @@ type Magmux struct {
 	// stopped on the quit path — and nothing else in magmux refers to it. Same
 	// discipline as m.sockPath. The pipeline's own goroutines are handed a
 	// *Magmux for the pane port and never touch this field.
-	obs *pipeline.Pipeline
+	obs *obsHost
 
 	// obsDoc is the newest document the observation layer published, held for
 	// the surfaces that ANSWER A QUESTION rather than stream: the `agents`
@@ -481,7 +481,7 @@ func (m *Magmux) declareSession(id string, p *Pane) bool {
 // declaredByOtherLocked reports whether path is <id>.jsonl for an id another
 // pane declared. Caller holds claimedMu.
 func (m *Magmux) declaredByOtherLocked(path string, p *Pane) bool {
-	owner, ok := m.declaredSessions[strings.TrimSuffix(filepath.Base(path), adapters.TranscriptSuffix)]
+	owner, ok := m.declaredSessions[strings.TrimSuffix(filepath.Base(path), claude.TranscriptSuffix)]
 	return ok && owner != p
 }
 
