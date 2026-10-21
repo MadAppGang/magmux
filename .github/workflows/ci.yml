@@ -8,6 +8,10 @@ on:
 
 jobs:
   build:
+    # Match local gates: a developer's uncommitted go.work must never change
+    # what CI builds (architecture §7.3).
+    env:
+      GOWORK: "off"
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -39,6 +43,28 @@ jobs:
       # so they only run on darwin/linux — which is exactly the matrix here.
       - name: Test
         run: go test -race ./...
+
+      # claudestate/ is a nested module, so the root's ./... never descends
+      # into it (`go help packages`). It gets its own steps. _probe begins with
+      # "_", which ./... skips, so it is named explicitly: it must build and
+      # vet, and it must never become a test.
+      - name: claudestate build, vet, test
+        working-directory: claudestate
+        run: go build ./... ./_probe && go vet ./... ./_probe && go test -race ./...
+
+      # The library's dependency pin (internal/audit G10) is only meaningful
+      # if go.mod is exactly what tidy writes. The status check also catches a
+      # go.sum that tidy CREATED, which git diff alone would not see.
+      - name: claudestate go.mod is tidy
+        working-directory: claudestate
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          if [ -n "$(git status --porcelain -- go.mod go.sum)" ]; then
+            echo "::error::go mod tidy changed claudestate/go.mod or go.sum"
+            git status --porcelain -- go.mod go.sum
+            exit 1
+          fi
 
   # Validate the release config on every push, because otherwise nothing does
   # until a tag is pushed — and by then the tag is immutable and the failure
