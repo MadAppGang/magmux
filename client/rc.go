@@ -94,16 +94,16 @@ func (s *Session) Epoch() uint64 { return s.epoch }
 // that read the resource the instant it saw the notification would otherwise
 // find a ring that did not yet hold the event it was told about.
 func (s *Session) recordPluginEvent(ev map[string]any) {
-	name, _ := evStr(ev, "plugin")
+	name, _ := EventString(ev, "plugin")
 	if name == "" {
 		return
 	}
 	e := PluginEvent{}
-	e.Event, _ = evStr(ev, "event")
-	if idx, ok := evInt(ev, "pane"); ok {
+	e.Event, _ = EventString(ev, "event")
+	if idx, ok := EventInt(ev, "pane"); ok {
 		e.Pane = &idx
 	}
-	e.At, _ = evStr(ev, "at")
+	e.At, _ = EventString(ev, "at")
 	if d, ok := ev["data"]; ok && d != nil {
 		if raw, err := json.Marshal(d); err == nil {
 			e.Data = raw

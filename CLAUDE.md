@@ -37,7 +37,15 @@ of magmux with no API stability before v1. The two PUBLIC packages are
 `Code*`), event names and version; `mux/sockrpc.go` keeps `sockErr`,
 `sockErrf`, `verbErrCode` and `sockCode*` as aliases of them — and `client/`,
 the Go socket client (`Session`, `Dial`, `RunInstruction`) that `mcp` drives
-sessions through, formerly `mcp/mcp_client.go`. Everything else is package `mux` in
+sessions through, formerly `mcp/mcp_client.go`. `client/` also holds the ONE
+socket discovery (`DiscoverSessions`, `SessionInfo`, formerly
+`mcp/mcp_spawn.go`) and the one copy of the event-field helpers
+(`EventString`, `EventInt`, `EventBool`; mcp's `evStr`/`evInt`/`evBool` are
+aliases of them). `obsview/` renders the session-observation document — the
+`magmux agents` table and `--json`, and `DisplaySafe` / `TerminalSafeJSON`,
+the one rule for registry text reaching a person — below `mux`, because the
+CLI, the socket verb and MCP's `list_agents` must share one renderer and `mcp`
+cannot import `mux`. Everything else is package `mux` in
 `mux/`, and `go test` runs each package with cwd = its own directory, so
 `TestMain` builds `../cmd/magmux`. The one `internal` directory is
 `internal/obs/` (session observation, below); it holds no `mux` code, so the

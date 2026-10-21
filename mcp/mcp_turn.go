@@ -1,9 +1,7 @@
 package mcp
 
 import (
-	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/MadAppGang/magmux/client"
@@ -96,38 +94,10 @@ func orDetail(s string) string {
 //
 // magmux's events are decoded into map[string]any because `pane` is `int or
 // "*"` on the wire and the optional fields are omitted rather than zeroed;
-// these keep the type assertions in one place.
-
-func evStr(m map[string]any, k string) (string, bool) {
-	v, ok := m[k]
-	if !ok {
-		return "", false
-	}
-	s, ok := v.(string)
-	return s, ok
-}
-
-func evInt(m map[string]any, k string) (int, bool) {
-	v, ok := m[k]
-	if !ok {
-		return 0, false
-	}
-	switch n := v.(type) {
-	case float64:
-		return int(n), true
-	case int:
-		return n, true
-	case json.Number:
-		i, err := n.Int64()
-		return int(i), err == nil
-	case string:
-		i, err := strconv.Atoi(n)
-		return i, err == nil
-	}
-	return 0, false
-}
-
-func evBool(m map[string]any, k string) bool {
-	b, _ := m[k].(bool)
-	return b
-}
+// these keep the type assertions in one place — client's place, which is the
+// one copy mcp, client and mux share.
+var (
+	evStr  = client.EventString
+	evInt  = client.EventInt
+	evBool = client.EventBool
+)

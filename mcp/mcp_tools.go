@@ -453,8 +453,8 @@ func (s *mcpServer) resolveSessionQuiet(ctx context.Context, id string) (*client
 		}
 	}
 
-	found := discoverSessions(ctx, time.Second)
-	var reachable []SessionInfo
+	found := client.DiscoverSessions(ctx, time.Second)
+	var reachable []client.SessionInfo
 	for _, f := range found {
 		if f.Reachable {
 			reachable = append(reachable, f)
@@ -707,7 +707,7 @@ func toolListSessions(ctx context.Context, s *mcpServer, raw json.RawMessage) (m
 		return nil, invalidParams(err)
 	}
 
-	found := discoverSessions(ctx, time.Second)
+	found := client.DiscoverSessions(ctx, time.Second)
 	anc, ancComplete := s.ancestry()
 	sawSelf := false
 	host := os.Getenv("MAGMUX_SOCK")
