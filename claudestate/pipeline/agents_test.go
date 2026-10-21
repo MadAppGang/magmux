@@ -109,3 +109,95 @@ func TestAMalformedListingFailsTheSource(t *testing.T) {
 		t.Fatalf("%+v", sourceRow(d, model.SourceAgents))
 	}
 }
+
+// held is an AgentsListing that blocks until released or until its context
+// ends, and says when each happened.
+type held struct {
+	started  chan struct{}
+	release  chan struct{}
+	returned chan struct{}
+}
+
+func newHeld() *held {
+	return &held{started: make(chan struct{}, 1), release: make(chan struct{}), returned: make(chan struct{})}
+}
+
+func (h *held) List(ctx context.Context) (ports.Listing, error) {
+	defer close(h.returned)
+	h.started <- struct{}{}
+	select {
+	case <-h.release:
+		return ports.Listing{Raw: []byte("[]"), At: base}, nil
+	case <-ctx.Done():
+		return ports.Listing{}, ctx.Err()
+	}
+}
+
+func awaitStarted(t *testing.T, h *held) {
+	t.Helper()
+	select {
+	case <-h.started:
+	case <-time.After(wait):
+		t.Fatal("List never started")
+	}
+}
+
+// One caller giving up must not fail the source for everyone: the List is the
+// pipeline's, not the first caller's (review r1 #6a).
+func TestACallerGivingUpDoesNotFailTheAgentsSource(t *testing.T) {
+	lst := newHeld()
+	h := start(t, Config{Root: ports.Root{Sessions: mapTree("/s", fstest.MapFS{})}, Agents: lst})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.p.RefreshSources(ctx, []model.SourceID{model.SourceAgents})
+		done <- err
+	}()
+	awaitStarted(t, lst)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(wait):
+		t.Fatal("RefreshSources ignored its caller's cancellation")
+	}
+	close(lst.release)
+	for {
+		d := h.next()
+		switch row := sourceRow(d, model.SourceAgents); row.State {
+		case model.SourceStateUnknown:
+			continue
+		case model.SourceOK:
+			if hasProblem(d.Problems, model.ProblemAgentsListing) {
+				t.Fatalf("an OK listing with a listing problem: %v", d.Problems)
+			}
+			return
+		default:
+			t.Fatalf("a caller's cancellation failed the source for everyone: %+v %v", row, d.Problems)
+		}
+	}
+}
+
+// Stop waits for every goroutine the pipeline owns, the List included: it
+// cancels the List's context and waits for it to return (review r1 #6a).
+func TestStopEndsAndWaitsForAnInFlightList(t *testing.T) {
+	lst := newHeld()
+	clk := ports.NewFakeClock(base)
+	p, err := Start(Config{Clock: clk, Root: ports.Root{Sessions: mapTree("/s", fstest.MapFS{})}, Agents: lst})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = p.RefreshSources(context.Background(), []model.SourceID{model.SourceAgents}) }()
+	awaitStarted(t, lst)
+	stopped := make(chan struct{})
+	go func() { p.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(wait):
+		t.Fatal("Stop hung on an in-flight List")
+	}
+	select {
+	case <-lst.returned:
+	default:
+		t.Fatal("Stop returned while the List it started was still running")
+	}
+}

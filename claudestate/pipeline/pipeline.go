@@ -118,6 +118,7 @@ type Ops interface {
 	Latest() (model.Fleet, bool)
 	Session(k model.Key) (model.Session, bool)
 	// Call runs fn on k's actor goroutine. find looks a stage up by Name().
+	// fn must return promptly: the actor serves nothing else while it runs.
 	Call(ctx context.Context, k model.Key, fn func(s model.Session, find func(name string) (stage.Stage, bool)) error) error
 }
 
@@ -228,6 +229,12 @@ type reply struct {
 }
 
 // ask sends one command and waits for its reply, honouring ctx and Stop.
+//
+// An Exec honours ctx only until the coordinator ACCEPTS it. From then on fn
+// has run or is running, with ctx, and its answer is the answer: returning
+// ctx.Err() instead would tell the caller "not done" about something that may
+// have been done, and the host's audit trail would say otherwise (review r1
+// #6b). fn is bounded by its own obligation to honour ctx (Exec's doc).
 func (p *Pipeline) ask(ctx context.Context, c command) (reply, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -249,12 +256,16 @@ func (p *Pipeline) ask(ctx context.Context, c command) (reply, error) {
 	case <-ctx.Done():
 		return reply{}, ctx.Err()
 	}
+	cancelled := ctx.Done()
+	if c.kind == cmdExec {
+		cancelled = nil // accepted: wait for fn's own answer
+	}
 	select {
 	case r := <-c.reply:
 		return r, nil
 	case <-p.done:
 		return reply{}, ErrStopped
-	case <-ctx.Done():
+	case <-cancelled:
 		return reply{}, ctx.Err()
 	}
 }
@@ -296,7 +307,9 @@ func (p *Pipeline) Refresh() bool {
 }
 
 // RefreshSources refreshes the agents source, the only source with its own
-// refresh; any other id is satisfied by the next cycle.
+// refresh; any other id is satisfied by the next cycle. ctx bounds only this
+// caller's wait: the List runs under the pipeline's own context, so a caller
+// giving up neither cancels it nor fails the source for anyone else.
 func (p *Pipeline) RefreshSources(ctx context.Context, ids []model.SourceID) (RefreshOutcome, error) {
 	r, err := p.ask(ctx, command{kind: cmdRefreshSources, ids: ids})
 	if err != nil {
@@ -305,7 +318,10 @@ func (p *Pipeline) RefreshSources(ctx context.Context, ids []model.SourceID) (Re
 	return r.outcome, r.err
 }
 
-// Exec runs fn on the coordinator, between cycles.
+// Exec runs fn on the coordinator, between cycles. ctx bounds the wait for the
+// coordinator to accept fn; once accepted, Exec returns fn's own answer. fn
+// receives ctx and must return promptly, honouring it: it runs on the
+// goroutine that services every session's next cycle.
 func (p *Pipeline) Exec(ctx context.Context, fn func(context.Context, Ops) error) error {
 	r, err := p.ask(ctx, command{kind: cmdExec, fn: fn})
 	if err != nil {

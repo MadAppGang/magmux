@@ -601,3 +601,52 @@ func TestADocumentWithNoProjectsTreeReadsNoTranscript(t *testing.T) {
 		t.Fatalf("%+v", s.Transcript)
 	}
 }
+
+// Once the coordinator has accepted an Exec, fn runs; its answer is the
+// answer, even if the caller's context ends while fn is running. Reporting
+// ctx.Err() then would tell the caller "not done" about something that was
+// done (review r1 #6b).
+func TestAnExecThatRanReportsWhatItsFunctionReturned(t *testing.T) {
+	h := start(t, Config{Root: ports.Root{Sessions: mapTree("/s", fstest.MapFS{})}})
+	sentinel := errors.New("fn's own answer")
+	ctx, cancel := context.WithCancel(context.Background())
+	ran := make(chan struct{})
+	err := h.p.Exec(ctx, func(context.Context, Ops) error {
+		cancel()
+		time.Sleep(50 * time.Millisecond) // the caller's ctx is done well before fn returns
+		close(ran)
+		return sentinel
+	})
+	select {
+	case <-ran:
+	default:
+		t.Fatalf("Exec returned %v before fn had finished", err)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Exec returned %v after fn ran and returned %v", err, sentinel)
+	}
+}
+
+// Through the pipeline: a wake that changed nothing reads no transcript again.
+// The second cycle stats the file and reuses the first cycle's facts; an
+// append is read on the next cycle (review r1 #4a).
+func TestAWakeReadsOnlyTheTranscriptsThatChanged(t *testing.T) {
+	old := base.Add(-time.Hour)
+	inner := fstest.MapFS{"p/s.jsonl": {Data: transcriptLines("teal"), ModTime: old}}
+	projects := newCounting(inner)
+	sessions := fstest.MapFS{"1.json": {Data: rec(1, "s", claude.ValueStatusIdle)}}
+	h := start(t, Config{Root: ports.Root{Sessions: mapTree("/s", sessions), Projects: mapTree("/p", projects)}})
+	h.cycle()
+	d := h.cycle()
+	if n := projects.opens()["p/s.jsonl"]; n != 1 {
+		t.Fatalf("%d opens of an unchanged transcript over two cycles, want 1", n)
+	}
+	if s := d.Doc.Sessions[0]; s.Transcript == nil || s.Transcript.Color == nil || *s.Transcript.Color != "teal" {
+		t.Fatalf("the reused facts: %+v", d.Doc.Sessions[0].Transcript)
+	}
+	inner["p/s.jsonl"] = &fstest.MapFile{Data: append(transcriptLines("teal"), transcriptLines("ruby")...), ModTime: old.Add(time.Minute)}
+	d = h.cycle()
+	if n := projects.opens()["p/s.jsonl"]; n != 2 || *d.Doc.Sessions[0].Transcript.Color != "ruby" {
+		t.Fatalf("an appended transcript: %d opens, %+v", n, d.Doc.Sessions[0].Transcript)
+	}
+}

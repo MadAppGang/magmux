@@ -80,3 +80,58 @@ type silent struct{ since time.Time }
 func (s silent) Activity(model.PaneRef) (time.Time, time.Time, bool) {
 	return s.since, time.Time{}, true
 }
+
+// Freeze point 3 is "a copy each" for the WHOLE delivery: a sink that edits a
+// Problem's Key or PIDs, or a Change's Fields, cannot reach what another sink
+// was handed (review r1 #9).
+func TestASubscriberMutatingItsProblemsAndChangesCannotReachAnother(t *testing.T) {
+	sessions := fstest.MapFS{
+		// One id and one pid in two files: a ProblemDuplicateKey carrying Key and PIDs.
+		"1.json": {Data: rec(1, "s", claude.ValueStatusIdle)},
+		"2.json": {Data: rec(1, "s", claude.ValueStatusIdle)},
+	}
+	h := start(t, Config{Root: ports.Root{Sessions: mapTree("/s", sessions)}})
+	other, err := h.p.Subscribe(context.Background(), "other", 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recv := func() Delivery {
+		t.Helper()
+		select {
+		case d := <-other.C():
+			return d
+		case <-time.After(wait):
+			t.Fatal("the other subscriber got no delivery")
+		}
+		return Delivery{}
+	}
+	keyed := func(d Delivery) int {
+		for i, p := range d.Problems {
+			if p.Key != nil && len(p.PIDs) > 0 {
+				return i
+			}
+		}
+		t.Fatalf("no problem with a Key and PIDs: %v", d.Problems)
+		return -1
+	}
+
+	mine, theirs := h.cycle(), recv()
+	i, j := keyed(mine), keyed(theirs)
+	mine.Problems[i].Key.SessionID = "mutated"
+	mine.Problems[i].PIDs[0] = -1
+	if theirs.Problems[j].Key.SessionID != "s" || theirs.Problems[j].PIDs[0] != 1 {
+		t.Fatalf("one sink's edit reached another's Problem: key %v pids %v", *theirs.Problems[j].Key, theirs.Problems[j].PIDs)
+	}
+
+	sessions["1.json"] = &fstest.MapFile{Data: rec(1, "s", claude.ValueStatusWaiting)}
+	sessions["2.json"] = &fstest.MapFile{Data: rec(1, "s", claude.ValueStatusWaiting)}
+	mine, theirs = h.cycle(), recv()
+	if len(mine.Changes) == 0 || len(mine.Changes[0].Fields) == 0 || len(theirs.Changes) == 0 {
+		t.Fatalf("no field change to test with: %+v", mine.Changes)
+	}
+	want := theirs.Changes[0].Fields[0]
+	mine.Changes[0].Fields[0] = "mutated"
+	if got := theirs.Changes[0].Fields[0]; got != want {
+		t.Fatalf("one sink's edit reached another's Change: %q", got)
+	}
+}

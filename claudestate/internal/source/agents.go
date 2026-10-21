@@ -119,10 +119,12 @@ func (a *Agents) Report() model.SourceReport {
 	return r
 }
 
-// Tail reads the last n bytes of one file in ONE read, and its size at the
-// moment of the read. It seeks when the file can (os.DirFS's files do);
-// otherwise it reads the file and keeps the tail, which only an in-memory test
-// FS reaches.
+// Tail reads the last n bytes of one file in ONE pass, and its size at the
+// moment of the read: the window [max(0, size-n), size), whatever is appended
+// after the Stat. It seeks when the file can (os.DirFS's files do). Otherwise
+// it reads the head through io.Discard and keeps only the window, because
+// ports.Tree.FS is any host fs.FS and a tail is a bounded read (D10) whatever
+// the FS: a whole file is never held in memory.
 func Tail(fsys fs.FS, name string, n int) ([]byte, int64, error) {
 	f, err := fsys.Open(name)
 	if err != nil {
@@ -134,19 +136,19 @@ func Tail(fsys fs.FS, name string, n int) ([]byte, int64, error) {
 		return nil, 0, err
 	}
 	size := info.Size()
-	if s, ok := f.(io.Seeker); ok && size > int64(n) {
-		if _, err := s.Seek(size-int64(n), io.SeekStart); err != nil {
+	window := min(size, int64(n))
+	if head := size - window; head > 0 {
+		if s, ok := f.(io.Seeker); ok {
+			if _, err := s.Seek(head, io.SeekStart); err != nil {
+				return nil, size, err
+			}
+		} else if _, err := io.CopyN(io.Discard, f, head); err != nil {
 			return nil, size, err
 		}
-		b, err := io.ReadAll(io.LimitReader(f, int64(n)))
-		return b, size, err
 	}
-	b, err := io.ReadAll(f)
+	b, err := io.ReadAll(io.LimitReader(f, window))
 	if err != nil {
 		return nil, size, err
-	}
-	if len(b) > n {
-		b = b[len(b)-n:]
 	}
 	return b, size, nil
 }

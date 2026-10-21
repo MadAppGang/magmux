@@ -12,6 +12,12 @@ import (
 // Stage is one step of an actor's chain: value in, value out. The result must
 // keep the input's Key; a result with any other Key, the zero Key included,
 // is discarded and reported (C21).
+//
+// Observe must return promptly. The cycle waits for every actor's chain, and
+// Stop waits for every actor; the pipeline arms no timer to cut either wait
+// short (C2) and never abandons a goroutine running host code. A stage that
+// blocks freezes the whole document and hangs Stop, so a stage that must wait
+// for something bounds the wait itself, as pipeline.Config.OnEffects must.
 type Stage interface {
 	Name() string
 	Observe(model.Session) model.Session
@@ -23,7 +29,7 @@ type Factory func(key model.Key) Stage
 
 // Waker is a Stage that wants to be observed again later. ok == false or
 // d <= 0 arms nothing. The actor arms ONE one-shot timer, from the earliest
-// answer of all its Wakers.
+// answer of all its Wakers. WakeIn must return promptly, like Observe.
 type Waker interface {
 	Stage
 	WakeIn() (time.Duration, bool)
@@ -35,7 +41,7 @@ type Waker interface {
 // Targets is called with the Location the coordinator computed this cycle. It
 // must never read file content, and it returns files only, never a directory.
 // Granted is called after the arm wave and the identity pass, before Observe,
-// on the same actor goroutine.
+// on the same actor goroutine. Both must return promptly, like Observe.
 type Targeting interface {
 	Stage
 	Targets(s model.Session, loc model.Location) []model.WatchTarget
@@ -60,7 +66,7 @@ type Effect interface {
 }
 
 // Effecting is a Stage that produces effects. They are drained after Observe
-// and handed over exactly once.
+// and handed over exactly once. Effects must return promptly, like Observe.
 type Effecting interface {
 	Stage
 	Effects() []Effect

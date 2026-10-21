@@ -45,6 +45,9 @@ type coordinator struct {
 	waiters  []chan reply
 	stats    Stats
 	onDemand bool
+	// listCancel ends the in-flight agents List, nil when none is in flight.
+	// The List runs under this context, never a caller's (review r1 #6a).
+	listCancel context.CancelFunc
 }
 
 type subscriber struct {
@@ -71,7 +74,7 @@ func newCoordinator(p *Pipeline, cfg Config, w *watch.Watcher) *coordinator {
 		chain = append(chain, paneGateFactory())
 	}
 	chain = append(chain, claudecode.Factory(claudecode.Config{
-		Projects: cfg.Root.Projects, TailBytes: cfg.TailBytes, TimingTailBytes: cfg.TimingTailBytes,
+		Projects: cfg.Root.Projects, TailBytes: cfg.TailBytes, TimingTailBytes: cfg.TimingTailBytes, Now: cfg.Now,
 	}))
 	chain = append(chain, cfg.Chain...)
 	vcfg := verdict.Config{Activity: cfg.Activity, Shell: cfg.Shell, Now: cfg.Now, Rules: cfg.Verdict}
@@ -131,17 +134,8 @@ func (c *coordinator) loop() {
 func (c *coordinator) absorb(ev watch.Event) bool {
 	due := false
 	for {
-		c.stats.WatchEvents++
-		c.stats.WatchDropped += ev.Dropped
-		if ev.Err != nil {
-			c.queued = append(c.queued, model.Problem{Scope: model.ScopeWatch, Kind: model.ProblemWatchArm,
-				Detail: "the watcher reported: " + ev.Err.Error()})
+		if c.fold(ev) {
 			due = true
-		}
-		for _, p := range ev.Paths {
-			if !strings.HasSuffix(p, claude.KeyFileSuffix) {
-				due = true
-			}
 		}
 		select {
 		case more, ok := <-c.watcher.Events():
@@ -150,9 +144,56 @@ func (c *coordinator) absorb(ev watch.Event) bool {
 			}
 			ev = more
 		default:
-			return due || ev.Dropped > 0
+			return due
 		}
 	}
+}
+
+// fold folds ONE event into the stats and the problem queue and reports
+// whether it alone makes a cycle due. A loss is due on ANY event of a drain,
+// not only on the last: the lost Event's paths are unknown, so only a full
+// cycle can cover them, and an event naming only .key siblings must not hide
+// it (review r1 #1).
+func (c *coordinator) fold(ev watch.Event) bool {
+	c.stats.WatchEvents++
+	c.stats.WatchDropped += ev.Dropped
+	due := ev.Dropped > 0
+	if ev.Err != nil {
+		c.queued = append(c.queued, model.Problem{Scope: model.ScopeWatch, Kind: model.ProblemWatchArm,
+			Detail: "the watcher reported: " + ev.Err.Error()})
+		due = true
+	}
+	for _, p := range ev.Paths {
+		if c.wakes(p) {
+			due = true
+		}
+	}
+	return due
+}
+
+// wakes reports whether a changed path can change the document.
+//
+//   - A .key sibling changes no record.
+//   - A direct child of Root.Base that is neither the sessions nor the jobs
+//     directory changes nothing either. Base is armed (M12) only so that
+//     creating jobs/ fires; the rest of the Claude root (history.jsonl,
+//     settings.json, …) is written on every prompt, and each write would
+//     otherwise be a full cycle over every source. Deeper paths are not
+//     filtered: an armed transcript lives under projects/ and must wake.
+func (c *coordinator) wakes(p string) bool {
+	if strings.HasSuffix(p, claude.KeyFileSuffix) {
+		return false
+	}
+	r := c.cfg.Root
+	if r.Base == "" {
+		return true
+	}
+	p = filepath.Clean(p)
+	if filepath.Dir(p) != filepath.Clean(r.Base) {
+		return true
+	}
+	return (r.Sessions.Dir != "" && p == filepath.Clean(r.Sessions.Dir)) ||
+		(r.Jobs.Dir != "" && p == filepath.Clean(r.Jobs.Dir))
 }
 
 func (c *coordinator) command(m command) {
@@ -188,8 +229,11 @@ func (c *coordinator) command(m command) {
 }
 
 // refreshSources is the ONE path to the agents listing (FR23): never from a
-// watch cycle. The List runs on its own goroutine with the caller's context; a
-// second request joins the first; the gates are timestamps on Config.Now.
+// watch cycle. The List runs on its own goroutine under a context the
+// coordinator owns, so one caller giving up neither cancels it nor counts as
+// the source failing for everyone (each caller's ctx bounds only its own
+// wait); shutdown cancels it and waits for it. A second request joins the
+// first; the gates are timestamps on Config.Now.
 func (c *coordinator) refreshSources(m command) {
 	wantAgents := false
 	for _, id := range m.ids {
@@ -214,7 +258,9 @@ func (c *coordinator) refreshSources(m command) {
 		c.waiters = append(c.waiters, m.reply)
 	case start:
 		c.waiters = append(c.waiters, m.reply)
-		port, ctx, out := c.agents.Port(), m.ctx, c.agentsCh
+		ctx, cancel := context.WithCancel(context.Background())
+		c.listCancel = cancel
+		port, out := c.agents.Port(), c.agentsCh
 		go func() {
 			l, err := port.List(ctx)
 			out <- agentsDone{listing: l, err: err}
@@ -223,6 +269,7 @@ func (c *coordinator) refreshSources(m command) {
 }
 
 func (c *coordinator) agentsFinished(d agentsDone) {
+	c.endList()
 	l, problems, err := c.agents.Finish(c.cfg.Now(), d.listing, d.err)
 	c.queued = append(c.queued, problems...)
 	var out RefreshOutcome
@@ -739,8 +786,8 @@ func degradedDetail(rep watch.ArmReport, onDemand bool) string {
 }
 
 // publish hands the document to every subscriber (freeze point 3: a copy
-// each). The hub never blocks: a full buffer drops its oldest delivery and the
-// subscriber is resynced with this one.
+// each, Problems and Changes included). The hub never blocks: a full buffer
+// drops its oldest delivery and the subscriber is resynced with this one.
 func (c *coordinator) publish(cs *cycleState) {
 	problems := append(c.queued, cs.problems...)
 	c.queued = nil
@@ -752,7 +799,7 @@ func (c *coordinator) publish(cs *cycleState) {
 	}
 	c.latest, c.have = cs.doc, true
 	for _, s := range c.subs {
-		d := Delivery{Doc: cs.doc.Clone(), Problems: slices.Clone(problems), Changes: slices.Clone(changes), Dropped: s.dropped}
+		d := Delivery{Doc: cs.doc.Clone(), Problems: cloneProblems(problems), Changes: cloneChanges(changes), Dropped: s.dropped}
 		d.Resync = s.dropped > 0
 		select {
 		case s.sub.c <- d:
@@ -778,6 +825,37 @@ func (c *coordinator) publish(cs *cycleState) {
 		}
 	}
 	c.stats.Published++
+}
+
+// cloneProblems is freeze point 3 for Problems: the slice AND what each
+// Problem points at (Key, PIDs), so one sink's edit cannot reach another's.
+func cloneProblems(ps []model.Problem) []model.Problem {
+	if ps == nil {
+		return nil
+	}
+	out := make([]model.Problem, len(ps))
+	for i, p := range ps {
+		if p.Key != nil {
+			k := *p.Key
+			p.Key = &k
+		}
+		p.PIDs = slices.Clone(p.PIDs)
+		out[i] = p
+	}
+	return out
+}
+
+// cloneChanges is freeze point 3 for Changes: the slice and each Fields.
+func cloneChanges(cs []join.Change) []join.Change {
+	if cs == nil {
+		return nil
+	}
+	out := make([]join.Change, len(cs))
+	for i, c := range cs {
+		c.Fields = slices.Clone(c.Fields)
+		out[i] = c
+	}
+	return out
 }
 
 // releaseOnce is the single releasing call. It arms nothing.
@@ -851,7 +929,22 @@ func (c *coordinator) wakeFunc() func() {
 	}
 }
 
+// endList releases the finished List's context.
+func (c *coordinator) endList() {
+	if c.listCancel != nil {
+		c.listCancel()
+		c.listCancel = nil
+	}
+}
+
 func (c *coordinator) shutdown() {
+	// An in-flight List is the pipeline's goroutine: end it and wait for it,
+	// because Stop waits for every goroutine it owns. ports.AgentsListing
+	// obliges List to return once its context is done.
+	if c.listCancel != nil {
+		c.endList()
+		<-c.agentsCh
+	}
 	if c.watcher != nil {
 		c.watcher.Stop()
 	}

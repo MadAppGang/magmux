@@ -562,6 +562,14 @@ func closeAndDrain(closeFn func() error, events <-chan fsnotify.Event, errs <-ch
 // Every send to Events is non-blocking: a loop that blocked on a consumer
 // would stop draining fsnotify, and a watcher that stops draining fsnotify
 // goes silent with no error anywhere.
+//
+// A loss is never silent either. An Event that does not fit is counted, and
+// the count rides on the next Event that does; while it is outstanding the
+// loop also OFFERS a bare Event{Dropped: n} on a send case of its own select,
+// so the count is delivered the moment the consumer frees a slot even when no
+// further change ever comes. Burst-then-quiet is exactly how a session
+// finishes, and a count that waited for the next write would wait forever.
+// The offer is a select case, not a send, so the loop still never blocks.
 func (w *Watcher) loop() {
 	defer close(w.done)
 	defer close(w.events)
@@ -591,10 +599,19 @@ func (w *Watcher) loop() {
 	}
 
 	for {
+		// report is Events while a loss is outstanding, else nil: a nil
+		// channel's case is never chosen.
+		var report chan<- Event
+		if dropped > 0 {
+			report = w.events
+		}
 		select {
 		case <-w.stop:
 			disarm()
 			return
+
+		case report <- Event{Dropped: dropped}:
+			dropped = 0
 
 		case ev, ok := <-w.fsw.Events:
 			if !ok {

@@ -1005,3 +1005,70 @@ func flushIfAny(t *testing.T, w *Watcher, clk *ports.FakeClock, at time.Time) {
 	case <-time.After(quietWait):
 	}
 }
+
+// A drop is reported even when no later change ever comes: burst-then-quiet is
+// how a session finishes. The count used to ride only on the NEXT delivered
+// Event, so after the last write of a burst it was never delivered, and the
+// consumer could not know its document was built over a loss (review r1 #1).
+func TestADropIsReportedEvenWhenNothingFollowsIt(t *testing.T) {
+	dir := tempDir(t)
+	clk := ports.NewFakeClock(base)
+	w, err := Start(Config{Clock: clk, Budget: roomy, Buffer: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+	mustArm(t, w, spine(dir))
+
+	// Two windows with nothing reading: the first fills the buffer, the second
+	// is dropped.
+	rewrite(t, filepath.Join(dir, "a.json"), "{}")
+	flush(t, clk, base.Add(DefaultWindow))
+	rewrite(t, filepath.Join(dir, "b.json"), "{}")
+	flush(t, clk, base.Add(2*DefaultWindow))
+	// Fire is asynchronous. A third window's alarm can only be armed once the
+	// loop has consumed the second's, so seeing it proves the second was
+	// published (and dropped) before anything below reads. It is never fired.
+	rewrite(t, filepath.Join(dir, "c.json"), "{}")
+	nextTimer(t, clk)
+
+	if first := nextEvent(t, w); first.Dropped != 0 {
+		t.Fatalf("the first Event reports %d drops", first.Dropped)
+	}
+	// Nothing else is written. The loss must still be reported.
+	ev, ok := noEventWithin(w, eventWait)
+	if !ok {
+		t.Fatal("a window was dropped and nothing ever said so: the consumer's document is stale with no signal")
+	}
+	if ev.Dropped != 1 || ev.Err != nil {
+		t.Fatalf("want an Event reporting 1 drop, got %+v", ev)
+	}
+}
+
+// A held directory replaced by one with more entries is costed as it is NOW,
+// not as the object it replaced (review r1 #8a).
+func TestAReplacedHeldDirectoryIsCostedAsItIsNow(t *testing.T) {
+	parent := tempDir(t)
+	dir := mkdir(t, filepath.Join(parent, "sessions"))
+	rewrite(t, filepath.Join(dir, "0.json"), "{}")
+	w, _ := start(t, roomy)
+	mustArm(t, w, spine(dir))
+
+	next := mkdir(t, filepath.Join(parent, "next"))
+	for i := 0; i < 9; i++ {
+		rewrite(t, filepath.Join(next, fmt.Sprintf("%d.json", i)), "{}")
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(next, dir); err != nil {
+		t.Fatal(err)
+	}
+	rep := mustArm(t, w, spine(dir))
+	if rep.Armed != 1 {
+		t.Fatalf("the replaced directory was not re-armed: %+v", rep)
+	}
+	if want := targetCost(spine(dir)); rep.Cost != want {
+		t.Fatalf("Cost = %d after the re-arm, want %d (the directory as it is now)", rep.Cost, want)
+	}
+}

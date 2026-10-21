@@ -5,6 +5,10 @@
 // Unknown rather than asserting the session has no pane, and a host with no
 // process oracle leaves every liveness Unknown rather than reporting the
 // session dead.
+//
+// The second rule: every method here must return promptly. The pipeline
+// waits for each call and arms no timer to cut a wait short (C2), so a port
+// that blocks freezes every session and hangs Stop.
 package ports
 
 import (
@@ -15,14 +19,16 @@ import (
 )
 
 // ProcessOracle answers whether a process exists. A pid <= 0 must answer
-// LivenessUnknown without a syscall.
+// LivenessUnknown without a syscall. Alive must return promptly: it is called
+// on the coordinator, once per distinct pid per cycle.
 type ProcessOracle interface {
 	Alive(pid int) model.Liveness
 }
 
 // PaneLocator answers which host pane a session runs in, and whether that
 // pane is still part of the host. One instance serves every actor, so an
-// implementation must be safe for concurrent use.
+// implementation must be safe for concurrent use. Both methods must return
+// promptly: they run inside an actor's Observe, which the cycle waits for.
 type PaneLocator interface {
 	// PaneFor: Yes with a usable ref; No when the walk completed and the
 	// session is not one of ours; Unknown when it could not tell.
@@ -33,7 +39,8 @@ type PaneLocator interface {
 
 // CycleLocator is an optional extension of a PaneLocator: snapshot the pane
 // table once per cycle. On error the cycle uses [UnknownLocator] — never the
-// configured locator and never the previous cycle's table.
+// configured locator and never the previous cycle's table. ForCycle runs on
+// the coordinator, once per cycle, and must return promptly.
 type CycleLocator interface {
 	ForCycle(ctx context.Context) (PaneLocator, error)
 }
@@ -72,6 +79,10 @@ type Listing struct {
 
 // AgentsListing obtains a listing. Spawning, caching and locking live in the
 // host; the library only schedules the call.
+//
+// List runs on a goroutine the pipeline owns, under a context the pipeline
+// owns. It MUST return promptly once ctx is done: Stop cancels it and waits
+// for it, because Stop waits for every goroutine the pipeline started.
 type AgentsListing interface {
 	List(ctx context.Context) (Listing, error)
 }

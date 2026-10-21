@@ -261,3 +261,95 @@ func TestTheProjectsTreeIsNeverArmed(t *testing.T) {
 	}
 	_ = context.Background
 }
+
+// While jobs/ is absent the Claude root itself is armed (M12), and only so that
+// creating jobs/ fires. A write to anything else directly under the root —
+// history.jsonl, settings.json — changes no record and must not cost a cycle
+// that re-reads every source (review r1 #4b). Creating jobs/ still does, and so
+// does a record written into sessions/.
+func TestAWriteBesideTheTreesUnderTheArmedRootIsNoCycle(t *testing.T) {
+	root, err := ports.RootAt(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root.Sessions.Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(root.Base, "history.jsonl"), []byte("{}\n"))
+	h := watched(t, root, roomy)
+	h.cycle()
+	h.settle()
+	before := h.stats()
+
+	f, err := os.OpenFile(filepath.Join(root.Base, "history.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("{}\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(root.Base, "settings.json"), []byte("{}"))
+	h.settle()
+	after := h.stats()
+	if after.WatchEvents == before.WatchEvents {
+		t.Fatal("no watch event reached the coordinator: the setup is wrong, not the filter")
+	}
+	if after.Cycles != before.Cycles {
+		t.Fatalf("%d cycles for writes beside the Claude trees, want 0", after.Cycles-before.Cycles)
+	}
+
+	// The positive controls: the reason Base is armed, and the registry.
+	if err := os.MkdirAll(root.Jobs.Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d := h.await()
+	for sourceRow(d, model.SourceJobs).Detail == "absent" {
+		d = h.await()
+	}
+	write(t, filepath.Join(root.Sessions.Path, "7.json"), rec(7, "s", claude.ValueStatusIdle))
+	for len(d.Doc.Sessions) == 0 {
+		d = h.await()
+	}
+}
+
+// What one watch event makes due, in isolation (review r1 #1 and #4b): a loss
+// is due whatever paths ride with it, a .key sibling is not, a direct child of
+// the armed Claude root is due only when it is the sessions or jobs directory,
+// and anything deeper always is.
+func TestWhatOneWatchEventMakesDue(t *testing.T) {
+	root, err := ports.RootAt("/claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &coordinator{cfg: Config{Root: root}}
+	key := filepath.Join(root.Sessions.Dir, "1"+claude.KeyFileSuffix)
+	for _, tc := range []struct {
+		name string
+		ev   watch.Event
+		due  bool
+	}{
+		{"a .key sibling", watch.Event{Paths: []string{key}}, false},
+		{"a loss riding on a .key sibling", watch.Event{Paths: []string{key}, Dropped: 2}, true},
+		{"a bare loss", watch.Event{Dropped: 1}, true},
+		{"a record", watch.Event{Paths: []string{filepath.Join(root.Sessions.Dir, "1.json")}}, true},
+		{"history.jsonl beside the trees", watch.Event{Paths: []string{filepath.Join(root.Base, "history.jsonl")}}, false},
+		{"the jobs directory appearing", watch.Event{Paths: []string{root.Jobs.Dir}}, true},
+		{"the sessions directory appearing", watch.Event{Paths: []string{root.Sessions.Dir}}, true},
+		{"an armed transcript under projects", watch.Event{Paths: []string{filepath.Join(root.Projects.Dir, "p", "s.jsonl")}}, true},
+	} {
+		if got := c.fold(tc.ev); got != tc.due {
+			t.Errorf("%s: due = %v, want %v", tc.name, got, tc.due)
+		}
+	}
+	if c.stats.WatchDropped != 3 {
+		t.Errorf("WatchDropped = %d, want 3", c.stats.WatchDropped)
+	}
+	// Trees given separately: no Base, so nothing is filtered but .key.
+	c = &coordinator{}
+	if !c.fold(watch.Event{Paths: []string{"/elsewhere/history.jsonl"}}) {
+		t.Error("with no Base, a path is due")
+	}
+}

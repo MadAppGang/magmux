@@ -11,6 +11,7 @@ package source
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"path"
 	"sort"
@@ -156,18 +157,39 @@ func (r *Registry) wait() {
 
 // readBounded reads one record whole, refusing one larger than
 // claude.MaxRecordBytes.
+//
+// Every check is made on the HANDLE that is read, never on the name before the
+// read: a file swapped between a Stat of its name and the read would otherwise
+// pass the regular-file and size checks and then be read whole. The read
+// itself is limited too, so a size the handle misreports cannot carry it past
+// the bound either.
 func readBounded(fsys fs.FS, name string) ([]byte, error) {
-	info, err := fs.Stat(fsys, name)
+	f, err := fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", name)
 	}
-	if info.Size() > claude.MaxRecordBytes {
-		return nil, fmt.Errorf("%s is %d bytes, larger than the %d-byte record bound", name, info.Size(), claude.MaxRecordBytes)
+	tooBig := func(size int64) error {
+		return fmt.Errorf("%s is %d bytes, larger than the %d-byte record bound", name, size, claude.MaxRecordBytes)
 	}
-	return fs.ReadFile(fsys, name)
+	if info.Size() > claude.MaxRecordBytes {
+		return nil, tooBig(info.Size())
+	}
+	b, err := io.ReadAll(io.LimitReader(f, claude.MaxRecordBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > claude.MaxRecordBytes {
+		return nil, fmt.Errorf("%s grew past the %d-byte record bound while it was read", name, claude.MaxRecordBytes)
+	}
+	return b, nil
 }
 
 // Jobs reads jobs/<dir>/state.json, at depth 1 only.
