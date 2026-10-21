@@ -67,17 +67,18 @@ func normalizeBinding(id, path string) (string, string, error) {
 		base := strings.TrimSuffix(filepath.Base(path), claude.TranscriptSuffix)
 		if id == "" {
 			id = base
-		} else if id != base {
+		} else if claude.CheckDeclared(path, id) != nil {
 			return "", "", fmt.Errorf("transcript %q is not session %q's file (want %s%s)", path, id, id, claude.TranscriptSuffix)
 		}
 	}
 	if len(id) == 0 || len(id) > sessionIDMax {
 		return "", "", fmt.Errorf("session id must be 1-%d characters (got %d)", sessionIDMax, len(id))
 	}
-	for _, r := range id {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
-			return "", "", fmt.Errorf("session id may hold only letters, digits, '-' and '_' (got %q)", id)
-		}
+	// The library's alphabet (claude.ValidSessionID, tt's validSessionID): the
+	// characters a UUID can hold plus '_', which is also what makes the id safe
+	// to put in a by-id glob.
+	if !claude.ValidSessionID(id) {
+		return "", "", fmt.Errorf("session id may hold only letters, digits, '-' and '_' (got %q)", id)
 	}
 	return id, path, nil
 }
@@ -88,11 +89,16 @@ func normalizeBinding(id, path string) (string, string, error) {
 // Code's undocumented contract, so it is a first guess and never the only way
 // in. It never considers a file with any other name. Returns "" until the
 // file exists and is claimed.
+//
+// Every lookup is claude.LocateTranscript's (claudestate architecture §10 M3):
+// a declared path is addressed directly, by DeclaredPath, and a declared id by
+// DeclaredID's by-id glob. Neither falls back to discovery, and the glob
+// refuses an id in two project directories rather than choosing (D5).
 func (c *ClaudeCodeController) findNamedSession() string {
 	path := c.bindPath
 	if path == "" {
 		path = c.namedPathByID()
-	} else if _, err := os.Stat(path); err != nil {
+	} else if !declaredPathPresent(path) {
 		path = ""
 	}
 	if path == "" {
@@ -113,11 +119,18 @@ func (c *ClaudeCodeController) findNamedSession() string {
 	return path
 }
 
+// declaredPathPresent reports whether a declared transcript exists as a regular
+// file, through claude.LocateTranscript's DeclaredPath: addressed directly, no
+// fallback. A path that is a directory, or that cannot be statted, is absent.
+func declaredPathPresent(p string) bool {
+	loc, err := claude.LocateTranscript(os.DirFS(filepath.Dir(p)), claude.LocateRequest{DeclaredPath: filepath.Base(p)})
+	return err == nil && loc.Matches == 1
+}
+
 func (c *ClaudeCodeController) namedPathByID() string {
 	name := c.bindID + claude.TranscriptSuffix
 	if c.projectDir != "" {
-		p := filepath.Join(c.projectDir, name)
-		if _, err := os.Stat(p); err == nil {
+		if p := filepath.Join(c.projectDir, name); declaredPathPresent(p) {
 			return p
 		}
 	}
@@ -125,15 +138,15 @@ func (c *ClaudeCodeController) namedPathByID() string {
 		return ""
 	}
 	c.lastBroadAt = time.Now()
-	hits, _ := filepath.Glob(filepath.Join(c.projectsDir, "*", name))
-	if len(hits) == 1 {
-		return hits[0]
+	loc, err := claude.LocateTranscript(os.DirFS(c.projectsDir), claude.LocateRequest{SessionID: c.bindID, DeclaredID: true})
+	if err == nil && loc.Matches == 1 {
+		return filepath.Join(c.projectsDir, filepath.FromSlash(loc.Path))
 	}
-	if len(hits) > 1 && dbgFile != nil {
+	if loc.Matches > 1 && dbgFile != nil {
 		// One session id in two project directories is not a state Claude Code
 		// produces; picking one would be a guess, so keep waiting.
 		fmt.Fprintf(dbgFile, "[ctrl/claude] pane=%p session %s is in %d project dirs; not choosing\n",
-			c.pane, c.bindID, len(hits))
+			c.pane, c.bindID, loc.Matches)
 	}
 	return ""
 }
