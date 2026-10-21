@@ -256,13 +256,24 @@ type reply struct {
 //
 // ACCEPTANCE is the line. Until the coordinator takes the command, a context
 // that ends is a plain refusal: nothing ran. Once it has taken it, a result
-// already sent always wins, and a caller whose context ends first gets, for an
-// Exec, ErrOutcomeUnknown wrapping ctx.Err() — fn has run or is running with
-// that ctx, so ctx.Err() alone would tell the caller "not done" about
-// something that may have been done (review r1 #6b), and waiting for fn would
-// hand the caller's goroutine to host code that ignores its context (review
-// r2 #2). The other commands are bookkeeping with no effect to misreport, and
-// keep the plain error.
+// already sent always wins, and what a caller whose context ends first is told
+// depends on the command:
+//   - Exec: ErrOutcomeUnknown wrapping ctx.Err(). fn has run or is running
+//     with that ctx, so ctx.Err() alone would tell the caller "not done" about
+//     something that may have been done (review r1 #6b), and waiting for fn
+//     would hand the caller's goroutine to host code that ignores its context
+//     (review r2 #2).
+//   - Subscribe, Unsubscribe, Stats: ctx is not consulted after acceptance.
+//     The coordinator answers these in the step that accepts them and never
+//     blocks doing so (the reply is buffered), so the wait is bounded by that
+//     step, not by host code. Answering ctx.Err() instead would misreport an
+//     effect that has certainly happened: a Subscribe would leave a registered
+//     subscriber its caller never learned of, filling its buffer every cycle
+//     until Stop, and an Unsubscribe would leave its caller believing a
+//     closed subscription live (review r3 #2).
+//   - RefreshSources: the plain ctx.Err(). Its one effect is the pipeline's
+//     own List, which the caller's ctx never bounded, and a waiter that left
+//     is answered into its buffered reply and forgotten.
 func (p *Pipeline) ask(ctx context.Context, c command) (reply, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -289,6 +300,10 @@ func (p *Pipeline) ask(ctx context.Context, c command) (reply, error) {
 	}
 	// Accepted. The coordinator answers a command it took before it can
 	// stop, so a reply that is ready is the answer, whatever else is.
+	gaveUp := ctx.Done()
+	if answeredOnAcceptance(c.kind) {
+		gaveUp = nil // a nil channel's case is never chosen
+	}
 	select {
 	case r := <-c.reply:
 		return r, nil
@@ -299,7 +314,7 @@ func (p *Pipeline) ask(ctx context.Context, c command) (reply, error) {
 		default:
 		}
 		return reply{}, ErrStopped
-	case <-ctx.Done():
+	case <-gaveUp:
 		select {
 		case r := <-c.reply:
 			return r, nil
@@ -312,7 +327,23 @@ func (p *Pipeline) ask(ctx context.Context, c command) (reply, error) {
 	}
 }
 
+// answeredOnAcceptance names the commands the coordinator answers in the step
+// that accepts them, without blocking: once one is accepted its reply is
+// certain and immediate, and ask waits for it rather than for ctx (see ask).
+func answeredOnAcceptance(k commandKind) bool {
+	switch k {
+	case cmdSubscribe, cmdUnsubscribe, cmdStats:
+		return true
+	}
+	return false
+}
+
 // Subscribe registers a sink. buffer 0 takes Config.SubscriberBuffer.
+//
+// ctx bounds only the wait for the coordinator to take the request. Once it
+// has, the subscription exists and is returned whatever ctx does, so a caller
+// is never told "cancelled" about a subscriber the coordinator keeps (review
+// r3 #2).
 func (p *Pipeline) Subscribe(ctx context.Context, name string, buffer int) (*Subscription, error) {
 	if buffer < 0 {
 		return nil, ErrBadBuffer
@@ -324,7 +355,9 @@ func (p *Pipeline) Subscribe(ctx context.Context, name string, buffer int) (*Sub
 	return r.sub, nil
 }
 
-// Unsubscribe removes a sink and closes its channel. Idempotent.
+// Unsubscribe removes a sink and closes its channel. Idempotent. As with
+// Subscribe, ctx bounds only the wait for acceptance: an accepted Unsubscribe
+// returns nil, and the channel is closed.
 func (p *Pipeline) Unsubscribe(ctx context.Context, s *Subscription) error {
 	if s == nil {
 		return nil

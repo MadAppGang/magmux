@@ -141,3 +141,76 @@ func TestAnAcceptedCallWhoseCallerGivesUpReportsAnUnknownOutcome(t *testing.T) {
 		t.Fatalf("a Call on an ended context: exec %v, call %v, ran %v; want a plain refusal", execErr, callErr, ran)
 	}
 }
+
+// lateCancel is a context that ends exactly between the coordinator's
+// acceptance of a command and its reply: Done is open the first time ask
+// selects on it (the offer) and closed every time after, and Err agrees. Only
+// the asking goroutine calls Done and Err — the coordinator never reads a
+// Subscribe's, Unsubscribe's or Stats' context — so the counter needs no lock.
+type lateCancel struct {
+	context.Context
+	calls        int
+	open, closed chan struct{}
+}
+
+func newLateCancel() *lateCancel {
+	c := &lateCancel{Context: context.Background(), open: make(chan struct{}), closed: make(chan struct{})}
+	close(c.closed)
+	return c
+}
+
+func (c *lateCancel) Done() <-chan struct{} {
+	c.calls++
+	if c.calls == 1 {
+		return c.open
+	}
+	return c.closed
+}
+
+func (c *lateCancel) Err() error {
+	if c.calls >= 2 {
+		return context.Canceled
+	}
+	return nil
+}
+
+// A Subscribe the coordinator has ACCEPTED is registered, whatever the
+// caller's context does next. A caller told ctx.Err() at that point believes
+// there is no subscription while the coordinator keeps one, filling its
+// buffer every cycle until Stop (review r3 #2). So the coordinator never ends
+// up with a subscriber nobody holds: the caller either gets the subscription
+// or nothing was registered. Unsubscribe is the mirror: told "cancelled", a
+// caller would believe a subscription it had just lost was still live.
+func TestASubscribeWhoseCallerGivesUpAfterAcceptanceLeavesNoOrphan(t *testing.T) {
+	h := start(t, Config{Root: ports.Root{Sessions: mapTree("/s", fstest.MapFS{})}})
+	want := h.stats().Subscribers
+	for i := 0; i < 200; i++ {
+		sub, err := h.p.Subscribe(newLateCancel(), "late", 1)
+		if err != nil {
+			if got := h.stats().Subscribers; got != want {
+				t.Fatalf("attempt %d: Subscribe returned %v and the coordinator holds %d subscribers, want %d: "+
+					"a subscriber nobody holds", i, err, got, want)
+			}
+			continue
+		}
+		if got := h.stats().Subscribers; got != want+1 {
+			t.Fatalf("attempt %d: Subscribe succeeded and the coordinator holds %d subscribers, want %d", i, got, want+1)
+		}
+		err = h.p.Unsubscribe(newLateCancel(), sub)
+		open := true // no cycle runs here, so an open channel is empty
+		select {
+		case _, ok := <-sub.C():
+			open = ok
+		default:
+		}
+		if err != nil && !open {
+			t.Fatalf("attempt %d: Unsubscribe returned %v, but the subscription was removed and closed", i, err)
+		}
+		if open {
+			t.Fatalf("attempt %d: Unsubscribe returned %v and the subscription still delivers", i, err)
+		}
+		if got := h.stats().Subscribers; got != want {
+			t.Fatalf("attempt %d: after Unsubscribe the coordinator holds %d subscribers, want %d", i, got, want)
+		}
+	}
+}

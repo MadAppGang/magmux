@@ -211,6 +211,9 @@ func (c *coordinator) wakes(p string) bool {
 
 func (c *coordinator) command(m command) {
 	switch m.kind {
+	// Subscribe, Unsubscribe and Stats answer in this step and must never
+	// block: ask waits for their reply without its caller's ctx
+	// (answeredOnAcceptance).
 	case cmdSubscribe:
 		buf := m.buffer
 		if buf == 0 {
