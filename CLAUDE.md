@@ -279,7 +279,9 @@ The WRITE half — the only thing in that layer that changes anything:
   it could not record or deliver; the library carries those to every
   subscriber on the next delivery and wakes itself once to do it.
 - `mux/obsfocus.go` — `magmux agents focus TARGET`, plus `Magmux.obsFocusSession`,
-  which is magmux's own entry to the same gate. The `model.Key` the FIRST read
+  which is magmux's own entry to the same gate. Nothing on a keyboard, the
+  socket or MCP calls it yet, so its only callers are tests (review r1 #14a).
+  `agents focus` reaches the same gate by its own route. The `model.Key` the FIRST read
   resolved is the only identity the second read and the action use. Since
   background jobs became rows, an exact session id can name two sessions (two
   processes on one id, or a job and its resume): that is refused through
