@@ -325,3 +325,73 @@ func TestOpenPaneBinding(t *testing.T) {
 		t.Errorf("an id-only binding reports a transcriptPath before the file exists: %v", e)
 	}
 }
+
+// ── the binding, through claudestate/claude ────────────────────────────────
+
+// TestADeclaredIDInTwoProjectDirectoriesBindsNothing: a declared id is located
+// by claude.LocateTranscript's by-id glob, which refuses an id in two project
+// directories (D5) rather than choosing between them. The pane waits — an
+// honest empty answer — and binds nothing, and the moment one copy goes the
+// other is bound.
+func TestADeclaredIDInTwoProjectDirectoriesBindsNothing(t *testing.T) {
+	const id = "0b7c2a4e-5d1f-4c3b-9a8e-1f2d3c4b5a69"
+	config := t.TempDir()
+	projects := filepath.Join(config, "projects")
+	a := filepath.Join(projects, "-a", id+".jsonl")
+	b := filepath.Join(projects, "-b", id+".jsonl")
+	for _, p := range []string{a, b} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := &ClaudeCodeController{bindID: id, projectsDir: projects}
+	if got := c.namedPathByID(); got != "" {
+		t.Fatalf("an id in two project directories bound %q; it must bind nothing", got)
+	}
+	if err := os.Remove(b); err != nil {
+		t.Fatal(err)
+	}
+	c.lastBroadAt = time.Time{} // the throttle, not the rule, would otherwise answer
+	if got := c.namedPathByID(); got != a {
+		t.Fatalf("with one copy left the id bound %q, want %q", got, a)
+	}
+}
+
+// TestADeclaredPathIsAddressedDirectlyAndNeverFallsBack: a declared path is
+// claude.LocateTranscript's DeclaredPath — the file itself, or nothing. A
+// directory of that name is not a transcript, and a missing file never becomes
+// a neighbour with the same session id.
+func TestADeclaredPathIsAddressedDirectlyAndNeverFallsBack(t *testing.T) {
+	const id = "0b7c2a4e-5d1f-4c3b-9a8e-1f2d3c4b5a69"
+	projects := filepath.Join(t.TempDir(), "projects")
+	declared := filepath.Join(projects, "-declared", id+".jsonl")
+	neighbour := filepath.Join(projects, "-other", id+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(neighbour), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(neighbour, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &ClaudeCodeController{bindID: id, bindPath: declared, projectsDir: projects}
+	if got := c.findNamedSession(); got != "" {
+		t.Fatalf("a missing declared path bound %q", got)
+	}
+	if err := os.MkdirAll(declared, 0o755); err != nil { // a DIRECTORY named <id>.jsonl
+		t.Fatal(err)
+	}
+	if got := c.findNamedSession(); got != "" {
+		t.Fatalf("a directory at the declared path bound %q", got)
+	}
+	if err := os.Remove(declared); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(declared, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.findNamedSession(); got != declared {
+		t.Fatalf("the declared file bound %q, want %q", got, declared)
+	}
+}

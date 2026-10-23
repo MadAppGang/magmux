@@ -1,0 +1,8 @@
+{
+  "scenario": "bg-spare-no-jobid",
+  "root": "bg-spare-no-jobid",
+  "listing": "",
+  "liveness": {
+    "70041": "alive"
+  }
+}

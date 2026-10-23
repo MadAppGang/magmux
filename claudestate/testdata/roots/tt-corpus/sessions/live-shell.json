@@ -1,0 +1,25 @@
+{
+  "pid": 2348,
+  "sessionId": "2f9c6e77-4b18-4d2a-9c31-55ad0e6f7b02",
+  "cwd": "/Users/user/mag/proxyapp",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.274",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "proxyapp:@45.%91",
+  "messagingSocketPath": "/tmp/cc-socks/2348.sock",
+  "name": "proxyapp-shell",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789699206204,
+  "status": "shell",
+  "statusUpdatedAt": 1789699206204
+}

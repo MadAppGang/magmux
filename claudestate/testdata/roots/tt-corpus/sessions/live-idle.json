@@ -1,0 +1,25 @@
+{
+  "pid": 78761,
+  "sessionId": "f350c44d-d22a-4c47-b3ef-00021713db7f",
+  "cwd": "/Users/user/mag/benchapp",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.275",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "benchapp:@51.%107",
+  "messagingSocketPath": "/tmp/cc-socks/78761.sock",
+  "name": "attachments-widget",
+  "nameSource": "user",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789698932085,
+  "status": "idle",
+  "statusUpdatedAt": 1789698932085
+}

@@ -1,0 +1,30 @@
+{
+  "scenario": "magmux-corpus",
+  "root": "magmux-corpus",
+  "listing": "",
+  "liveness": {
+    "15775": "alive",
+    "1724": "alive",
+    "1828": "alive",
+    "45682": "alive",
+    "56526": "alive",
+    "60001": "dead",
+    "60002": "alive",
+    "60003": "alive",
+    "60004": "alive",
+    "60005": "alive",
+    "60006": "alive",
+    "60007": "alive",
+    "60008": "alive",
+    "60009": "alive",
+    "60010": "alive",
+    "60011": "dead",
+    "60012": "alive",
+    "60099": "alive",
+    "76136": "alive",
+    "96632": "alive",
+    "98198": "alive",
+    "98299": "alive",
+    "98693": "alive"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "pid": 2063,
+  "sessionId": "ce5f7a13-8204-4b96-a7d3-05e21c8b4f70",
+  "cwd": "/Users/user/mag/gammaapp",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.273",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "gammaapp:@26.%45",
+  "messagingSocketPath": "/tmp/cc-socks/2063.sock",
+  "name": "no-status-time",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789699206204,
+  "status": "waiting",
+  "waitingFor": "input needed"
+}

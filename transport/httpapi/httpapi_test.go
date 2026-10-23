@@ -578,6 +578,7 @@ func TestCodeToStatusMap(t *testing.T) {
 		protocol.CodeTooSmall:      400,
 		protocol.CodeUnauthorized:  401,
 		protocol.CodeForbidden:     403,
+		protocol.CodePanelPrivate:  403,
 		protocol.CodeNoSuchPane:    404,
 		protocol.CodeUnknownVerb:   404,
 		protocol.CodePaneDead:      409,

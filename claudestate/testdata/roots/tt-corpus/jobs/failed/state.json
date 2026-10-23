@@ -1,0 +1,27 @@
+{
+  "state": "failed",
+  "detail": "SYNTHETIC detail",
+  "tempo": "idle",
+  "inFlight": {
+    "kinds": [],
+    "queued": 0,
+    "tasks": 0
+  },
+  "tokens": 47104,
+  "children": null,
+  "linkScanOffset": 2101161,
+  "linkScanPath": "",
+  "template": "bg",
+  "bgIsolation": "none",
+  "name": "SYNTHETIC name",
+  "nameSource": "auto",
+  "sessionId": "44444444-4444-4444-8444-444444444444",
+  "resumeSessionId": "44444444-4444-4444-8444-444444444444",
+  "daemonShort": "failed",
+  "cliVersion": "2.1.233",
+  "cwd": "/Users/user/dotfiles",
+  "createdAt": "2026-08-17T07:34:10.528Z",
+  "updatedAt": "2026-09-11T00:41:46.000Z",
+  "firstTerminalAt": "2026-08-17T07:47:08.443Z",
+  "backend": "daemon"
+}

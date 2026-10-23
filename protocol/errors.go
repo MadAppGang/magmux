@@ -81,6 +81,24 @@ const (
 	// Distinct from busy because something WAS typed, so "wait and send again"
 	// is not a safe remedy: the box may already hold the text.
 	CodeNotAccepted = "not_accepted"
+	// CodeObsOff means session observation is not running in this magmux,
+	// which is the DEFAULT: the layer is opt-in behind MAGMUX_AGENTS. The remedy
+	// is to restart magmux with it set, and it belongs to the human rather
+	// than to the client. Only the socket-only `agents` verb returns it.
+	CodeObsOff = "obs_off"
+	// CodeObsPending means observation IS running and has not published a
+	// document yet. Distinct from obs_off on purpose — "restart magmux" and
+	// "ask again in a moment" send a caller to opposite places — and it is a
+	// narrow window, because the pipeline is refreshed once at startup.
+	CodeObsPending = "obs_pending"
+	// CodePanelPrivate refuses a read of the CONTROL PANEL to a caller that is
+	// not on this machine's socket, in a magmux started with MAGMUX_AGENTS=1.
+	// The panel's attention view lists every Claude Code session on the
+	// machine, names and directories included, and that document is
+	// socket-only; so for the life of such a magmux the panel is too — for
+	// `watch`, `watch_all`, `capture` and `transcript` alike. Not a
+	// pane_is_control: the same request works over the socket.
+	CodePanelPrivate = "panel_private"
 )
 
 // Error is a verb failure with a stable machine-readable code.

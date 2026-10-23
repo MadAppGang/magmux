@@ -1,0 +1,127 @@
+# SHA-256 of every input file the goldens in this directory were recorded over,
+# relative to claudestate/testdata: each tt scenario root and the liveness list
+# its fake oracle answers from. TestWireGoldens fails if any of them changes,
+# if the scenario set moves, or if a golden here is not listed below.
+# Recorded by the PRE-MOVE code in internal/obs, which reads no jobs/ and no
+# agents listing: no job rows. The rows and members the library adds are D6.
+source  3f18ddddbfe6e4eec74de780942d5ce8e01c83c0
+scenario  bg-spare-no-jobid  bg-spare-no-jobid.json
+scenario  bg-two-claimants  bg-two-claimants.json
+scenario  job-no-id-shared-short  job-no-id-shared-short.json
+scenario  k2-duplicate-different-transcripts  k2-duplicate-different-transcripts.json
+scenario  k3-duplicate-99-100  k3-duplicate-99-100.json
+scenario  k3-duplicate-both-mismatched  k3-duplicate-both-mismatched.json
+scenario  lone-bg  lone-bg.json
+scenario  lone-bg-two-claimants  lone-bg-two-claimants.json
+scenario  lone-bg-with-transcript  lone-bg-with-transcript.json
+scenario  tt-corpus  tt-corpus.json
+scenario  twin-dead-blocked  twin-dead-blocked.json
+scenario  twin-dead-overlay  twin-dead-overlay.json
+scenario  twin-waiting-done  twin-waiting-done.json
+scenario  working-tempo-blocked  working-tempo-blocked.json
+3a89940659069e667ecd65d9361f068486b61bb8500026033a7d29d9ea6dcd2f  roots/bg-spare-no-jobid/sessions/70041.json
+69ec4bfaac69ddd5d821fd1cafa37c213e75de6c1c6a051098bf5f896f2c8aab  roots/bg-two-claimants/jobs/btc00001/state.json
+9db46d7e3eddb4c8ae1a9330ac7dbf094a41e6057b8674f6abdb2fca4afc3f7b  roots/bg-two-claimants/sessions/70011.json
+f8754ef10372f04b18082e540ccd43f12abb5747e1c038f10b9e469fde78ac41  roots/bg-two-claimants/sessions/70012.json
+6bcf606a492edb4d50ccbfa1a23413d73242fdc1cee425c496fc64c5123d1365  roots/job-no-id-shared-short/jobs/nid-a/state.json
+9b26c90cb66c884f95f1e847ee94904c62ab98f54b908eee66adde195a6f87ca  roots/job-no-id-shared-short/jobs/nid-b/state.json
+8dc3539e9ce99b16c05975ec5ba5b05749c06e4dc258cb71835552e782942d3f  roots/k2-duplicate-different-transcripts/jobs/a/state.json
+1a041d5ebe72c5b78793f56dc21ab2f39c3884e078a926a79802fee3f8848a8b  roots/k2-duplicate-different-transcripts/jobs/b/state.json
+1df7cbc3c8b8f8032bf6f1fbaaa5931e00294af389487193391e5f44ada145da  roots/k2-duplicate-different-transcripts/projects/-Users-user-dev-k2dup-a/50000000-0000-4000-8000-0000000000a1.jsonl
+2681ad58e43f51054c774fcd8b309f21b8c6eb7651dadc659adbc97a14184f71  roots/k2-duplicate-different-transcripts/projects/-Users-user-dev-k2dup-b/50000000-0000-4000-8000-0000000000a1.jsonl
+fd7c338aa713cebc6f9e249d8158112c5208d722526e065a86788412aba92888  roots/k3-duplicate-99-100/sessions/100.json
+6a15a8e7ad129c106fc8915943e2f5b62b69323f98b0f07df8fd347fb41bc595  roots/k3-duplicate-99-100/sessions/99.json
+6f31e7f9ee3d79d671972d06e49d45df8852ed243b739fa3e878fc5a3351d0f6  roots/k3-duplicate-both-mismatched/sessions/100.json
+64006e4987ab89e00602eb475d0975301afb6d0d5ae89e20447c54e1ec1c1ae1  roots/k3-duplicate-both-mismatched/sessions/150.json
+280a146fda07c3ce2cd030a1b552c75779d963e17eaac8212e385930dcd4c990  roots/lone-bg-two-claimants/sessions/70031.json
+6ace799eb50a8ff3f1a344ec8629c59e6cccabb19beff2cca3a2b7119f37a9e8  roots/lone-bg-two-claimants/sessions/70032.json
+94b0db057cef0cac3e3b0df830a92dfe39146760912fcce2d4c7847f99564bf5  roots/lone-bg-with-transcript/projects/-Users-user-dev-sample/30000000-0000-4000-8000-000000000021.jsonl
+c0731eb23507c647cc6bc1d86cfdca543ff8e1ec0a9e519d9d2de23205506117  roots/lone-bg-with-transcript/sessions/70021.json
+d4d4d5c9de62ef1ad184a59f1ba8895cc560b01ca77a90beb1d945db014ab283  roots/lone-bg/sessions/background-process.json
+30db9254307183736bc1f3de98fe95458dda7630cb07b69f20ddc3202c02a8a4  roots/tt-corpus/jobs/blocked-beyond-retention/state.json
+c10775b969d23c2594232b7d0a388fb029ec983704ebd2b003f25ba7cdcba652  roots/tt-corpus/jobs/blocked-no-needs-tempo-idle/state.json
+1daa354a9463ff8d23e15aecaef60978620e2913fd62fa991f31f095b59ca7f5  roots/tt-corpus/jobs/blocked-with-needs/state.json
+306123b33ac1b6eb47423773347b26a058ae73375485780220bef803ac84bb0c  roots/tt-corpus/jobs/blocked-with-needs/timeline.jsonl
+23ac9621686c8fc95c223e582c9bbcd3dcbd765b8b7f728f9d989f44416d0664  roots/tt-corpus/jobs/cross-kind/state.json
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  roots/tt-corpus/jobs/decoy-nested/tmp/.keep
+eb8eec2576353f5c3c1a533690e22b1d25eb6c521c5a466ecf74184f9f91cd26  roots/tt-corpus/jobs/done/state.json
+db39b82a5d37848c0af364bb29a6f1dabde2eaa8df4c5365e989544151750b30  roots/tt-corpus/jobs/dup-a/state.json
+87adcc1e6d6652ae78e258ceb6a8e9d9312fdafa34160f3239816f5ce659a970  roots/tt-corpus/jobs/dup-b/state.json
+748b7e98e2dc569509bdac0e61243b24568486dee51c5398107ad27d2bb02b7b  roots/tt-corpus/jobs/failed/state.json
+9c2d75ae13054679180fc1e1d0b528611146f3637c467837c6a162108bed163d  roots/tt-corpus/jobs/linkscan-outside-root/state.json
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  roots/tt-corpus/jobs/missing-state-json-transient/.keep
+0fe890c0170dbb0fa0882afd9c84b36a6d52e3318681b92a5280b5d777641a8b  roots/tt-corpus/jobs/no-session-id/state.json
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  roots/tt-corpus/jobs/no-state-json/tmp/.keep
+37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570  roots/tt-corpus/jobs/pins.json
+8dc1712a0ad14aacfe522ca30f475b0f19f121f75f05f4dcefce896c128fee68  roots/tt-corpus/jobs/reaped-mid-work/state.json
+a00f4cecdaa206655c622248dac072676cadf231549a78aa534ad27a4ca2bc30  roots/tt-corpus/jobs/record-later-than-activity/state.json
+d8909498252f64b20bb4c6d2f24edb3fd22645280bedbc776b2c9101fd77ab64  roots/tt-corpus/jobs/shortid-mismatch/state.json
+0a856c63a663799a678f1050a16aef8903aad391c1a7f34d7f553d0868a192cd  roots/tt-corpus/jobs/torn/state.json
+68985d61ec40f975b890ede4a99a0ff1f0efec926541a579aafc2ea5e75336b0  roots/tt-corpus/jobs/unknown-state/state.json
+ea3a624a9796be494daaf2ee3b5749c52aa579af2aebae3c69ca5596df04c48c  roots/tt-corpus/jobs/working-fresh/state.json
+f39565a53b1364fb639c15de3cf26c7aa496f293df3fd2373380e46d62549b18  roots/tt-corpus/jobs/working-transcript-stale/state.json
+30463a928470e38f26fce24a6544cd1f7e10c2bf69c082e6127531a20b02eb8a  roots/tt-corpus/projects/-Users-user-dev-alpha-alphamini/093c8e29-d6e3-47d9-9634-35686cc52c13.jsonl
+ee1bee22a6c4703eb3a704cb38a63a2c3f433664aed71e4d078625d93a76688e  roots/tt-corpus/projects/-Users-user-dotfiles/97030e53-3ae6-4b0e-9f5a-1c5d4b2a8e01.jsonl
+759300266e8e4dd12045a050341cb8bff50303636174a82aa7d8206bed457b01  roots/tt-corpus/projects/-Users-user-dotfiles/unrelated-neighbour-0000-4000-8000-000000000000.jsonl
+b1e6f2408b81cc2435bd4860f43ad3fe6f0f7bb4a66c68e4c818579b032f3cf1  roots/tt-corpus/projects/-Users-user-mag-gammaapp-gammaapp-cloud/d3ed2cc8-420f-4a35-be7b-5d374345faae.jsonl
+4d59630dc07e3ffb1ddddfffc7ae0eab62b65993647ce890c1ed76afa71bdcbf  roots/tt-corpus/projects/-Users-user-proj-a-collide/c01110ed-0000-4000-8000-000000000001.jsonl
+c61590ef9437b0c8354be84ea832a8f0aed8bb29aecfce0d897421f15b6b46ac  roots/tt-corpus/projects/-Users-user-proj-a-collide/d0b1e000-0000-4000-8000-000000000002.jsonl
+4f34609fc7c6e4f61dd835216e903e9c0eae3b5311eed1a07215f2e7123b1f5e  roots/tt-corpus/projects/-Users-user-proj-a/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl
+1d9cb3f50a5592be1bae743a93157890cd0b698c8307740ea5d8ce29e660fd2f  roots/tt-corpus/projects/-Users-user-proj-a/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/subagents/agent-0001aaaaaaaaaaaaa.jsonl
+60d85cbae6d882f3a49ec5310a31a818be8bf3c22fe94f0bfac279c9f564db4c  roots/tt-corpus/projects/-Users-user-proj-a/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/subagents/agent-0001aaaaaaaaaaaaa.meta.json
+0a0cbb58a33d068fd4d71006e5ede0c78929b66a4225183d7ae1c6c86af48a52  roots/tt-corpus/projects/-Users-user-proj-a/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/subagents/agent-0002aaaaaaaaaaaaa.meta.json
+1d9cb3f50a5592be1bae743a93157890cd0b698c8307740ea5d8ce29e660fd2f  roots/tt-corpus/projects/-Users-user-proj-a/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/subagents/agent-0003aaaaaaaaaaaaa.jsonl
+a83656ebac9c6e43aef2fe90a26cf86def6b95be847217c5503988399473c141  roots/tt-corpus/projects/-Users-user-proj-a/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/subagents/agent-0003aaaaaaaaaaaaa.meta.json
+c61590ef9437b0c8354be84ea832a8f0aed8bb29aecfce0d897421f15b6b46ac  roots/tt-corpus/projects/-Users-user-proj-a/d0b1e000-0000-4000-8000-000000000002.jsonl
+074df92a165c0b34f08422641b00ac5b3be1720638f049ddbecfdff562dea380  roots/tt-corpus/projects/-Users-user-proj-b/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl
+2e31b3bae6a2362e8b5497d51c16630ec909992bee2ab9fd55c20b4a63bba458  roots/tt-corpus/projects/-Users-user-proj-c/cccccccc-cccc-4ccc-8ccc-cccccccccccc.jsonl
+565355496f26c006a8be01697c8953aa8827dd3c288b411821d5802fcabdd7aa  roots/tt-corpus/projects/-Users-user-proj-d/dddddddd-dddd-4ddd-8ddd-dddddddddddd.jsonl
+1fb6132df333f0d265fcd7316dbd5eeab47901391815d9a32172055ef186b7ff  roots/tt-corpus/projects/-Users-user-proj-e/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.jsonl
+c71e29f27eb1a43cf1a8c58479928c03394161b3f9e7494e6cd942c7ff047c9f  roots/tt-corpus/projects/-Users-user-proj-f/ffffffff-ffff-4fff-8fff-ffffffffffff.jsonl
+5c33c35c1b1a24700b4980bddc77d4d464e21c29cbeb401dd409d63d0a788fb1  roots/tt-corpus/projects/-Users-user-proj-g/99999999-9999-4999-8999-999999999999.jsonl
+4d74f982ad12e2c75f50e4585aebee22fcdca107b5b45018b65e5bc19d2314f9  roots/tt-corpus/projects/-Users-user-proj-h/11111111-1111-4111-8111-111111111111.jsonl
+35acf79d3f8947a4e2b131a013b4052a8799f83f0a16527dd92b3416ba682936  roots/tt-corpus/projects/-Users-user-proj-h/33333333-3333-4333-8333-333333333333.jsonl
+7bd640f045f67fef3b05956d0fc1fc6534c317b0e128c951aa55799475f102b4  roots/tt-corpus/projects/-Users-user-proj-i/22222222-2222-4222-8222-222222222222.jsonl
+d4d4d5c9de62ef1ad184a59f1ba8895cc560b01ca77a90beb1d945db014ab283  roots/tt-corpus/sessions/background-process.json
+0f4ec10e7b7f1bcf0535b0a6262f2b6bf9b20ed5795dc0a2de14c161197d4d0e  roots/tt-corpus/sessions/busy-31-minutes.json
+6d3980e69618bc17cdee9e7d6e86e1351a57d5e5c6fe3a1aa6abaf0b0a97249f  roots/tt-corpus/sessions/dead-pid.json
+ef093e1b511f5cb0fa4beacc57d2e488fa18595d2a486449f8afb21a16fb9922  roots/tt-corpus/sessions/duplicate-sessionid-a.json
+1423cfb5e406081a306a33d4e2e26f2b4d1488950246335adf119da6adb9976b  roots/tt-corpus/sessions/duplicate-sessionid-b.json
+fb0e44b1f2983864767bf8099ef44cd08cb1f17f313d70c897f38862efad9c88  roots/tt-corpus/sessions/formernames-strings.json
+b415ce921fa5558e94d732e76ebcdfb0af2c44241be9ef2c0c7290ef480bc7d8  roots/tt-corpus/sessions/idle-3-days.json
+05b7384ec5acf04c29dbeff49db31011c791a9cef5c7223b18e5e24937d320a7  roots/tt-corpus/sessions/key-order-shuffled.json
+6fd62f3441f49d6bb077200e70f8ac563b513723aae061e95e621d752301b2fa  roots/tt-corpus/sessions/live-busy.json
+87ea2086a441edd573e117682bc0d0be5d409eaf121bd937fa5d4839eb96d413  roots/tt-corpus/sessions/live-idle.json
+90f08600825a75d66f6c3e93c96fbfbcdc4d8c0ea71da0f29335e150d5d380fc  roots/tt-corpus/sessions/live-shell.json
+dc8d70c2485c313597ff57214978cff813c992500dce33f4653239dc62ef94a4  roots/tt-corpus/sessions/live-waiting-input-needed.json
+8bb7375133a6c72154eb0e374b9b616af1fddfa4e22ccba377170f7182dfc682  roots/tt-corpus/sessions/live-waiting-permission-prompt.json
+6663094898efe6aad35869060feaca99fe4de6538c36efcae7b1118a447a4660  roots/tt-corpus/sessions/missing-optional.json
+25638d8d34eb75c87a40689da10e86593aaa8edc82aeab64c2d42269c467bd46  roots/tt-corpus/sessions/no-session-id.json
+cbce891672a5396b1d79d39f39a1f57e5518a005bb363cb57fc235a67881a49a  roots/tt-corpus/sessions/no-status-updated-at.json
+f7c9b549848875e934b2be0df9b98ddd0f2c19bf05715380e5ecb71ddb927adf  roots/tt-corpus/sessions/no-tmux-field.json
+febeb8b4dfd36141c135bb66846b611ce1741987e0bd03fc3fe5d8609173215c  roots/tt-corpus/sessions/torn.json
+9adbe8927f4ba4fbab73586a3a8c74551db9ee371b12d30e491fb62eb63947f6  roots/tt-corpus/sessions/unknown-status.json
+8d9bb470d3ba961b92d285a956fd190ea53b2a5cf7307a3a15394cdbac9b7ef4  roots/tt-corpus/sessions/version-2.1.263.json
+4c9389df9edc47e36a699191e5b90fa50fccbbe6b3ac0586fb6a894b38a4be1e  roots/tt-corpus/sessions/waiting-3-days.json
+0431b69ef8810040593504ece18129209ff8f661a2857078501ede2b8a478f98  roots/tt-corpus/sessions/waiting-unknown-reason.json
+aa14091e44ffa948047186a7c7df0d8fc35915398625637fc6c66d664da50a9f  roots/tt-corpus/sessions/with-former-names.json
+245c76b71b69a7c1b039d9ba04a2d805af6471d3c70c3331b6551b49156c3d99  roots/twin-dead-blocked/jobs/tdb00001/state.json
+02b3fc3d52184ea1277e2c21b4796d03dd6aeae8bbda2563833583672f3c92e0  roots/twin-dead-blocked/sessions/70001.json
+781245bbecc83bbaae83bffc96fad713b31fdb46ef2b708284fa9f00ebad9d30  roots/twin-dead-overlay/jobs/tdo00001/state.json
+761b7031111226fd99ffb28eee37925996d302a0bbef846d2927177ff9036b78  roots/twin-dead-overlay/sessions/70051.json
+7b258960e4941db2984c0ec2d98d3682e8559c6e50945157a2501316ea2d0f4d  roots/twin-waiting-done/jobs/twd00001/state.json
+ce15f0c8a96af1844da90a1cf1821d3b6b5ebcaf6999ad3799d7e59cd3a2931e  roots/twin-waiting-done/sessions/70002.json
+426b053c95bb0ab48d22f78f494aacda8a118d9ad83abad840ff9e60ca2b5561  roots/working-tempo-blocked/jobs/wtb00001/state.json
+aa94f2c4526edb157e0878053ae623c10cafd4ef99328f933a8790df6e4f62c4  tt-reference/bg-spare-no-jobid.liveness.json
+351ebc73d38cc47686c1f0c1b2a342554144d4f85a40dcf39d952d04d136e846  tt-reference/bg-two-claimants.liveness.json
+211464bade7db83b14347c83d34a13e023b46cc97776f4eb27c54dc61344c7b7  tt-reference/job-no-id-shared-short.liveness.json
+4f9e69ded5a8a6c2cd4800db9e8203a39bb3beeeff717183d6197ec9ad3157a0  tt-reference/k2-duplicate-different-transcripts.liveness.json
+155c9b3c32e90aa2dea034055f54a2953fc0ae2a9ce43a51992fd7a9d9886bd4  tt-reference/k3-duplicate-both-mismatched.liveness.json
+af706253daa47a4c632653eb01e63aba1ddb327539f2d306ad9d8a89dd53e7c4  tt-reference/lone-bg-two-claimants.liveness.json
+20b8c47eced33b5f623529ea296fabcc4c5195a693d7763febe7b7ae8c6e2989  tt-reference/lone-bg-with-transcript.liveness.json
+1675252762962245ea8b6d9fa14403dd46c43333c4d61e974feacdc606574701  tt-reference/lone-bg.liveness.json
+325f17f08e7349e411fcaa2ca1c54d1851d0a1847693bd322fce36d49c07d6d8  tt-reference/tt-corpus.liveness.json
+1626c5174f8b6b2f5d1a6964a07f5ffa7808af56068372784a79f03c40caaa9c  tt-reference/twin-dead-blocked.liveness.json
+6b428db4847264893df4d8d8db833f641a22ba830ce7bbef859cfbb836283220  tt-reference/twin-dead-overlay.liveness.json
+f28506fa093cc55fa5528a00f2eaac9554dffaa55a9a4e0a25af20d15d36f2d5  tt-reference/twin-waiting-done.liveness.json
+6e5dc193e5b9e42e06a8837da114d38a28dbb03d0811c96576a25d86b4ac22e9  tt-reference/working-tempo-blocked.liveness.json

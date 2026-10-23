@@ -147,6 +147,17 @@ func (st *Streamer) Watch(s *hub.Sub, pane int, mode protocol.WatchMode, fps int
 	if p == nil {
 		return protocol.WatchInfo{}, sockErrf(sockCodeNoSuchPane, "no pane %d (it may have been closed)", pane)
 	}
+	// The control panel is on-box only in a magmux that observes sessions
+	// (ADR-X5). Sub.Caller takes sub.mu and nothing above it, and no lock of
+	// ours is held here. watch_all and a pane opened later reach this through
+	// Sub.Watch and discard the error, so for them the refusal is a SKIP.
+	var caller hub.Caller // a nil Sub has no identity, and a zero Caller fails closed
+	if s != nil {
+		caller = s.Caller()
+	}
+	if err := st.m.refusePanelOffBox(p, caller); err != nil {
+		return protocol.WatchInfo{}, err
+	}
 	rows, cols := p.size()
 
 	st.mu.Lock()

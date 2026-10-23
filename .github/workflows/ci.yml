@@ -8,12 +8,20 @@ on:
 
 jobs:
   build:
+    # Match local gates: a developer's uncommitted go.work must never change
+    # what CI builds (architecture §7.3).
+    env:
+      GOWORK: "off"
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # "Pin is current" reads the history of claudestate/, which a shallow
+      # clone does not have.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -29,6 +37,31 @@ jobs:
             exit 1
           fi
 
+      # The root requires claudestate by VERSION (architecture §7). A replace
+      # or a committed workspace would build the in-tree copy here and the
+      # pinned one for everybody who installs magmux, so neither may land.
+      - name: No replace and no committed go.work
+        run: |
+          if grep -qE '^[[:space:]]*replace([[:space:]]|\()' go.mod claudestate/go.mod; then echo "::error::replace directive in a go.mod"; exit 1; fi
+          if [ -n "$(git ls-files go.work go.work.sum)" ]; then echo "::error::go.work is committed"; exit 1; fi
+
+      # Before claudestate's first tag the root pins a pseudo-version of the
+      # last commit that touches claudestate/. This step is what makes a
+      # GOWORK=off build of the root compile exactly the in-tree library: a
+      # library commit without its re-pin turns the PR tip red until the
+      # re-pin lands (architecture §7.2). A tagged pin is the release gate's.
+      - name: Pin is current
+        run: |
+          pin=$(awk '$1=="github.com/MadAppGang/magmux/claudestate"{print $2}' go.mod)
+          if [ -n "$pin" ]; then
+            want=$(git log -1 --format=%H -- claudestate/ | cut -c1-12)
+            case "$pin" in
+              *-"$want") ;;
+              v0.0.0-*) echo "::error::claudestate is pinned at $pin, but the last commit touching claudestate/ is $want; re-pin (architecture §7.2)"; exit 1 ;;
+              *) ;;  # a tagged version; the release gate owns that case
+            esac
+          fi
+
       - name: Build
         run: go build -v ./...
 
@@ -39,6 +72,49 @@ jobs:
       # so they only run on darwin/linux — which is exactly the matrix here.
       - name: Test
         run: go test -race ./...
+
+      # The root's pin test (cmd/magmux/deps_test.go) is only meaningful if
+      # go.mod is exactly what tidy writes; the status check also catches a
+      # go.sum line tidy ADDED, which git diff alone would not show as new.
+      - name: Root go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          if [ -n "$(git status --porcelain -- go.mod go.sum)" ]; then
+            echo "::error::go mod tidy changed go.mod or go.sum"
+            git status --porcelain -- go.mod go.sum
+            exit 1
+          fi
+
+      # claudestate/ is a nested module, so the root's ./... never descends
+      # into it (`go help packages`). It gets its own steps. _probe and _diff
+      # begin with "_", which ./... skips, so they are named explicitly: they
+      # must build and vet, and they must never become tests. _diff is RUN by
+      # hand only (it builds tt and spawns children); CI replays its recorded
+      # references in internal/difftest instead.
+      - name: claudestate build, vet, test
+        working-directory: claudestate
+        run: go build ./... ./_probe ./_diff && go vet ./... ./_probe ./_diff && go test -race ./...
+
+      # The library's dependency pin (internal/audit G10) is only meaningful
+      # if go.mod is exactly what tidy writes. The status check also catches a
+      # go.sum that tidy CREATED, which git diff alone would not see.
+      - name: claudestate go.mod is tidy
+        working-directory: claudestate
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          if [ -n "$(git status --porcelain -- go.mod go.sum)" ]; then
+            echo "::error::go mod tidy changed claudestate/go.mod or go.sum"
+            git status --porcelain -- go.mod go.sum
+            exit 1
+          fi
+
+      # watch/'s linux budget is a quarter of max_user_watches (D15). Printed so
+      # a red watch test on a runner can be read against the runner's limits.
+      - name: inotify limits (informational)
+        if: runner.os == 'Linux'
+        run: cat /proc/sys/fs/inotify/max_user_watches /proc/sys/fs/inotify/max_user_instances
 
   # Validate the release config on every push, because otherwise nothing does
   # until a tag is pushed — and by then the tag is immutable and the failure

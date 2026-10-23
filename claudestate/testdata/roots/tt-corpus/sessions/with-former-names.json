@@ -1,0 +1,37 @@
+{
+  "pid": 46799,
+  "sessionId": "0a180476-fe5f-4e29-b117-e10dbca60839",
+  "cwd": "/Users/user/mag/proxyapp",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.273",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "proxyapp:@7.%12",
+  "messagingSocketPath": "/tmp/cc-socks/46799.sock",
+  "name": "remediate-catalog-v4",
+  "nameSource": "user",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789699206204,
+  "status": "idle",
+  "statusUpdatedAt": 1789699206204,
+  "formerNames": [
+    {
+      "name": "remediate-catalog-v3-review",
+      "until": 1789695611204,
+      "sessionId": "0a180476-fe5f-4e29-b117-e10dbca60839"
+    },
+    {
+      "name": "remediate-catalog-v2",
+      "until": 1789692011204,
+      "sessionId": "0a180476-fe5f-4e29-b117-e10dbca60839"
+    }
+  ]
+}

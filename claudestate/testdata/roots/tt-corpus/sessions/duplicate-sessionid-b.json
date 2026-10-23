@@ -1,0 +1,25 @@
+{
+  "pid": 2000,
+  "sessionId": "aaaaaaaa-1111-2222-3333-444444444444",
+  "cwd": "/Users/user/mag/dupes",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.275",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "dupes:@2.%2",
+  "messagingSocketPath": "/tmp/cc-socks/2000.sock",
+  "name": "dupe-second",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789699206204,
+  "status": "busy",
+  "statusUpdatedAt": 1789699206204
+}

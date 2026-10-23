@@ -1,0 +1,23 @@
+{
+  "statusUpdatedAt": 1789699206204,
+  "status": "busy",
+  "tmux": "gammaapp:@25.%43",
+  "sessionId": "d5e83c17-4a29-4b60-9f13-7c82e04a1b95",
+  "nameSource": "derived",
+  "pidDomain": "darwin",
+  "version": "2.1.273",
+  "messagingSocketPath": "/tmp/cc-socks/1926.sock",
+  "name": "gammaapp-shuffled",
+  "peerFeatures": [
+    "notify_idle"
+  ],
+  "cwd": "/Users/user/mag/gammaapp",
+  "updatedAt": 1789699206204,
+  "entrypoint": "cli",
+  "startedAt": 1789684811204,
+  "peerProtocol": 1,
+  "nameSince": 1789684811204,
+  "kind": "interactive",
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "pid": 1926
+}

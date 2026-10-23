@@ -1,6 +1,6 @@
 package mcp
 
-// The MCP tool surface: 3 session tools + 6 pane tools.
+// The MCP tool surface: 3 session tools + 6 pane tools + 1 observation tool.
 //
 // Two conventions run through this file.
 //
@@ -184,6 +184,22 @@ var mcpTools = []mcpTool{
 		}),
 		timeout: 10 * time.Second,
 		run:     toolRequestSession,
+	},
+	{
+		Name:  "list_agents",
+		Title: "List Claude Code sessions on this machine",
+		Description: "List every Claude Code session on this machine and say which ones need a " +
+			"human: status, what a waiting session is blocked on, how long it has been in that " +
+			"state, whether its process is still alive, and an ATTENTION verdict with three " +
+			"values — YES, no, and \"?\" for undetermined, which is not a no. It covers sessions " +
+			"magmux did not start, so it is the tool for \"what is running\" across the whole " +
+			"machine, where list_panes answers the narrower question of what is in ONE magmux. " +
+			"It needs a magmux started with MAGMUX_AGENTS=1; without one it says so.",
+		Schema: objectSchema(map[string]any{
+			"session_id": sessionProp(),
+		}),
+		timeout: 15 * time.Second,
+		run:     toolListAgents,
 	},
 	{
 		Name:  "list_panes",
@@ -453,8 +469,8 @@ func (s *mcpServer) resolveSessionQuiet(ctx context.Context, id string) (*client
 		}
 	}
 
-	found := discoverSessions(ctx, time.Second)
-	var reachable []SessionInfo
+	found := client.DiscoverSessions(ctx, time.Second)
+	var reachable []client.SessionInfo
 	for _, f := range found {
 		if f.Reachable {
 			reachable = append(reachable, f)
@@ -707,7 +723,7 @@ func toolListSessions(ctx context.Context, s *mcpServer, raw json.RawMessage) (m
 		return nil, invalidParams(err)
 	}
 
-	found := discoverSessions(ctx, time.Second)
+	found := client.DiscoverSessions(ctx, time.Second)
 	anc, ancComplete := s.ancestry()
 	sawSelf := false
 	host := os.Getenv("MAGMUX_SOCK")

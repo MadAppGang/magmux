@@ -39,7 +39,7 @@ const sockDirDefault = "/tmp"
 
 // Dir is where magmux binds and where `magmux mcp` looks. It is a var so an
 // override reaches the consumers that do not have a *Magmux to ask —
-// mcp_spawn.go's ReadDir and Join, and mcp_tools.go's Sprintf and TrimPrefix.
+// client/discover.go's ReadDir and Join, and mcp_tools.go's Sprintf and TrimPrefix.
 //
 // It starts as the default and reads nothing at package init, so importing
 // this package can neither print nor fail. Each entry point (mux.Main,
@@ -100,7 +100,7 @@ func ValidDir(dir string) (string, error) {
 }
 
 // pidSockPattern gates DELETION and is deliberately NARROWER than
-// mcp_spawn.go's sockNamePattern, which gates DISCOVERY. Discovery is
+// client/discover.go's sockNamePattern, which gates DISCOVERY. Discovery is
 // permissive on purpose — report anything that looks like ours, including an
 // --id name. Deletion cannot be, because the capture group IS the liveness
 // oracle: if it is not a pid, there is nothing to ask.
@@ -156,7 +156,7 @@ const (
 // pidIsGone reports whether pid is DEFINITELY not a running process.
 //
 // Only ESRCH is proof. nil means alive; EPERM means alive and owned by another
-// user (the same reading mcp_spawn.go's discovery takes, and /tmp is shared
+// user (the same reading client/discover.go's discovery takes, and /tmp is shared
 // between users on macOS); any other errno means the oracle does not know. All
 // three answer "keep", because an oracle that does not know must say keep.
 //

@@ -1,0 +1,14 @@
+{
+  "actions": {
+    "navigate": "always",
+    "approve": "always",
+    "send": "always",
+    "lifecycle": "always"
+  },
+  "notify": {
+    "enabled": true,
+    "on": ["waiting", "error"
+    "delay": 2m,
+    "quiet": [22:00-08:00]]
+  }
+}

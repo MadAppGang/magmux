@@ -76,7 +76,9 @@ the same for the status bar.
 | `--firebase FILE` | [mirror the session](#firebase) into a Firebase Realtime Database |
 | `--plugin CMD` | run CMD as a [plugin](#plugins) (repeatable) |
 
-Subcommands: [`magmux mcp`](#magmux-mcp) runs magmux as an MCP server.
+Subcommands: [`magmux mcp`](#magmux-mcp) runs magmux as an MCP server;
+[`magmux agents`](#magmux-agents) prints what every Claude Code session on this
+machine is doing.
 
 ## Controls
 
@@ -85,12 +87,14 @@ Subcommands: [`magmux mcp`](#magmux-mcp) runs magmux as an MCP server.
 | `Ctrl-G q` | Quit |
 | `Ctrl-G Tab` | Switch focus to next pane |
 | `Ctrl-G p` | Show / hide the [control panel](#the-control-panel) |
+| `Ctrl-G a` | Show the panel's [attention view](#the-panels-attention-view) — which session needs you |
 | `Ctrl-G s` | Show / hide the status bar |
 | `Ctrl-G r` | Return to the terminal's size after a client [`resize`](#screen-size) |
 | `Ctrl-G [` | Scroll the focused pane back through its [scrollback](#scrollback) |
 | Mouse click | Switch focus to clicked pane |
 | Mouse drag | Select text (auto-copies to clipboard) |
 | Mouse wheel | Scroll the pane under the cursor — the [control panel](#the-control-panel), or an ordinary pane's scrollback. Forwarded to full-screen apps |
+| `v` | Cycle the control panel's views, when focused |
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | Scroll the control panel, when focused |
 
 `Ctrl-G [` scrolls back one page and puts the pane in **scroll mode**: `k`/`j`
@@ -478,6 +482,9 @@ always was.
 | `not_accepted` | gated pane only: the input box did not take what was typed. `reason` is `text_mismatch` or `empty_box` (Enter was **not** pressed), or `still_in_box` or `unconfirmed` (it was) |
 | `timeout` | the verb's budget expired. For `send`, only the caller's wait expired: the delivery carries on |
 | `too_small` | `open_pane`: no room to split without going below the minimum pane size |
+| `obs_off` | `agents`: session observation is not running in this magmux (it is opt-in, `MAGMUX_AGENTS=1`). Restart it with the switch |
+| `obs_pending` | `agents`: observation is running and has not published its first document yet. Ask again |
+| `panel_private` | a read of the control panel by a caller not on the local socket, in a magmux started with `MAGMUX_AGENTS=1` ([why](#the-socket-verb-and-the-mcp-tool)) |
 | `internal` | magmux's own fault |
 
 `reply` is never replayed to a late connection, so it cannot land after
@@ -1413,6 +1420,13 @@ It speaks JSON-RPC 2.0 as newline-delimited JSON. stdout carries protocol only.
 | `read_pane` | the pane's state, its rendered screen (and its scrollback), its transcript |
 | `send_keys` | type text and press named keys, without waiting for the turn. On a gated Claude pane it still waits for the box, and takes `dismiss_dialogs`, `ready_timeout_ms` and `no_gate` |
 | `send_and_wait` | give an agent one instruction and wait for the resulting turn. Takes the same three gate arguments |
+| `list_agents` | every Claude Code session on the MACHINE, and which ones need a human |
+
+`list_agents` is the odd one out and the distinction matters: every other tool
+here is about ONE magmux and its panes, while this one reports every Claude
+Code session on the machine, including sessions no magmux started. It needs a
+magmux running with `MAGMUX_AGENTS=1` and says so when there is not one. See
+[`magmux agents`](#magmux-agents), whose document and whose renderer it shares.
 
 `send_and_wait` is the workhorse: it waits for the turn to visibly *start*
 before waiting for it to finish, so it can never hand back the previous turn's
@@ -1491,6 +1505,383 @@ denied `Bash`, `Write` and `Edit` so it *cannot* do the work itself.
 
 > **Not yet run end to end.** It spends real model budget and needs a TTY, so
 > the flow above is written but unverified.
+
+### `magmux agents`
+
+`magmux agents` prints what every Claude Code session on this machine is doing,
+and keeps printing it as they change.
+
+```bash
+magmux agents                  # a table, redrawn whenever a session changes
+magmux agents --once           # one document, then exit
+magmux agents --json           # the same document as JSON, for jq
+magmux agents --root DIR       # a registry somewhere other than ~/.claude/sessions
+magmux agents --jobs DIR       # background jobs somewhere other than ~/.claude/jobs
+magmux agents --projects DIR   # transcripts somewhere other than ~/.claude/projects
+magmux agents focus TARGET     # focus the pane a session runs in — the ONE action
+```
+
+```
+PID    PANE  STATUS        TIER           WAITING ON  PROCESS  PANE ALIVE  GATE  SUB  ERR  IN STATUS FOR  ATTENTION  NAME
+62931  -     waiting       authoritative  permission  yes      -           -     -    -    3m 18s         YES        waiting-on-permission
+62932  -     idle          authoritative  -           yes      -           -     -    -    2h 15m         no         finished-its-turn
+62933  -     <compacting>  -              -           yes      -           -     -    -    51.6s          ?          status-from-a-newer-claude
+
+why:
+  62931   YES it is holding a permission prompt open, for 3m 18s
+  62933   ?   the tool reported a status this build does not recognise ("compacting")
+3 sessions at 2026-09-18T16:28:22+10:00
+```
+
+**`ATTENTION` is the answer to "which session needs me", and it has three
+values.** `YES` a human should look now. `no` we looked, and it does not need
+anyone. `?` **undetermined** — the evidence supports neither verdict. The third
+is not a failure and it is emphatically not a no: a session nobody could reach a
+verdict about and a session that is fine are different answers, and a blank cell
+beside a `no` in the same column would be read as another no by every person who
+has ever read a table. It is the one column whose undetermined value is spelled
+`?` rather than `-`, for exactly that reason. The `why:` block underneath gives
+the reason behind every verdict worth acting on — a `YES`, a `?`, or any session
+whose two tiers disagreed. `--json` carries all of them, `no` included.
+
+The rule that produces the verdict is written out in one place, in full, in the
+package documentation of `claudestate/verdict` (the observation library, in this
+repository's `claudestate/` module): eight ordered rules, first
+match wins. In short — a dead process or a closed pane is `no`; a session that
+is `waiting` is `YES`, and the reason says whether it wants a keystroke or an
+approval; an API-level error is `YES`; two tiers that disagree is `?`; working
+is `no`; a record that says it has nothing outstanding is `no`; a quiet screen
+with no record behind it is `?`; and nothing known at all is `?`.
+
+**`TIER` says where the `STATUS` came from, and there are exactly two.**
+`authoritative` is the session's own record of itself — its registry entry and
+its transcript. `inferred` is what magmux worked out from the pane's own
+traffic: how long it has been since the child printed anything, and whether the
+silence belongs to the child or to a human who has just typed. Authoritative
+wins whenever both have something to say, because the tool's own record beats a
+guess made from the outside.
+
+**Background jobs are rows too.** Claude Code's background sessions keep a job
+record under `~/.claude/jobs/<dir>/state.json` beside the process's own
+registry entry, and the two are ONE row, keyed by the job: `--json` carries it
+as `job` (the record's `daemonShort`, else its directory), and that member
+appears on job rows only. A job no process claims has `pid` 0. Its status is
+the vendor's own rule for the two records — a working job is `busy`, a
+`blocked` one is `waiting` and needs a human (and is announced, like any
+waiting session), and a finished or failed one has a status magmux has no word
+for: `null` in `--json` with the job's own word in `statusRaw`, and
+`authoritative`, because the job said it. Two processes running one session id
+are two rows, each with its own verdict. A job directory with no session id is
+kept as a row with an empty `id` rather than dropped, and the problem is printed.
+`--root` alone reads no jobs at all; pass `--jobs DIR` to read them.
+
+**When the two disagree, the loser is published too.** A session whose record
+says it is working, whose pane has produced not one byte for a minute or more,
+carries a `conflict`: the `why:` block prints it and `--json` carries it as a
+field. Resolution without publication would be silent, and a consumer that only
+ever sees the winner cannot tell an agreed answer from an overruled one — which
+is precisely the case a human is being asked to look at. **A conflict is not an
+error.** Both tiers were working correctly and both reported honestly; they
+disagree because the session is in a state one of them cannot see.
+
+It fires in one direction only, and that is deliberate. The mirror case — the
+record says idle while bytes are still arriving — is *not* a conflict, because
+Claude Code writes "idle" the moment its turn ends and goes on painting for a
+few hundred milliseconds afterwards, so a symmetric rule would flag every
+completed turn on the machine.
+
+`SUB` and `ERR` come from the session's **own record of itself** rather than
+from the screen. `SUB` is how many subagents it has, counted from the tool's
+metadata files and never from its transcript — the transcript undercounts them,
+by 100% in the worst measured case, because a nested agent leaves no record in
+its parent's. `ERR` (`fault.apiErrors` in `--json`) is how many API-level
+errors it has hit **recently** — within the last 200 KB of its transcript, which
+for a long session is its most recent part and not all of it. An error the
+session has since written 200 KB past is no longer counted, on purpose: this
+column feeds the attention verdict, and an error from twenty megabytes ago is
+not a reason to interrupt anyone. Whenever the 200 KB is only part of the
+transcript, `fault.detail` says so — `no API-level error in the last 200 KB of
+a 14.2 MB transcript; errors before that are not counted` — on a `0` as well as
+on a count. It is a different thing from a tool call that failed and was
+retried: every one of 497 observed occurrences of the latter was recovered
+from, and counting those reports 29 of 32 healthy sessions as broken.
+
+A `-` in either column is **nobody counted**, which is not zero: no transcript
+was found for that session, so there was nothing to count from — which is why
+every row of the example above shows one, its registry having no transcript
+tree beside it. A `0` means magmux looked, and for `SUB` that includes a session
+with no subagent directory at all, because the tool creates that directory on
+the first spawn and 94% of live sessions have never had one.
+
+Two **independent gates** decide whether a session should be reported at all,
+and they are separate columns because they fail separately: `PROCESS` is
+whether the process is still there, `PANE ALIVE` is whether the magmux pane it
+was running in is. `GATE` names whichever one rejected the session — a dead
+process and a closed pane are different situations with different remedies.
+
+The pane columns are empty in the example because **this command is not a
+magmux and has no pane table to consult**, so it answers the pane questions
+"undetermined" instead of guessing. (`magmux agents focus` does consult one, over
+the socket — see below. The streaming table deliberately does not: re-dialling
+every magmux on the machine once per change is the polling shape this whole
+layer exists to avoid, and an honest `-` costs nobody anything.)
+Inside magmux the same pipeline fills them
+in by walking up from each session's process until it reaches a pane's own
+child — the pane's pid is the shell's and the record's is the tool's, so they
+are never equal and only ancestry can match them.
+
+**A session's name is shown neutralised; `--json` carries it exact.** Names,
+and any status or waiting word magmux does not recognise, come from Claude
+Code's own files, and a name can be generated from conversation content. So in
+the table, the panel and a notification every control character is replaced
+before it is shown: a tab or newline by a space, anything else by a visible
+`�`. An escape sequence in a name reads as inert text and cannot drive your
+terminal. `--json` keeps every string exactly as written, with control
+characters written as JSON escape sequences, so a program reading it gets the
+original bytes back.
+
+It reads Claude Code's own session registry —
+`$CLAUDE_CONFIG_DIR/sessions`, else `~/.claude/sessions` — and its transcripts,
+under `projects/` beside it, and **only reads them**: nothing there is created,
+written, renamed or removed, not even a temporary file. Those files belong to
+the Claude Code processes writing them, and they rewrite them in place while
+this is reading.
+
+A transcript is found by its **session id**, which is the name of the file. It
+is never chosen by the directory a session says it is working in: Claude Code
+files a transcript under the directory the session was *launched* in, and about
+4% of sessions have moved since — into a worktree, most often. Deriving the
+directory from the live one for those sessions does not fail loudly, because
+the derived directory usually exists and holds a *different* session's
+transcripts. Nor is a transcript ever read whole: only the last 200 KB, which
+across 35 measured transcripts missed nothing and needed 44.1 KB at worst,
+against a largest observed transcript of 630.9 MB.
+
+It is **not polling**. Changes arrive from the filesystem, so an idle registry
+costs nothing at all; a rewrite caught half-written is retried once and, if it
+fails again, the session keeps the state it had a moment ago rather than
+disappearing. Anything that could not be read is reported on **stderr**, so
+`--json` on stdout stays machine-readable.
+
+A `-` is not a "no". It means magmux did not determine that value — an
+undetermined status and an idle session are different answers, and the table
+and the JSON both keep them apart (`null` on the wire). An undetermined gate
+never rejects a session: "nobody could tell" and "no" are not the same answer.
+`ATTENTION` is the one column that writes its undetermined value `?` instead of
+`-`, and it is spelled differently for that same reason.
+
+`TIER` is always `authoritative` in the example above and no conflict can ever
+appear there, for the same reason the pane columns are empty: the inferred tier
+is made of a pane's traffic, and this command has no panes.
+
+#### Inside magmux: `MAGMUX_AGENTS=1`
+
+magmux itself can run the same observation pipeline, which is what fills the
+pane columns in. It is **off unless asked for**:
+
+```bash
+MAGMUX_AGENTS=1 magmux -g -e 'claude "..."' -e 'claude "..."'
+```
+
+Inside magmux the transcript resolution is exact rather than a search, because
+magmux **spawned** the session and still holds the directory it passed to the
+child — which is the value Claude Code's layout is derived from, and the one
+nothing outside the session can recover.
+
+Inside magmux BOTH TIERS are live, which is the only place they are: magmux has
+the panes, so it can see a session's own record and the pane's traffic at the
+same time and weigh one against the other. That is where a `conflict` can
+appear, and where an alarm is armed — one one-shot timer per session, set for
+the next staleness threshold, and none at all once a pane's ladder is exhausted
+or somebody has typed into it. A pane going quiet produces no filesystem event,
+so without that alarm the one case the conflict exists for could never be
+noticed: the record write that would wake the pipeline is exactly what a wedged
+session is not doing.
+
+Nothing on screen shows any of this yet — the panel view comes later — so today
+the switch is for development and for anything reading the layer through its
+own sink. It is an environment
+variable rather than a flag so a nested magmux inherits it, and it is opt-in
+because a pipeline that started unconditionally would have this repository's
+own test suite reading a live session registry belonging to whatever agents
+happen to be running on the machine.
+
+#### `magmux agents focus` — the one action, and the three that are refused
+
+```bash
+magmux agents focus 62931            # by pid
+magmux agents focus waiting-on-perm  # by name
+magmux agents focus c874de20         # by session id, or an unambiguous prefix
+```
+
+A target that matches more than one session is refused with every candidate
+named — its pid, and its job when it has one — rather than picked. Since
+background jobs became rows, an exact session id can name two sessions (two
+processes running it, or a job and the job that resumed it); name one by pid
+then. A pid also reaches a job through any process that claims it.
+
+Focus moves the keyboard to the magmux pane a session is running in. **It is
+the only thing magmux will do to a session.** Three further action tiers exist
+in the schema — answering a permission prompt, sending input, and lifecycle
+(restart, kill, resume) — and all three are **hard-disabled**: they cannot run
+even if a configuration asks for them, and asking produces a refusal naming the
+requirement that defers them. The reason is two recorded incidents in which 16
+live sessions were destroyed, and the fact that lifecycle is irreversible.
+
+**Focus needs a pane, and `magmux agents` finds one over the socket.** It is a
+separate process with no pane table of its own, so it asks every magmux running
+on this machine for theirs — the first line of a magmux connection is already a
+list of every pane with its id and its child's pid — then walks up from the
+session's process until it reaches one of those panes, and focuses it — in THAT
+magmux. Every magmux numbers its panes from 0, so a pane id alone does not say
+which magmux it is in; the process walk does, and the focus is sent only to the
+magmux the session is running in. No new socket verb was needed for any of that.
+
+```
+$ magmux agents focus worktree-a
+session a1478d55-6e02-4bb9-93cf-01d2e8f47a6b (pid 69077, magmux pane 1)
+policy: the built-in default posture (R6.1): actions.navigate = always
+done: focus moved from magmux pane (none) to pane 1
+audit: #1 attempt navigate/focus
+audit: #2 outcome navigate/focus — focus moved from magmux pane (none) to pane 1
+```
+
+With **no magmux running** there is no pane to focus and the command says so:
+the refusal is "nothing can do this" rather than "you may not", which are
+different answers with different remedies.
+
+**Every action and every refusal is recorded** — what was done, to which
+session, why, and by which rule — in
+`${XDG_STATE_HOME:-~/.local/state}/magmux/sessions-audit.jsonl`. One JSON object
+per line, appended, never rewritten. An authorised action writes two lines, one
+before it runs and one after, so that a crash mid-action leaves a record saying
+"we tried this and do not know what happened". A refusal writes one; refusals
+are the interesting half.
+
+**Nothing is written under `~/.claude`, not even a log.** Those records belong
+to the Claude Code processes writing them. A trail path with a `.claude`
+element in it is refused outright rather than trusted not to be passed.
+
+The default posture is **navigate freely, everything else asks**. An action
+exits 0 only when it happened; a refusal exits 1.
+
+#### The configuration file
+
+`${XDG_CONFIG_HOME:-~/.config}/magmux/sessions.json`, and there does not have
+to be one — an absent file means the default posture and says nothing about it,
+because that is what an unconfigured machine looks like.
+
+```json
+{
+  "notify": {
+    "enabled": true,
+    "on": ["waiting", "error"],
+    "delay": "2m",
+    "quiet": ["22:00-08:00"]
+  },
+  "actions": {
+    "navigate": "always",
+    "approve": "ask",
+    "send": "ask",
+    "lifecycle": "ask"
+  }
+}
+```
+
+**An unparseable file yields the default posture, never a more permissive one,
+and it says so on stderr.** The whole file is discarded rather than partially
+applied: a config that fails halfway and keeps what it read hands back whatever
+was written before the error, which is exactly the more-permissive outcome the
+rule exists to prevent. **An unknown key is an error too**, which is the quiet
+half of the same rule — `"navigte": "always"` silently ignored is a rule that
+never applies, with no way at all to find out.
+
+It is JSON and it would be better as TOML: this is a file a person writes and
+wants to annotate, and JSON has no comments. The reason is the dependency set,
+which is pinned at three modules by a test so that adding a fourth is a
+deliberate decision in a diff that says so. A TOML library is that fourth
+module. Moving to TOML later is one loader against an unchanged schema; adding
+the dependency now would have made the decision by accident.
+
+#### Notifications
+
+With `[notify]` switched on, magmux tells you when a session has been waiting
+long enough to be worth interrupting you for.
+
+- **`delay` is served by an alarm, not a sweep.** `"2m"` means "tell me when a
+  session has been waiting two minutes", and the session's own actor arms one
+  one-shot timer for exactly the remainder. A machine where nothing is
+  happening holds no timers at all.
+- **One notification per episode, not per cycle.** A session that sits
+  `waiting` for an hour is one errand. A session that goes waiting, is
+  answered, works and goes waiting again is two.
+- **`quiet` suppresses, it does not defer.** A night's worth of notifications
+  arriving at 08:00 is the same failure as thirty firing unfiltered, moved to
+  breakfast. The session is still in the document, still in `magmux agents`, and
+  still in the panel; `quiet` means the machine does not interrupt you, not
+  that it stops knowing.
+- **A stale record never notifies.** Claude Code never deletes a record and
+  about half of them are stale, so a `waiting` record whose process exited is
+  the common case, not an edge one.
+- **Every notification is audited**, sent or suppressed, in the same trail as
+  an action — and one that cannot be recorded is not sent.
+
+#### The socket verb and the MCP tool
+
+The same document, three ways. `magmux agents --json` prints it;
+`{"type":"agents","id":1}` on a magmux socket replies with it; and the `list_agents`
+MCP tool renders it with the same renderer `magmux agents` uses, so a model and a
+human are reading one document rather than two descriptions of it.
+
+Both need a magmux started with `MAGMUX_AGENTS=1`, and both say which of the two
+possible refusals it is: observation is not running (a human has to restart
+magmux with the switch) or it has not published yet (ask again).
+(`obs_off` and `obs_pending` on the wire.)
+
+**`agents` is a socket verb and NOT a hub op**, so it is not reachable over
+[remote control](#remote-control): the document names every Claude Code session
+on the machine and its launch directory, and a view token is meant to show one
+magmux, not the machine. For the same reason, **a magmux started with
+`MAGMUX_AGENTS=1` keeps its control panel on-box for its whole life**: `watch`,
+`watch_all`, `capture` and `transcript` of the panel are refused with
+`panel_private` (HTTP 403) to any caller that did not arrive on the local
+socket, and `watch_all` and the Firebase mirror simply skip the panel. Without
+the switch the panel streams as before.
+
+#### The panel's attention view
+
+Inside magmux, **`Ctrl-G a`** reveals the control panel on its attention view —
+the same document as a triage list, the sessions that need you first, then the
+ones nobody could reach a verdict about, then the rest. `v` cycles between that
+view and the control plane; `Ctrl-G p` hides the panel again. The key is
+advertised in the chord hints only once a document exists, because on a magmux
+without `MAGMUX_AGENTS` it would reveal a panel with nothing in it.
+
+```
+ ATTENTION                                         12:00:00
+ ──────────────────────────────────────────────────────────
+ 1 need you · 1 unsure · of 3
+ ──────────────────────────────────────────────────────────
+ ● worktree-a ¶1                              waiting 9m 0s
+   it is waiting for input
+ ? pid 1724                                     busy 45m 0s
+   the two tiers disagree — conflict: the inferred tier sa…
+ · worktree-b                                   busy 31m 0s
+ ──────────────────────────────────────────────────────────
+ v: control plane   j/k: scroll
+```
+
+On a machine with more sessions than the pane has rows, the list scrolls between
+a fixed header and footer: `j`/`k` (or the arrows, PageUp/PageDown and the
+wheel) move through it, `g` and `G` go to the top and the bottom, and whatever
+is scrolled out of sight is counted as `▲ N above` and `▼ N more` rather than
+left out silently.
+
+It is a second **view** of the one panel rather than a second panel, and it is
+its own view rather than rows in the control plane's stream: that stream is a
+wire tap on one exchange — what a controller asked of a session, and what
+magmux observed the session do — and an attention row is neither direction of
+it.
 
 ## Why Go?
 

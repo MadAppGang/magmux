@@ -36,7 +36,7 @@ func StatusFor(code string) int {
 		return http.StatusBadRequest
 	case protocol.CodeUnauthorized:
 		return http.StatusUnauthorized
-	case protocol.CodeForbidden:
+	case protocol.CodeForbidden, protocol.CodePanelPrivate:
 		return http.StatusForbidden
 	case protocol.CodeNoSuchPane, protocol.CodeUnknownVerb:
 		return http.StatusNotFound

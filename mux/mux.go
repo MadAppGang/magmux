@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/MadAppGang/magmux/claudestate/claude"
 	"github.com/MadAppGang/magmux/hub"
 	"github.com/MadAppGang/magmux/plugin"
 	"github.com/MadAppGang/magmux/theme"
@@ -138,6 +139,29 @@ type Magmux struct {
 	// everywhere after. No lock, deliberately, on the same argument as
 	// pendingInput and themeAskedAt: init() returns before any goroutine exists.
 	headless bool
+
+	// panelPrivate says the control panel is ON-BOX ONLY for the whole life of
+	// this magmux: it was started with MAGMUX_AGENTS=1, so the panel's attention
+	// view lists every Claude Code session on the machine — names and launch
+	// directories — and that document is socket-only (the `agents` verb is not
+	// a hub op). Every pane read of the panel by a caller whose transport is not
+	// the local socket is refused with panel_private: watch, watch_all,
+	// capture, transcript. See panelReadableBy.
+	//
+	// Written ONCE, in Main, on the struct literal, from the one read of
+	// MAGMUX_AGENTS — before init(), the socket, the hub, the Streamer and the
+	// Firebase mirror exist — and never again. So there is no transition to
+	// race: nothing that serves a watch existed while it was false, and nothing
+	// ever needs evicting. Read without a lock for the same reason as headless:
+	// every goroutine that reads it starts after the write.
+	//
+	// Stated as a POSITIVE whose zero value is today's behaviour (a public
+	// panel), because every unit test builds a Magmux as a struct literal.
+	// startObservationWith refuses to run on a magmux whose panel is public,
+	// so "observation running" implies "panel private" by construction — for
+	// test literals too.
+	panelPrivate bool
+
 	rawState *term.State
 	quit     chan struct{}
 	quitOnce sync.Once
@@ -374,6 +398,38 @@ type Magmux struct {
 	// the connection's first Read, so a test can order the aggregate write's
 	// failure ahead of the reader deterministically instead of by load.
 	sockBeforeRead func(conn net.Conn)
+
+	// obs is the session-observation layer (the claudestate pipeline and the
+	// write path on its coordinator, obsHost in obspane.go), or nil
+	// when it was never started — which is the default. See
+	// startObservationIfEnabled in obspane.go for the switch and for why the
+	// switch exists.
+	//
+	// NOT guarded by treeMu, and it does not need to be: it is written and
+	// read on Main()'s goroutine only — started once the layout is final,
+	// stopped on the quit path — and nothing else in magmux refers to it. Same
+	// discipline as m.sockPath. The pipeline's own goroutines are handed a
+	// *Magmux for the pane port and never touch this field.
+	obs *obsHost
+
+	// obsDoc is the newest document the observation layer published, held for
+	// the surfaces that ANSWER A QUESTION rather than stream: the `agents`
+	// socket verb, and the MCP tool that translates it.
+	//
+	// It is a VALUE and not a pointer, and it is never assigned: a socket
+	// goroutine reads it while Main()'s goroutine starts and stops the
+	// pipeline, so a field that could be nil would need its own
+	// synchronisation on top of the one inside it. It carries its own mutex
+	// and knows whether observation is running; see obsStore in obssink.go.
+	obsDoc obsStore
+
+	// obsSinkDone is closed by the chrome sink's goroutine when it ends, which
+	// happens when Pipeline.Stop closes its subscription. Waited on by
+	// stopObservation, so that no sink is mid-write when the process exits —
+	// the same shutdown barrier Pipeline.Stop is, extended over the one sink
+	// that lives on magmux's side of the hub. Main()'s goroutine only, like
+	// obs above.
+	obsSinkDone chan struct{}
 }
 
 // claimSession atomically attempts to mark `path` as owned by `p`. Returns
@@ -425,7 +481,7 @@ func (m *Magmux) declareSession(id string, p *Pane) bool {
 // declaredByOtherLocked reports whether path is <id>.jsonl for an id another
 // pane declared. Caller holds claimedMu.
 func (m *Magmux) declaredByOtherLocked(path string, p *Pane) bool {
-	owner, ok := m.declaredSessions[strings.TrimSuffix(filepath.Base(path), ".jsonl")]
+	owner, ok := m.declaredSessions[strings.TrimSuffix(filepath.Base(path), claude.TranscriptSuffix)]
 	return ok && owner != p
 }
 
@@ -1458,6 +1514,14 @@ func (m *Magmux) inputLoop() {
 					m.focusNext()
 				case 'p':
 					m.togglePanel()
+				case 'a':
+					// Reveal the panel AND put it on the attention view, in
+					// one key. `p` then `v` does the same thing and stays; this
+					// exists because the observation layer's whole point is
+					// answering "which session needs me" without the person
+					// having to go looking, and two keys with a mode change
+					// between them is going looking.
+					m.showAttentionView()
 				case 's':
 					m.toggleStatusBar()
 				case 'r':

@@ -1,0 +1,13 @@
+This directory is DELIBERATELY EMPTY of *.meta.json files.
+
+It is the test data for "this session has exactly ZERO subagents", which
+validation-criteria.md AC4 requires to be reported DISTINCTLY from "unknown"
+(NFR5: no opinion is not the same as no). The session whose subagents/
+directory is ABSENT entirely is
+projects/-Users-user-dev-agent-fleet-sessions/3b90f6cc-1d47-4e20-8a3b-9f5e6c0d2a18
+-- it has no such directory, and that is the "unknown" case.
+
+This placeholder exists only because git does not track empty directories.
+It doubles as a negative control for the `*.meta.json` suffix filter: a
+counter that counts directory entries rather than matching the suffix will
+report 1 here instead of 0, and TestSubagentCountZeroIsNotUnknown will fail.

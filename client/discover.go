@@ -1,6 +1,9 @@
-package mcp
+package client
 
-// Session discovery for `magmux mcp`.
+// Session discovery: every magmux socket on this machine, and what each one
+// says about its panes. `magmux mcp` uses it to find sessions, and `magmux
+// agents focus` uses it to find the pane a session runs in from outside any
+// magmux. One copy, here, because mcp cannot import mux and both need it.
 //
 // magmux binds /tmp/magmux-<pid>.sock by default, or /tmp/magmux-<name>.sock
 // with --id, so discovery is a directory scan plus a probe. The probe is
@@ -34,8 +37,9 @@ import (
 	"github.com/MadAppGang/magmux/unixsock"
 )
 
-// sockdir.Dir lives in sockdir.go, alongside --sock-dir / MAGMUX_SOCK_DIR and
-// the startup reaper; Run sets it from sockdir.Resolve, and the path itself is
+// sockdir.Dir lives in sockdir/sockdir.go, alongside --sock-dir /
+// MAGMUX_SOCK_DIR and the startup reaper; a caller sets it from
+// sockdir.Resolve before discovering (mcp.Run does), and the path itself is
 // minted by Magmux.socketPath.
 
 // sockNamePattern matches both shapes: the pid default and a --id name. The
@@ -77,9 +81,9 @@ type SessionInfo struct {
 	Err       string
 }
 
-// discoverSessions scans for magmux sockets and probes them in parallel,
+// DiscoverSessions scans for magmux sockets and probes them in parallel,
 // returning within roughly budget.
-func discoverSessions(ctx context.Context, budget time.Duration) []SessionInfo {
+func DiscoverSessions(ctx context.Context, budget time.Duration) []SessionInfo {
 	if budget <= 0 {
 		budget = time.Second
 	}
@@ -163,7 +167,7 @@ func probeSocket(ctx context.Context, path string, timeout time.Duration) ([]map
 		timeout = time.Second
 	}
 	// unixsock reaches a socket at any depth and wraps its errors with %w, so
-	// discoverSessions' errors.Is classification still sees the errno.
+	// DiscoverSessions' errors.Is classification still sees the errno.
 	conn, err := unixsock.Dial(ctx, &net.Dialer{Timeout: timeout}, path)
 	if err != nil {
 		return nil, err

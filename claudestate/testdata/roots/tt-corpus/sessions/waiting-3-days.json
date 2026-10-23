@@ -1,0 +1,26 @@
+{
+  "pid": 1613,
+  "sessionId": "9e57a0d3-2b64-4c18-8ad7-16f0b9c4e237",
+  "cwd": "/Users/user/mag/memidx",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.273",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "memidx:@23.%38",
+  "messagingSocketPath": "/tmp/cc-socks/1613.sock",
+  "name": "memidx-blocked",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789440011204,
+  "status": "waiting",
+  "statusUpdatedAt": 1789440011204,
+  "waitingFor": "input needed"
+}

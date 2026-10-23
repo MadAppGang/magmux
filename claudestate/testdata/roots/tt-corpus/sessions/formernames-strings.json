@@ -1,0 +1,29 @@
+{
+  "pid": 46800,
+  "sessionId": "f1a27c90-6b48-4e35-9d01-8a5c3e7b2604",
+  "cwd": "/Users/user/mag/proxyapp",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.263",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "proxyapp:@7.%13",
+  "messagingSocketPath": "/tmp/cc-socks/46800.sock",
+  "name": "legacy-shape",
+  "nameSource": "user",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789699206204,
+  "status": "idle",
+  "statusUpdatedAt": 1789699206204,
+  "formerNames": [
+    "older-name",
+    "oldest-name"
+  ]
+}

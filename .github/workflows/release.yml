@@ -54,6 +54,26 @@ jobs:
           echo "Release notes ($(wc -c < /tmp/release-notes.md) bytes):"
           cat /tmp/release-notes.md
 
+      # A release is a tagged magmux built against a TAGGED claudestate. A
+      # pseudo-version pin is a development state (architecture §7): tag
+      # claudestate/vX.Y.Z on the merge commit and bump the root first.
+      - name: Refuse a release that pins claudestate at a pseudo-version
+        run: |
+          if grep -qE 'github.com/MadAppGang/magmux/claudestate v[^ ]*[0-9]{14}-[0-9a-f]{12}' go.mod; then
+            echo "::error::claudestate is pinned at a pseudo-version; tag claudestate/vX.Y.Z on the merge commit and bump before releasing magmux"
+            exit 1
+          fi
+
+      # claudestate/v* tags live in the same repository. GoReleaser would
+      # otherwise take the nearest tag of ANY family as the previous release.
+      # The `if` form is deliberate: under bash -e a trailing `[ -n "" ] && …`
+      # exits 1 and would fail the step on a first release.
+      - name: Pin GoReleaser's tags to the v* family
+        run: |
+          echo "GORELEASER_CURRENT_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          if [ -n "$prev" ]; then echo "GORELEASER_PREVIOUS_TAG=${prev}" >> "$GITHUB_ENV"; fi
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:

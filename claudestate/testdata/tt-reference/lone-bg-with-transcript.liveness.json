@@ -1,0 +1,8 @@
+{
+  "scenario": "lone-bg-with-transcript",
+  "root": "lone-bg-with-transcript",
+  "listing": "",
+  "liveness": {
+    "70021": "alive"
+  }
+}
