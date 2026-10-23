@@ -41,6 +41,27 @@ trusted. These three files are claudish's own live captures of Claude Code 2.1.2
 (`claudish/packages/cli/src/pane/test-fixtures/screens/`), copied unchanged: trust, bypass
 and onboarding. They hold text only, so every rune reads as non-faint.
 
+## `size-*.json`: small-width dialogs, text captures
+
+MTL-140 live captures taken by claudish: Claude Code 2.1.304 in a headless magmux 0.18.0
+pane started with `--no-status`, its size set through `COLUMNS`/`LINES`. The capture script
+is claudish's `ai-docs/sessions/mtl140-40col-20261021/capture.ts`. Each file holds `cols`,
+`rows`, `lines`, `spans` and `gate`: the live magmux 0.18.0 gate reading at the moment of
+capture.
+
+| file | what it holds |
+|---|---|
+| `size-40x24-ask-user-question` | the AskUserQuestion dialog at 40 columns; its footer wraps as `Enter to select · ↑/↓ to navigate · Esc` over `to cancel` |
+| `size-40x24-permission-bash` | the Bash permission dialog at 40 columns |
+| `size-40x24-permission-write-long-path` | the Write permission dialog for a long path at 40 columns |
+| `size-40x24-repl-boot-empty` | the idle, empty box after boot at 40 columns (no dialog) |
+| `size-80x24-dialog-trust` | the trust dialog at 80x24, from Claude Code 2.1.299 ("resize H1 live capture"); `gate` is null |
+
+Copied unchanged from `claudish/packages/cli/src/pane/test-fixtures/screens/`. They hold
+text only, so every rune reads as non-faint. No 40-column trust capture exists;
+`TestTrustDialogAt40Columns` derives one from `size-80x24-dialog-trust` by a deterministic
+re-wrap in the test, and no derived screen is stored here.
+
 ## `research-2.1.301-midturn.txt`: text capture (research F9)
 
 magmux text captures of a mid-turn send, one `=== title` block per screen, each row
