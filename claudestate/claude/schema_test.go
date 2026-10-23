@@ -19,6 +19,10 @@ package claude
 //     a test builds Claude records as its INPUT on purpose, and that is not a
 //     decoder.
 //
+// Two things are not walked: the one cited directory entry in decoderAllowlist,
+// and files ending _bb_test.go (blackBoxSuffix, cited there), whose literal
+// Claude words are a blind test's independent oracle.
+//
 // What it does not catch, so nobody mistakes it for a guarantee: a literal
 // split in two, and a word passed to a function. Comparison, switch, index and
 // tag are the shapes a second decoder actually gets written in.
@@ -62,6 +66,24 @@ func allowlisted(rel string) bool {
 	}
 	return false
 }
+
+// blackBoxSuffix names the ONE file-level exemption beside the allowlist.
+//
+// A *_bb_test.go file is a blind black-box test (Phase 6): written by an
+// external writer from the public contract alone, without seeing schema.go or
+// any other implementation file. Its literal Claude words ("waiting",
+// "permission prompt", "timestamp") are the INDEPENDENT ORACLE. Re-spelling
+// them through schema.go's constants would make the test agree with the
+// decoder by construction — a wrong constant would then be checked against
+// itself and pass — which is exactly what a black-box test exists to catch.
+// The exemption is by suffix, so it covers test files only (a non-test file
+// can never end in _test.go) and nothing else in the walk changes.
+const blackBoxSuffix = "_bb_test.go"
+
+const blackBoxCitation = "Phase 6 black-box tests: blind, written from the contract only; their literal " +
+	"Claude words are the independent oracle, and spelling them through schema.go would pass with a wrong constant"
+
+func blackBoxExempt(rel string) bool { return strings.HasSuffix(rel, blackBoxSuffix) }
 
 const schemaFile = "claude/schema.go"
 
@@ -226,7 +248,7 @@ func TestOnlySchemaFileDecodesClaudeStrings(t *testing.T) {
 	if len(claudeOnly) < 40 || len(words) < 40 {
 		t.Fatalf("the inventory is %d Claude-only literals and %d words; schema.go is not being read", len(claudeOnly), len(words))
 	}
-	var scanned, schema, claudeFiles int
+	var scanned, schema, claudeFiles, blackBox int
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -256,6 +278,10 @@ func TestOnlySchemaFileDecodesClaudeStrings(t *testing.T) {
 		if allowlisted(rel) {
 			return nil
 		}
+		if blackBoxExempt(rel) {
+			blackBox++
+			return nil
+		}
 		fset := token.NewFileSet()
 		file, err := parser.ParseFile(fset, p, nil, 0)
 		if err != nil {
@@ -280,6 +306,9 @@ func TestOnlySchemaFileDecodesClaudeStrings(t *testing.T) {
 	if schema != 1 {
 		t.Errorf("found %d %s files, want exactly 1", schema, schemaFile)
 	}
+	if blackBox == 0 {
+		t.Errorf("no %s file exists, so the black-box exemption is stale: delete it", blackBoxSuffix)
+	}
 	if scanned < 30 || claudeFiles < 8 {
 		t.Errorf("scanned %d files (%d in claude/): the walk is not reaching the module", scanned, claudeFiles)
 	}
@@ -296,6 +325,46 @@ func TestTheDecoderAllowlistIsOneCitedEntry(t *testing.T) {
 	}
 	if allowlisted("claude/doctor/doctor.go") || allowlisted("internal/difftestx/a.go") {
 		t.Fatal("the allowlist matches more than its two directories")
+	}
+	// The black-box suffix is the one exemption outside the map, held to the
+	// same terms: cited, and no wider than its name. Changing either is a
+	// deliberate edit to this test.
+	if blackBoxSuffix != "_bb_test.go" || !strings.Contains(blackBoxCitation, "Phase 6") ||
+		!strings.Contains(blackBoxCitation, "independent oracle") {
+		t.Fatalf("the black-box exemption must be _bb_test.go with its citation: %q -> %q", blackBoxSuffix, blackBoxCitation)
+	}
+	for rel, want := range map[string]bool{
+		"claude/records_bb_test.go":         true,
+		"pipeline/observations_bb_test.go":  true,
+		"claude/records_test.go":            false, // an ordinary test
+		"claude/records_bb.go":              false, // not a test file
+		"claude/bb_test.go":                 false, // no _bb_ suffix
+		"claude/records_bb_test.go.orig":    false,
+		"claude/records_bb_test_helpers.go": false,
+	} {
+		if got := blackBoxExempt(rel); got != want {
+			t.Errorf("blackBoxExempt(%q) = %v, want %v", rel, got, want)
+		}
+	}
+}
+
+// A planted decode in a file that is NOT a _bb_ test is still caught: the
+// exemption is decided on the file name before parsing, so the detector itself
+// is untouched, and an ordinary test decoding by Claude's key is a finding.
+func TestTheBlackBoxExemptionLeavesOrdinaryTestsGuarded(t *testing.T) {
+	claudeOnly, words := inventory(t, moduleRoot(t))
+	src := fmt.Sprintf("package p\nfunc f(raw string) bool { return raw == %q }\n", ValueWaitingPermission)
+	for _, rel := range []string{"claude/zz_test.go", "pipeline/zz_bbtest_test.go", "join/zz_bb.go"} {
+		if blackBoxExempt(rel) {
+			t.Fatalf("%s is exempt; only *%s is", rel, blackBoxSuffix)
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), rel, src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := decodeSites(file, claudeOnly, words, !strings.HasSuffix(rel, "_test.go")); len(got) != 1 {
+			t.Errorf("%s: %d findings for a planted comparison against %q, want 1", rel, len(got), ValueWaitingPermission)
+		}
 	}
 }
 
