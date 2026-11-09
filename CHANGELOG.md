@@ -11,6 +11,8 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-09
+
 ### Added
 
 - **`--view-sock`: a read-only unix socket.** magmux also binds
