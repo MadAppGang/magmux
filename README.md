@@ -62,6 +62,7 @@ the same for the status bar.
 | `-x SECS` | close SECS after a driver finishes (default: wait for a keypress) |
 | `--id NAME` | bind `magmux-NAME.sock` instead of the pid socket (not all digits) |
 | `--sock-dir DIR` | bind the IPC socket in DIR instead of `/tmp`, at any depth; exits 1 if DIR is unusable |
+| `--view-sock` | also bind a [read-only socket](#ipc-socket-protocol), `magmux-<id>.view`, for a client that may watch but not steer |
 
 [Remote control](#remote-control) — off unless you ask for it:
 
@@ -325,6 +326,51 @@ are all left alone — an `--id` name has no liveness oracle, so it is never
 touched. `SIGTERM`, `SIGINT` and `SIGHUP` now run the normal teardown, so a
 session ended that way removes its own socket and still delivers `results`; a
 second signal exits immediately.
+
+**The view socket: a second socket that can only read.** The socket above
+checks no credential: anything that can open it can type into every pane. When
+a second program should watch a session without being able to steer it, start
+magmux with `--view-sock`. It binds a read-only socket beside the control one,
+`magmux-<id>.view` in the same directory (pid or `--id`, the same `<id>`). Hand
+the viewer that path and nothing else. "Read-only" is not something the client
+claims on the wire; it follows from which socket the client opened, so there is
+no handshake and no token.
+
+A client on the view socket gets what a [`--view-token-file`](#a-viewer-that-cannot-type)
+token gets over HTTP: the connect-time snapshot and every event, the read verbs
+`capabilities`, `list`, `ops`, `capture` and `transcript` (directly or through
+`call`), `watch` / `unwatch` / `resync` in either mode, and any plugin op
+`--view-op` granted. Everything else is refused before it runs: `send`, `input`,
+`resize`, `open_pane`, `close_pane`, `focus`, `status`, `tint`, `overlay`,
+`pilot`, `agent`, plugin registration, and every plugin op not granted. A
+refusal with an `id` is answered with one code and one reason:
+
+```jsonc
+{"type":"send","id":7,"pane":0,"text":"ls"}
+// -> {"type":"reply","id":7,"ok":false,"code":"forbidden","reason":"read_only",
+//     "error":"\"send\" is not available on the read-only view socket"}
+```
+
+Without an `id` the refusal is silent, like every no-id failure. `capabilities`
+says which socket a client is on (`"readOnly": true` on the view socket,
+`false` on the control socket) and, on both, where the view socket is
+(`"viewSocket"`). A viewer never counts as a controller in the control panel.
+
+The view socket does not depend on `--controller`. `watch` (frames or notify)
+and `capture` work on any pane. `transcript` answers as it does on the control
+socket: it reads a Claude Code pane's own record whether the controller was
+declared with `--controller` or found from the pane's command line, and a pane
+with no controller (a shell, a replay with no Claude Code session behind it)
+answers `no_controller`, not `forbidden`.
+
+It is optional and changes nothing when absent: the control socket and its
+clients behave exactly as before. A view socket that cannot be bound is fatal
+at startup (`magmux: view socket PATH: ERROR`, exit 1, the control socket
+removed with it). It is removed on every exit path the control socket is, and
+the startup sweep removes a stale `magmux-<pid>.view` under the same proof of
+death. It is not named `….sock` on purpose: everything that discovers sessions
+(`magmux mcp`, claudish) looks for `magmux-*.sock`, and the view socket is not a
+second session.
 
 **Framing.** JSON Lines: one JSON object per line, terminated by `\n` (UTF-8).
 The stream is bidirectional but subscribers typically only read. Unknown event

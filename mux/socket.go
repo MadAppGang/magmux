@@ -228,6 +228,7 @@ func (m *Magmux) serveSocket(ln *net.UnixListener) {
 		m.shutdownSocket()
 		ln.Close()
 		os.Remove(sockPath)
+		m.closeViewSocket()
 		m.markSocketDone()
 	}()
 
@@ -358,7 +359,7 @@ func (m *Magmux) dispatchSocketMsg(msg sockMsg) (map[string]any, error) {
 func (m *Magmux) dispatchSocketVerb(msg sockMsg, done func(map[string]any, error)) (map[string]any, error) {
 	switch msg.Type {
 	case "capabilities":
-		return m.sockCapabilities()
+		return m.capabilitiesFor(msg.caller)
 
 	case "list":
 		return m.sockList()
