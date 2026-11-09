@@ -512,3 +512,36 @@ func TestValidSocketIDRejectsPurelyNumeric(t *testing.T) {
 		}
 	}
 }
+
+// TestReapStaleViewSockets: the read-only view socket (--view-sock) of a
+// pid-named magmux goes stale with its control socket and is swept under the
+// same rules — a dead owner's is removed, a live owner's is kept, a name that
+// does not round-trip is not ours, and a regular file is not a socket.
+func TestReapStaleViewSockets(t *testing.T) {
+	dir := sockTestDir(t)
+	dead := deadPid(t)
+	stale := filepath.Join(dir, fmt.Sprintf("magmux-%d.view", dead))
+	mkSocket(t, stale)
+	live := filepath.Join(dir, fmt.Sprintf("magmux-%d.view", livePid(t)))
+	mkSocket(t, live)
+	padded := filepath.Join(dir, fmt.Sprintf("magmux-0%d.view", dead))
+	mkSocket(t, padded)
+	regular := filepath.Join(dir, fmt.Sprintf("magmux-%d.view", deadPid(t)))
+	if err := os.WriteFile(regular, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(dir, fmt.Sprintf("magmux-%d.viewer", dead))
+	mkSocket(t, other)
+
+	if n := ReapStale(dir, "", time.Second); n != 1 {
+		t.Errorf("removed %d, want 1", n)
+	}
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Errorf("dead owner's view socket survived: %v", err)
+	}
+	for _, keep := range []string{live, padded, regular, other} {
+		if _, err := os.Lstat(keep); err != nil {
+			t.Errorf("%s was removed: %v", filepath.Base(keep), err)
+		}
+	}
+}

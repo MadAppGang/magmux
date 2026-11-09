@@ -11,6 +11,22 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+### Added
+
+- **`--view-sock`: a read-only unix socket.** magmux also binds
+  `magmux-<id>.view` beside the control socket. A client on it gets what a
+  `--listen` view token gets: the event stream, `capabilities`, `list`, `ops`,
+  `capture`, `transcript`, `watch` / `unwatch` / `resync`, and `--view-op`
+  grants. Everything else (`send`, `input`, `resize`, `open_pane`,
+  `close_pane`, `focus`, `status`, `tint`, `overlay`, `pilot`, `agent`, plugin
+  registration) is refused with code `forbidden`, reason `read_only`. The gate
+  is the view token's rule (`auth.Store`), checked on the socket before any
+  verb runs. `capabilities` now reports `readOnly` and, when the flag is set,
+  `viewSocket`. The flag is optional and the control socket is unchanged. A
+  view socket that cannot be bound stops magmux at startup. The startup sweep
+  removes a dead pid's stale `magmux-<pid>.view`. The name does not end in
+  `.sock`, so tools that discover sessions by `magmux-*.sock` do not see it.
+
 ## [0.18.1] - 2026-10-21
 
 ### Fixed
