@@ -1,5 +1,5 @@
-github.com/MadAppGang/magmux/claudestate v0.0.0-20261114013652-c8f1127774c3 h1:I6UquM47vYR5nVdJhi2YSGmmroT/ZSfgmQ1eY0BQbsc=
-github.com/MadAppGang/magmux/claudestate v0.0.0-20261114013652-c8f1127774c3/go.mod h1:CfybvHvLQCsAsjHzvdrDGo+twEnMLsVRuhVe1SzR5EM=
+github.com/MadAppGang/magmux/claudestate v0.1.0 h1:PRMI6sb/qNEzLLLHdBs42Wy2HUKyktopKJn7iTikcas=
+github.com/MadAppGang/magmux/claudestate v0.1.0/go.mod h1:CfybvHvLQCsAsjHzvdrDGo+twEnMLsVRuhVe1SzR5EM=
 github.com/fsnotify/fsnotify v1.9.0 h1:2Ml+OJNzbYCTzsxtv8vKSFD9PbJjmhYF14k/jKC7S9k=
 github.com/fsnotify/fsnotify v1.9.0/go.mod h1:8jBTzvmWwFyi3Pb8djgCCO5IBqzKJ/Jwo8TRcHyHii0=
 golang.org/x/sys v0.42.0 h1:omrd2nAlyT5ESRdCLYdm3+fMfNFE/+Rf4bDIQImRJeo=

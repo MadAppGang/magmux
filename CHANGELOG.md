@@ -11,6 +11,8 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-14
+
 ### Added
 
 - **`claudestate`, the Claude Code observation library**, as a nested module
@@ -75,6 +77,7 @@ commit subjects and remain on the
   panel (`capture`, `transcript`, `watch`, `watch_all`) `panel_private`, as an
   off-box caller is refused. A viewer sees one magmux, never every Claude Code
   session on the machine.
+- magmux now depends on claudestate v0.1.0, a tagged module.
 
 ### Fixed
 
