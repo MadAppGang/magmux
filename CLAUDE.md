@@ -2304,23 +2304,27 @@ the documented socket, and nothing in the Go binary depends on it.
 
 ## Release
 
-**Before the next magmux release: tag the library and bump the root.** Until
-claudestate has a tag, the root pins it at a pseudo-version, and
-`.github/workflows/release.yml` REFUSES to release with one ("Refuse a release
-that pins claudestate at a pseudo-version"). So the next release run starts
-with, in order:
+**A claudestate change reaches a magmux release only through a library tag.**
+The root pins claudestate at a tag, and `.github/workflows/release.yml`
+REFUSES to release while the pin is a pseudo-version ("Refuse a release that
+pins claudestate at a pseudo-version"). So a release that needs a library
+change starts with, in order:
 
-1. Tag `claudestate/v0.1.0` on the MERGE commit of the PR that brought
-   claudestate in (it was merged with a merge commit precisely so the pinned
-   commit stays an ancestor of main): `git tag -a claudestate/v0.1.0 -m "..."
-   <merge-sha>`, then `git push origin refs/tags/claudestate/v0.1.0`. The
-   release workflow's `v*` trigger never fires on it: `*` does not match `/`.
-2. Warm the module proxy so the tag resolves for everyone:
-   `GOPROXY=https://proxy.golang.org GOWORK=off go list -m github.com/MadAppGang/magmux/claudestate@v0.1.0`.
-3. Bump the root: `GOWORK=off go get github.com/MadAppGang/magmux/claudestate@v0.1.0`,
-   `GOWORK=off go mod tidy`, and `go -C demo/rc/driver mod tidy`; commit and
-   merge that, and only then follow the steps below. CI's "Pin is current"
-   ignores a tagged pin; the release gate owns that case.
+1. Merge the library change to main with a MERGE commit, so the commit the
+   root may have pinned while it was in review stays an ancestor of main.
+2. Tag that merge commit and push the tag as an explicit ref:
+   `git tag -a claudestate/vX.Y.Z -m "..." <merge-sha>`, then
+   `git push origin refs/tags/claudestate/vX.Y.Z`. The release workflow's `v*`
+   trigger never fires on it: `*` does not match `/`.
+3. Warm the module proxy so the tag resolves for everyone:
+   `GOPROXY=https://proxy.golang.org GOWORK=off go list -m github.com/MadAppGang/magmux/claudestate@vX.Y.Z`.
+4. Bump the root on the release-prep branch:
+   `GOWORK=off go get github.com/MadAppGang/magmux/claudestate@vX.Y.Z`,
+   `GOWORK=off go mod tidy`, and `go -C demo/rc/driver mod tidy`; only then
+   follow the steps below. CI's "Pin is current" ignores a tagged pin; the
+   release gate owns that case.
+
+The first was `claudestate/v0.1.0`, on 9888bab, pinned by the root from magmux 0.20.0.
 
 The release workflow also pins GoReleaser's own tag view to the `v*` family
 (`GORELEASER_CURRENT_TAG` / `GORELEASER_PREVIOUS_TAG`), so a `claudestate/v*`
