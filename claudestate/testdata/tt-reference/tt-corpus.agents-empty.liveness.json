@@ -1,0 +1,30 @@
+{
+  "scenario": "tt-corpus.agents-empty",
+  "root": "tt-corpus",
+  "listing": "agents/empty.json",
+  "liveness": {
+    "1000": "alive",
+    "1061": "alive",
+    "15775": "alive",
+    "1613": "alive",
+    "1724": "alive",
+    "1828": "alive",
+    "1926": "alive",
+    "1971": "alive",
+    "2000": "alive",
+    "2063": "alive",
+    "2196": "alive",
+    "2279": "alive",
+    "2348": "alive",
+    "25983": "alive",
+    "44231": "alive",
+    "46799": "alive",
+    "46800": "alive",
+    "56526": "alive",
+    "65863": "alive",
+    "78761": "alive",
+    "98158": "alive",
+    "98693": "alive",
+    "999001": "dead"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "pid": 98158,
+  "sessionId": "5b9e2c84-3a17-4f60-8d25-e1c7b0a94f36",
+  "cwd": "/Users/user/dotfiles",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.274",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "kappa:@50.%101",
+  "messagingSocketPath": "/tmp/cc-socks/98158.sock",
+  "name": "kappa-long-busy",
+  "nameSource": "user",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789697351204,
+  "status": "busy",
+  "statusUpdatedAt": 1789697351204
+}

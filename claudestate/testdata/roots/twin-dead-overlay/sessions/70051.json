@@ -1,0 +1,23 @@
+{
+  "pid": 70051,
+  "sessionId": "20000000-0000-4000-8000-000000000051",
+  "cwd": "/Users/user/dev/overlay-reg",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.280",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle"
+  ],
+  "kind": "bg",
+  "jobId": "tdo00001",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "messagingSocketPath": "/tmp/cc-socks/70051.sock",
+  "name": "overlay-registry-name",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789699206204,
+  "status": "idle",
+  "statusUpdatedAt": 1789699206204
+}

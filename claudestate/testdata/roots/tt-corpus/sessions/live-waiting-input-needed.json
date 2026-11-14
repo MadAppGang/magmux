@@ -1,0 +1,26 @@
+{
+  "pid": 15775,
+  "sessionId": "7d1e4b92-8a0c-4f37-b6d5-2e91c3a05f48",
+  "cwd": "/Users/user/mag/omega",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.273",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "omega:@15.%56",
+  "messagingSocketPath": "/tmp/cc-socks/15775.sock",
+  "name": "omega-review",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789697111204,
+  "status": "waiting",
+  "statusUpdatedAt": 1789697111204,
+  "waitingFor": "input needed"
+}

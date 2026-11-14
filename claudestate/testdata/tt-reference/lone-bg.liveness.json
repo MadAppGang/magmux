@@ -1,0 +1,8 @@
+{
+  "scenario": "lone-bg",
+  "root": "lone-bg",
+  "listing": "",
+  "liveness": {
+    "65863": "alive"
+  }
+}

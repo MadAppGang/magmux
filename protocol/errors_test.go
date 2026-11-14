@@ -63,6 +63,9 @@ func TestReasonOfAndTypedOfWorkThroughWrapping(t *testing.T) {
 func TestNewCodesAndReasonsAreTheWireSpelling(t *testing.T) {
 	want := map[string]string{
 		CodeNotAccepted:        "not_accepted",
+		CodeObsOff:             "obs_off",
+		CodeObsPending:         "obs_pending",
+		CodePanelPrivate:       "panel_private",
 		ReasonStarting:         "starting",
 		ReasonTerminalNotReady: "terminal_not_ready",
 		ReasonNoInputBox:       "no_input_box",

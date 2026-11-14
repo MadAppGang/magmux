@@ -1,0 +1,42 @@
+# Liveness oracle for the `sessions/` test-data directory.
+#
+# PROVENANCE: SYNTHETIC — this file has no counterpart on disk. It exists
+# because tests MUST NOT probe live pids (a pid in this data could collide with a
+# real process on the test machine, and the answer would then depend on what
+# else is running). The implementation must therefore accept an injected
+# liveness oracle; see api-surface.md, capability C2.
+#
+# Every pid that appears as a file in sessions/ is listed here exactly once,
+# with the answer the oracle must give. Nothing else is live.
+#
+# FORMAT: <pid> <alive|dead>   — '#' begins a comment, blank lines ignored.
+
+98198 alive
+98693 alive
+1724  alive
+15775 alive
+1828  alive
+45682 alive
+96632 alive
+98299 alive
+# 76136 was added in fix round 2: former names written as objects, Claude Code 2.1.276.
+76136 alive
+
+60001 dead
+60002 alive
+60003 alive
+60004 alive
+60005 alive
+60006 alive
+60007 alive
+60008 alive
+60009 alive
+60010 alive
+60012 alive
+
+# 60011.json is the filename/record pid disagreement record. BOTH candidate
+# pids are listed, with DIFFERENT answers, so that a test can detect which one
+# the implementation used. See test-plan.md, criterion R1.2c, and the
+# ambiguity raised in api-surface.md §4.
+60011 dead
+60099 alive

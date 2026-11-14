@@ -105,6 +105,11 @@ func (m *Magmux) viewerGate(msg sockMsg) (grant bool, err error) {
 		// Socket-only protocols with no op behind them; both steer what the
 		// panel and the status bar report.
 		return false, errReadOnly(name)
+	case "agents":
+		// A read, but socket-only and with no op behind it: the document lists
+		// every Claude Code session on the machine, which no view token can
+		// read. Not registered, so the lookup below would let it through.
+		return false, errReadOnly(name)
 	case "call":
 		name = strings.TrimSpace(msg.Op)
 		if name == "" {

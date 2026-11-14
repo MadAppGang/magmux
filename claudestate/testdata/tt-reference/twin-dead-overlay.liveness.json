@@ -1,0 +1,8 @@
+{
+  "scenario": "twin-dead-overlay",
+  "root": "twin-dead-overlay",
+  "listing": "",
+  "liveness": {
+    "70051": "dead"
+  }
+}

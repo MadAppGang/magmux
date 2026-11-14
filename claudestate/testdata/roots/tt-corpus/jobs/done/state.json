@@ -1,0 +1,28 @@
+{
+  "state": "done",
+  "detail": "SYNTHETIC detail",
+  "tempo": "idle",
+  "inFlight": {
+    "kinds": [],
+    "queued": 0,
+    "tasks": 0
+  },
+  "tokens": 47104,
+  "children": null,
+  "linkScanOffset": 2101161,
+  "linkScanPath": "/testdata/projects/-Users-user-proj-h/33333333-3333-4333-8333-333333333333.jsonl",
+  "template": "bg",
+  "bgIsolation": "none",
+  "name": "SYNTHETIC name",
+  "nameSource": "auto",
+  "sessionId": "33333333-3333-4333-8333-333333333333",
+  "resumeSessionId": "33333333-3333-4333-8333-333333333333",
+  "daemonShort": "done",
+  "cliVersion": "2.1.233",
+  "cwd": "/Users/user/dotfiles",
+  "createdAt": "2026-08-17T07:34:10.528Z",
+  "updatedAt": "2026-09-11T00:41:46.000Z",
+  "firstTerminalAt": "2026-08-17T07:47:08.443Z",
+  "backend": "daemon",
+  "lastTerminalAt": "2026-09-11T00:41:46.000Z"
+}

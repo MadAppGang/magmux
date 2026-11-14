@@ -1,0 +1,452 @@
+{
+  "epoch": "2026-09-16T07:53:20Z",
+  "sessions": [
+    {
+      "id": "8e2d4b17-0c93-4a6f-b512-77c3ad9e4f60",
+      "pid": 1724,
+      "paneId": null,
+      "name": "sampleapp-catalog-v3-review",
+      "status": "waiting",
+      "statusRaw": "waiting",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T07:38:17Z",
+      "waitingOn": "input",
+      "waitingOnRaw": "input needed",
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": 0,
+      "color": "magenta",
+      "attention": {
+        "needed": true,
+        "reason": "it is waiting for you to type something, for 15m 3s"
+      },
+      "fault": {
+        "apiErrors": 1,
+        "detail": "API Error: Connection error."
+      }
+    },
+    {
+      "id": "6c5b2f09-3a81-4d76-99e4-0f8c1b3a7d52",
+      "pid": 1828,
+      "paneId": null,
+      "name": "magmux-vt-parser",
+      "status": "shell",
+      "statusRaw": "shell",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T07:37:06Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "it has handed its terminal to a shell, for 16m 14s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "3b90f6cc-1d47-4e20-8a3b-9f5e6c0d2a18",
+      "pid": 15775,
+      "paneId": null,
+      "name": "agent-fleet-sessions",
+      "status": "shell",
+      "statusRaw": "shell",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T07:50:55Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": 0,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "it has handed its terminal to a shell, for 2m 25s"
+      },
+      "fault": {
+        "apiErrors": 0
+      }
+    },
+    {
+      "id": "d0c31e88-4f17-4a52-8e6d-b9a70c55f213",
+      "pid": 45682,
+      "paneId": null,
+      "name": "release-v0-12-0",
+      "previousNames": [
+        "magmux-release",
+        "release-prep"
+      ],
+      "previousNameDetail": [
+        {
+          "name": "magmux-release",
+          "until": null
+        },
+        {
+          "name": "release-prep",
+          "until": null
+        }
+      ],
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T07:36:10Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": 0,
+      "color": "yellow",
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 17m 10s"
+      },
+      "fault": {
+        "apiErrors": 0
+      }
+    },
+    {
+      "id": "b4e77a91-2c08-4d3f-8571-c6920ae3b148",
+      "pid": 60001,
+      "paneId": null,
+      "name": "dead-pid-stale-record",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-13T07:53:20Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 72h 0m"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "7a3e1c50-8b29-4f64-a0d3-5c81e2f79b46",
+      "pid": 60002,
+      "paneId": null,
+      "name": "permission-prompt-session",
+      "status": "waiting",
+      "statusRaw": "waiting",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T07:51:20Z",
+      "waitingOn": "permission",
+      "waitingOnRaw": "permission prompt",
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": true,
+        "reason": "it is holding a permission prompt open, for 2m 0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "e91b06d7-5a44-4c8e-b230-18f7cd6e9042",
+      "pid": 60003,
+      "paneId": null,
+      "name": "unknown-status-session",
+      "status": null,
+      "statusRaw": "compacting",
+      "confidence": null,
+      "statusSince": "2026-09-16T07:51:40Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": null,
+        "reason": "the tool reported a status this build does not recognise (\"compacting\")"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "c5d8931e-70af-4b26-9c14-2e6083fa7d59",
+      "pid": 60006,
+      "paneId": null,
+      "name": "waiting-without-waitingfor",
+      "status": "waiting",
+      "statusRaw": "waiting",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T07:51:30Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": true,
+        "reason": "it is waiting, and what for was not determined, for 1m 50s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "91ac4f62-3e07-48d1-b5a9-70c2e8134db6",
+      "pid": 60007,
+      "paneId": null,
+      "name": "future-schema-session",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T07:51:50Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 1m 30s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "04bf7e39-6c52-4a80-91d7-e3f5a2c60b81",
+      "pid": 60008,
+      "paneId": null,
+      "name": "key-order-shuffled",
+      "status": "waiting",
+      "statusRaw": "waiting",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T07:38:17Z",
+      "waitingOn": "input",
+      "waitingOnRaw": "input needed",
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": true,
+        "reason": "it is waiting for you to type something, for 15m 3s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "aa16c8f4-df20-4937-8b65-19e740c3a2d8",
+      "pid": 60009,
+      "paneId": null,
+      "name": "malformed-tmux-session",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T07:52:00Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 1m 20s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "1d6e40a7-8f23-4b19-a057-c2e6b91d4f38",
+      "pid": 60010,
+      "paneId": null,
+      "name": "long-idle-three-days",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-13T07:53:20Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 72h 0m"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "33f0a6d5-b284-4e71-9c06-5da8371fe2b9",
+      "pid": 60012,
+      "paneId": null,
+      "name": "live-pid-dead-pane",
+      "status": "busy",
+      "statusRaw": "busy",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T07:52:15Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "it is working, for 1m 5s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "58c93b1a-047e-4d62-bf83-a6104e7d29c5",
+      "pid": 60099,
+      "paneId": null,
+      "name": "filename-pid-mismatch",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T07:52:10Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 1m 10s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "d1f05570-4e47-4517-b4c5-9bda85d3bd6d",
+      "pid": 76136,
+      "paneId": null,
+      "name": "fleet-migrate",
+      "previousNames": [
+        "agent-fleet-sessions"
+      ],
+      "previousNameDetail": [
+        {
+          "name": "agent-fleet-sessions",
+          "until": "2026-09-18T15:32:11.896Z",
+          "session": "d1f05570-4e47-4517-b4c5-9bda85d3bd6d"
+        }
+      ],
+      "status": "busy",
+      "statusRaw": "busy",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T15:33:38.709Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "it is working, for -55h 40m"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "2f7a8e14-9c63-4051-b7d8-3e1a6f90c4b7",
+      "pid": 96632,
+      "paneId": null,
+      "name": "scratch-no-tmux",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T07:29:11Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": 0,
+      "color": "purple",
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 24m 9s"
+      },
+      "fault": {
+        "apiErrors": 0
+      }
+    },
+    {
+      "id": "c874de20-33c1-480a-ba90-8ae3f2f332c4",
+      "pid": 98198,
+      "paneId": null,
+      "name": "agent-src-15",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T05:31:32Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": 0,
+      "color": "cyan",
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 2h 21m"
+      },
+      "fault": {
+        "apiErrors": 0
+      }
+    },
+    {
+      "id": "5f1c9a02-7b4e-4c31-9d88-2a6f0e11b7c3",
+      "pid": 98299,
+      "paneId": null,
+      "name": "sampleapp-catalog-v3",
+      "status": "busy",
+      "statusRaw": "busy",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T05:31:16Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": 23,
+      "color": "teal",
+      "attention": {
+        "needed": false,
+        "reason": "it is working, for 2h 22m"
+      },
+      "fault": {
+        "apiErrors": 0
+      }
+    },
+    {
+      "id": "a1478d55-6e02-4bb9-93cf-01d2e8f47a6b",
+      "pid": 98693,
+      "paneId": null,
+      "name": "multilayer-support-40",
+      "status": "busy",
+      "statusRaw": "busy",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-16T07:52:17Z",
+      "waitingOn": null,
+      "processAlive": null,
+      "paneAlive": null,
+      "subagentCount": 3,
+      "color": "orange",
+      "attention": {
+        "needed": true,
+        "reason": "it hit 3 API-level errors: API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"quota exceeded\"}}"
+      },
+      "fault": {
+        "apiErrors": 3,
+        "detail": "API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"quota exceeded\"}}"
+      }
+    }
+  ]
+}

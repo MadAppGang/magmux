@@ -1,0 +1,25 @@
+{
+  "pid": 999001,
+  "sessionId": "c8b2e930-5f41-4a7d-9e08-3b6c1d4f7a25",
+  "cwd": "/Users/user/mag/gone",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.263",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "gone:@99.%991",
+  "messagingSocketPath": "/tmp/cc-socks/999001.sock",
+  "name": "left-over",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789440011204,
+  "status": "idle",
+  "statusUpdatedAt": 1789440011204
+}

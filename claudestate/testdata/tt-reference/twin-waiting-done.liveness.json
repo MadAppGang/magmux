@@ -1,0 +1,8 @@
+{
+  "scenario": "twin-waiting-done",
+  "root": "twin-waiting-done",
+  "listing": "",
+  "liveness": {
+    "70002": "dead"
+  }
+}

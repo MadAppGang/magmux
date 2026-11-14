@@ -1,0 +1,33 @@
+{
+  "state": "blocked",
+  "detail": "SYNTHETIC detail",
+  "tempo": "idle",
+  "inFlight": {
+    "kinds": [],
+    "queued": 0,
+    "tasks": 0
+  },
+  "tokens": 427976,
+  "children": [
+    {
+      "id": "158",
+      "href": "https://example.invalid/pull/158",
+      "kind": "pr"
+    }
+  ],
+  "linkScanOffset": 2101161,
+  "linkScanPath": "/testdata/projects/-Users-user-mag-proxyapp--claude-worktrees-resume-message/4d09bc19-27e6-4f6e-9512-0f7711a6b970.jsonl",
+  "template": "bg",
+  "bgIsolation": "none",
+  "name": "SYNTHETIC name",
+  "nameSource": "auto",
+  "sessionId": "ea780079-5a4c-444f-a80c-c6a7b29bf62c",
+  "resumeSessionId": "4d09bc19-27e6-4f6e-9512-0f7711a6b970",
+  "daemonShort": "blocked-no-needs-tempo-idle",
+  "cliVersion": "2.1.233",
+  "cwd": "/Users/user/mag/proxyapp/.claude/worktrees/resume-message",
+  "createdAt": "2026-08-08T07:59:07.462Z",
+  "updatedAt": "2026-08-10T00:42:53.957Z",
+  "firstTerminalAt": "2026-08-09T03:14:41.399Z",
+  "backend": "daemon"
+}

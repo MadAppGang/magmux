@@ -1,0 +1,184 @@
+{
+  "counts": {
+    "attention": 1,
+    "byKind": {
+      "background": 1,
+      "interactive": 0,
+      "unknown": 0
+    },
+    "byStatus": {
+      "blocked": 1,
+      "busy": 0,
+      "done": 0,
+      "failed": 0,
+      "idle": 0,
+      "shell": 0,
+      "unknown": 0,
+      "waiting": 0,
+      "working": 0
+    },
+    "dead": 0,
+    "live": 0,
+    "total": 1,
+    "unknown": 1
+  },
+  "notCapable": [
+    "time-transitions"
+  ],
+  "observedAt": "2026-10-21T09:35:04.848Z",
+  "schema": 1,
+  "sessions": [
+    {
+      "advisories": [
+        {
+          "code": "status-since-unverifiable",
+          "reason": "the record names no transcript"
+        },
+        {
+          "code": "beyond-transcript-retention",
+          "recordAgeMs": 2876164848,
+          "retentionMs": 2592000000
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 2876164848,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/dev/sample",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": null,
+      "listedBy": [
+        "jobs"
+      ],
+      "live": null,
+      "liveReason": "job-beyond-transcript-retention",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:04.848Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "working",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 2876164848,
+      "recordUpdatedAt": "2026-09-18T02:39:00.000Z",
+      "resumeSessionId": "10000000-0000-4000-8000-000000000001",
+      "sessionId": "10000000-0000-4000-8000-000000000001",
+      "shortId": "wtb00001",
+      "sources": [
+        "jobs"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-18T02:00:00.000Z",
+      "status": "blocked",
+      "statusAgeMs": 2876164848,
+      "statusSince": "2026-09-18T02:39:00.000Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": "blocked",
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": null,
+      "transcriptCollected": false,
+      "waitReason": ""
+    }
+  ],
+  "sources": {
+    "agents-cli": {
+      "advisories": [
+        {
+          "code": "source-not-ok",
+          "error": "claude agents --json: exit status 127",
+          "role": "corroboration",
+          "source": "agents-cli"
+        }
+      ],
+      "ageMs": null,
+      "counters": {
+        "background": 0,
+        "entries": 0,
+        "interactive": 0,
+        "lastSpawnMs": 37,
+        "spawns": 1,
+        "waitedMs": 0
+      },
+      "id": "agents-cli",
+      "labels": {
+        "agentsCache": "miss",
+        "backoffUntil": "2026-10-21T09:35:06.886Z",
+        "command": "claude agents --json",
+        "crossChecksSuppressed": "true",
+        "trigger": "startup"
+      },
+      "lastError": "claude agents --json: exit status 127",
+      "observedAt": null,
+      "ok": false,
+      "path": "",
+      "role": "corroboration",
+      "stale": false,
+      "staleAfterMs": 30000,
+      "watch": null
+    },
+    "jobs": {
+      "advisories": [],
+      "ageMs": 0,
+      "counters": {
+        "dirs": 1,
+        "entries": 1,
+        "failures": 0,
+        "nonTerminal": 1,
+        "parseErrors": 0,
+        "records": 1
+      },
+      "id": "jobs",
+      "labels": {},
+      "lastError": null,
+      "observedAt": "2026-10-21T09:35:04.848Z",
+      "ok": true,
+      "path": "/testdata/jobs",
+      "role": "authoritative",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    },
+    "registry": {
+      "advisories": [],
+      "ageMs": 0,
+      "counters": {
+        "failures": 0,
+        "ignoredKeyFiles": 0,
+        "parseErrors": 0,
+        "records": 0,
+        "retriesDeferred": 0
+      },
+      "id": "registry",
+      "labels": {
+        "state": "absent"
+      },
+      "lastError": null,
+      "observedAt": "2026-10-21T09:35:04.848Z",
+      "ok": true,
+      "path": "/testdata/sessions",
+      "role": "authoritative",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    }
+  },
+  "tt": "devel",
+  "warnings": [
+    {
+      "code": "source-not-ok",
+      "error": "claude agents --json: exit status 127",
+      "role": "corroboration",
+      "source": "agents-cli"
+    }
+  ]
+}

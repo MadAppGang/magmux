@@ -1,0 +1,122 @@
+{
+  "counts": {
+    "attention": 0,
+    "byKind": {
+      "background": 0,
+      "interactive": 0,
+      "unknown": 0
+    },
+    "byStatus": {
+      "blocked": 0,
+      "busy": 0,
+      "done": 0,
+      "failed": 0,
+      "idle": 0,
+      "shell": 0,
+      "unknown": 0,
+      "waiting": 0,
+      "working": 0
+    },
+    "dead": 0,
+    "live": 0,
+    "total": 0,
+    "unknown": 0
+  },
+  "notCapable": [
+    "time-transitions"
+  ],
+  "observedAt": "2026-10-21T09:35:05.325Z",
+  "schema": 1,
+  "sessions": [],
+  "sources": {
+    "agents-cli": {
+      "advisories": [
+        {
+          "code": "source-not-ok",
+          "error": "claude agents --json: exit status 127",
+          "role": "corroboration",
+          "source": "agents-cli"
+        }
+      ],
+      "ageMs": null,
+      "counters": {
+        "background": 0,
+        "entries": 0,
+        "interactive": 0,
+        "lastSpawnMs": 28,
+        "spawns": 1,
+        "waitedMs": 0
+      },
+      "id": "agents-cli",
+      "labels": {
+        "agentsCache": "miss",
+        "backoffUntil": "2026-10-21T09:35:07.354Z",
+        "command": "claude agents --json",
+        "crossChecksSuppressed": "true",
+        "trigger": "startup"
+      },
+      "lastError": "claude agents --json: exit status 127",
+      "observedAt": null,
+      "ok": false,
+      "path": "",
+      "role": "corroboration",
+      "stale": false,
+      "staleAfterMs": 30000,
+      "watch": null
+    },
+    "jobs": {
+      "advisories": [],
+      "ageMs": 0,
+      "counters": {
+        "dirs": 2,
+        "entries": 2,
+        "failures": 2,
+        "nonTerminal": 0,
+        "parseErrors": 2,
+        "records": 0
+      },
+      "id": "jobs",
+      "labels": {},
+      "lastError": null,
+      "observedAt": "2026-10-21T09:35:05.325Z",
+      "ok": true,
+      "path": "/testdata/jobs",
+      "role": "authoritative",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    },
+    "registry": {
+      "advisories": [],
+      "ageMs": 0,
+      "counters": {
+        "failures": 0,
+        "ignoredKeyFiles": 0,
+        "parseErrors": 0,
+        "records": 0,
+        "retriesDeferred": 0
+      },
+      "id": "registry",
+      "labels": {
+        "state": "absent"
+      },
+      "lastError": null,
+      "observedAt": "2026-10-21T09:35:05.325Z",
+      "ok": true,
+      "path": "/testdata/sessions",
+      "role": "authoritative",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    }
+  },
+  "tt": "devel",
+  "warnings": [
+    {
+      "code": "source-not-ok",
+      "error": "claude agents --json: exit status 127",
+      "role": "corroboration",
+      "source": "agents-cli"
+    }
+  ]
+}

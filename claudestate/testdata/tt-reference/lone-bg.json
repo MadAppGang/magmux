@@ -1,0 +1,207 @@
+{
+  "counts": {
+    "attention": 1,
+    "byKind": {
+      "background": 0,
+      "interactive": 1,
+      "unknown": 0
+    },
+    "byStatus": {
+      "blocked": 0,
+      "busy": 0,
+      "done": 0,
+      "failed": 0,
+      "idle": 0,
+      "shell": 0,
+      "unknown": 0,
+      "waiting": 1,
+      "working": 0
+    },
+    "dead": 0,
+    "live": 1,
+    "total": 1,
+    "unknown": 0
+  },
+  "notCapable": [
+    "time-transitions"
+  ],
+  "observedAt": "2026-10-21T09:35:05.182Z",
+  "schema": 1,
+  "sessions": [
+    {
+      "advisories": [],
+      "attention": true,
+      "blockedForMs": 2536190283,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.278",
+      "cwd": "/Users/user/dotfiles",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": true,
+      "liveReason": "proc-only",
+      "messagingSocketPath": "/tmp/cc-socks/65863.sock",
+      "name": "flock-setup",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:05.182Z",
+      "paneAlive": null,
+      "pid": 65863,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "waiting",
+      "rawWaitingFor": "input needed",
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "857ef435-aa77-46f9-bb28-ca9c5374be9d",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-22T01:04:43.526Z",
+      "status": "waiting",
+      "statusAgeMs": 2536190283,
+      "statusSince": "2026-09-22T01:05:14.899Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": null,
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": "input-needed"
+    }
+  ],
+  "sources": {
+    "agents-cli": {
+      "advisories": [
+        {
+          "code": "source-not-ok",
+          "error": "claude agents --json: exit status 127",
+          "role": "corroboration",
+          "source": "agents-cli"
+        }
+      ],
+      "ageMs": null,
+      "counters": {
+        "background": 0,
+        "entries": 0,
+        "interactive": 0,
+        "lastSpawnMs": 23,
+        "spawns": 1,
+        "waitedMs": 0
+      },
+      "id": "agents-cli",
+      "labels": {
+        "agentsCache": "miss",
+        "backoffUntil": "2026-10-21T09:35:07.205Z",
+        "command": "claude agents --json",
+        "crossChecksSuppressed": "true",
+        "trigger": "startup"
+      },
+      "lastError": "claude agents --json: exit status 127",
+      "observedAt": null,
+      "ok": false,
+      "path": "",
+      "role": "corroboration",
+      "stale": false,
+      "staleAfterMs": 30000,
+      "watch": null
+    },
+    "jobs": {
+      "advisories": [],
+      "ageMs": 0,
+      "counters": {
+        "dirs": 0,
+        "entries": 0,
+        "failures": 0,
+        "nonTerminal": 0,
+        "parseErrors": 0,
+        "records": 0
+      },
+      "id": "jobs",
+      "labels": {
+        "state": "absent"
+      },
+      "lastError": null,
+      "observedAt": "2026-10-21T09:35:05.182Z",
+      "ok": true,
+      "path": "/testdata/jobs",
+      "role": "authoritative",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    },
+    "registry": {
+      "advisories": [],
+      "ageMs": 0,
+      "counters": {
+        "failures": 0,
+        "ignoredKeyFiles": 0,
+        "parseErrors": 0,
+        "records": 1,
+        "retriesDeferred": 0
+      },
+      "id": "registry",
+      "labels": {},
+      "lastError": null,
+      "observedAt": "2026-10-21T09:35:05.182Z",
+      "ok": true,
+      "path": "/testdata/sessions",
+      "role": "authoritative",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    },
+    "transcripts": {
+      "advisories": [],
+      "ageMs": 0,
+      "counters": {
+        "ambiguous": 0,
+        "colorMisses": 0,
+        "enrichByGlob": 1,
+        "enrichByRecordPath": 0,
+        "enrichLocated": 0,
+        "enrichLookups": 1,
+        "enrichPathMisses": 0,
+        "enrichRefused": 0,
+        "enrichTimingCacheHits": 0,
+        "enrichTimingReads": 0,
+        "factsCacheHits": 0,
+        "factsReads": 0,
+        "globMisses": 1,
+        "tailBytesColor": 204800,
+        "tailBytesTiming": 65536
+      },
+      "id": "transcripts",
+      "labels": {
+        "pass": "enrichment"
+      },
+      "lastError": null,
+      "observedAt": "2026-10-21T09:35:05.182Z",
+      "ok": true,
+      "path": "/testdata/projects",
+      "role": "enrichment",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    }
+  },
+  "tt": "devel",
+  "warnings": [
+    {
+      "code": "source-not-ok",
+      "error": "claude agents --json: exit status 127",
+      "role": "corroboration",
+      "source": "agents-cli"
+    }
+  ]
+}

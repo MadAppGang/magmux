@@ -1,0 +1,523 @@
+{
+  "epoch": "2026-09-18T02:40:11.204Z",
+  "sessions": [
+    {
+      "id": "aaaaaaaa-1111-2222-3333-444444444444",
+      "pid": 1000,
+      "paneId": null,
+      "name": "dupe-first",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 5.0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "6ae3c8cb-426b-4d4c-a218-ca04fe0b5402",
+      "pid": 1061,
+      "paneId": null,
+      "name": "deltax-1e",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-15T02:40:11.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 72h 0m"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "9e57a0d3-2b64-4c18-8ad7-16f0b9c4e237",
+      "pid": 1613,
+      "paneId": null,
+      "name": "memidx-blocked",
+      "status": "waiting",
+      "statusRaw": "waiting",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-15T02:40:11.204Z",
+      "waitingOn": "input",
+      "waitingOnRaw": "input needed",
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": true,
+        "reason": "it is waiting for you to type something, for 72h 0m"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "b1d4f082-7e35-496a-a2c8-40f7e5b19c63",
+      "pid": 1724,
+      "paneId": null,
+      "name": "memidx-future",
+      "status": null,
+      "statusRaw": "reticulating",
+      "confidence": null,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": null,
+        "reason": "the tool reported a status this build does not recognise (\"reticulating\")"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "e2f91a46-8c73-4d15-b0a9-6e347f2c85d1",
+      "pid": 1828,
+      "paneId": null,
+      "name": "memidx-minimal",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 5.0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "d5e83c17-4a29-4b60-9f13-7c82e04a1b95",
+      "pid": 1926,
+      "paneId": null,
+      "name": "gammaapp-shuffled",
+      "status": "busy",
+      "statusRaw": "busy",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "it is working, for 5.0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "4a6b8d02-9e17-4c53-8b2f-c1d7e0a35946",
+      "pid": 1971,
+      "paneId": null,
+      "name": "no-pane-session",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 5.0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "aaaaaaaa-1111-2222-3333-444444444444",
+      "pid": 2000,
+      "paneId": null,
+      "name": "dupe-second",
+      "status": "busy",
+      "statusRaw": "busy",
+      "confidence": null,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": null
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "ce5f7a13-8204-4b96-a7d3-05e21c8b4f70",
+      "pid": 2063,
+      "paneId": null,
+      "name": "no-status-time",
+      "status": "waiting",
+      "statusRaw": "waiting",
+      "confidence": "authoritative",
+      "statusSince": null,
+      "waitingOn": "input",
+      "waitingOnRaw": "input needed",
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": true,
+        "reason": "it is waiting for you to type something"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "",
+      "pid": 2196,
+      "paneId": null,
+      "name": "no-session-id",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 5.0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "2f9c6e77-4b18-4d2a-9c31-55ad0e6f7b02",
+      "pid": 2348,
+      "paneId": null,
+      "name": "proxyapp-shell",
+      "status": "shell",
+      "statusRaw": "shell",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "it has handed its terminal to a shell, for 5.0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "7d1e4b92-8a0c-4f37-b6d5-2e91c3a05f48",
+      "pid": 15775,
+      "paneId": null,
+      "name": "omega-review",
+      "status": "waiting",
+      "statusRaw": "waiting",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:05:11.204Z",
+      "waitingOn": "input",
+      "waitingOnRaw": "input needed",
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": true,
+        "reason": "it is waiting for you to type something, for 35m 0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "a4c07f15-3d6b-42e8-8f19-0c5b7e2a91d6",
+      "pid": 25983,
+      "paneId": null,
+      "name": "omega-tooling",
+      "status": "waiting",
+      "statusRaw": "waiting",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:05:11.204Z",
+      "waitingOn": "permission",
+      "waitingOnRaw": "permission prompt",
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": true,
+        "reason": "it is holding a permission prompt open, for 35m 0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "371ebab5-6d54-4184-863e-103ba71f6ea9",
+      "pid": 44231,
+      "paneId": null,
+      "name": "kappa-observer",
+      "status": "waiting",
+      "statusRaw": "waiting",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:05:11.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": true,
+        "reason": "it is waiting, and what for was not determined, for 35m 0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "0a180476-fe5f-4e29-b117-e10dbca60839",
+      "pid": 46799,
+      "paneId": null,
+      "name": "remediate-catalog-v4",
+      "previousNames": [
+        "remediate-catalog-v3-review",
+        "remediate-catalog-v2"
+      ],
+      "previousNameDetail": [
+        {
+          "name": "remediate-catalog-v3-review",
+          "until": "2026-09-18T01:40:11.204Z",
+          "session": "0a180476-fe5f-4e29-b117-e10dbca60839"
+        },
+        {
+          "name": "remediate-catalog-v2",
+          "until": "2026-09-18T00:40:11.204Z",
+          "session": "0a180476-fe5f-4e29-b117-e10dbca60839"
+        }
+      ],
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 5.0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "f1a27c90-6b48-4e35-9d01-8a5c3e7b2604",
+      "pid": 46800,
+      "paneId": null,
+      "name": "legacy-shape",
+      "previousNames": [
+        "older-name",
+        "oldest-name"
+      ],
+      "previousNameDetail": [
+        {
+          "name": "older-name",
+          "until": null
+        },
+        {
+          "name": "oldest-name",
+          "until": null
+        }
+      ],
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 5.0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "8c3d5b71-0f92-4a68-b41e-9d27c6e0a853",
+      "pid": 56526,
+      "paneId": null,
+      "name": "pinned-regression",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 5.0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "857ef435-aa77-46f9-bb28-ca9c5374be9d",
+      "pid": 65863,
+      "paneId": null,
+      "name": "flock-setup",
+      "status": "waiting",
+      "statusRaw": "waiting",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-22T01:05:14.899Z",
+      "waitingOn": "input",
+      "waitingOnRaw": "input needed",
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": true,
+        "reason": "it is waiting for you to type something, for -94h 25m"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "f350c44d-d22a-4c47-b3ef-00021713db7f",
+      "pid": 78761,
+      "paneId": null,
+      "name": "attachments-widget",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:35:32.085Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 4m 39s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "5b9e2c84-3a17-4f60-8d25-e1c7b0a94f36",
+      "pid": 98158,
+      "paneId": null,
+      "name": "kappa-long-busy",
+      "status": "busy",
+      "statusRaw": "busy",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:09:11.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "it is working, for 31m 0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "0b3a1d41-1c2f-4a56-9d0e-7f2b10a4c8e1",
+      "pid": 98693,
+      "paneId": null,
+      "name": "omega-worker",
+      "status": "busy",
+      "statusRaw": "busy",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "it is working, for 5.0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "c8b2e930-5f41-4a7d-9e08-3b6c1d4f7a25",
+      "pid": 999001,
+      "paneId": null,
+      "name": "left-over",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-15T02:40:11.204Z",
+      "waitingOn": null,
+      "processAlive": "no",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its process has exited"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    }
+  ]
+}

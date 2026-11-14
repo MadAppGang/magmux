@@ -540,15 +540,15 @@ func TestToolsListChangedWhenAPluginRegisters(t *testing.T) {
 	if !ok {
 		t.Fatalf("tools/list has no ticket__run_ticket: %v", keysOf(tools))
 	}
-	// The nine static tools are untouched by any of this.
+	// The ten static tools are untouched by any of this.
 	for _, want := range []string{"list_sessions", "attach_session", "request_session",
-		"list_panes", "open_pane", "close_pane", "read_pane", "send_keys", "send_and_wait"} {
+		"list_agents", "list_panes", "open_pane", "close_pane", "read_pane", "send_keys", "send_and_wait"} {
 		if _, ok := tools[want]; !ok {
 			t.Errorf("the static tool %s vanished when a plugin registered", want)
 		}
 	}
-	if len(tools) != 10 {
-		t.Errorf("tools/list returned %d tools, want the 9 static ones plus one plugin op: %v",
+	if len(tools) != 11 {
+		t.Errorf("tools/list returned %d tools, want the 10 static ones plus one plugin op: %v",
 			len(tools), keysOf(tools))
 	}
 

@@ -1,0 +1,23 @@
+{
+  "pid": 70032,
+  "sessionId": "30000000-0000-4000-8000-000000000031",
+  "cwd": "/Users/user/dev/sample",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.278",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle"
+  ],
+  "kind": "bg",
+  "jobId": "lbc00001",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "messagingSocketPath": "/tmp/cc-socks/70032.sock",
+  "name": "synthetic-session",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789699206204,
+  "status": "busy",
+  "statusUpdatedAt": 1789699206204
+}

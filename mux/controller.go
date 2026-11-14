@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/MadAppGang/magmux/claudestate/model"
 )
 
 // ToolController is a side-channel observer + interactor for a specific
@@ -299,49 +301,34 @@ const (
 
 // ── turn history ────────────────────────────────────────────────────────────
 
-// Turn is one entry in a tool's own record of a session.
+// Turn and ToolCall are one entry in a tool's own record of a session, and one
+// tool invocation inside it. They are declared in the claudestate library's
+// model and ALIASED here.
 //
-// The granularity is one MESSAGE, not one exchange: a user prompt is a Turn,
-// and the assistant's whole reply to it — however many entries the tool split
-// that across in its record — is the next Turn. That is what makes Role
-// meaningful, and what makes "the last four turns" read as a conversation
-// rather than as a fragment of one.
-type Turn struct {
-	// Role is who spoke: TurnUser or TurnAssistant.
-	Role string
-
-	// Text is the complete text of the turn, never truncated. A turn that was
-	// nothing but tool calls has none, which is normal and is not a failure.
-	Text string
-
-	// Tools are the tool calls made during this turn, in the order the tool
-	// recorded them, each with the result it produced.
-	Tools []ToolCall
-
-	// Timestamp is when the tool recorded the turn's first entry. Zero when
-	// the record carried none.
-	Timestamp time.Time
-}
-
-// ToolCall is one tool invocation and its outcome, as the tool itself recorded
-// them. Input and Result are the whole point: Snapshot.LastTool has only ever
-// carried a tool's NAME, which tells a reader that something ran and nothing
-// whatever about what it did or what it found.
-type ToolCall struct {
-	Name   string // e.g. "Bash", "Edit"
-	Input  string // the arguments, as JSON, exactly as the tool recorded them
-	Result string // what the tool returned; empty if it had not returned yet
-
-	// id pairs a call with its result inside the tool's record. Unexported
-	// because it is the parser's bookkeeping and means nothing to a caller.
-	id string
-}
+// An alias is the same type, not a conversion, so [TranscriptReader] below is
+// the contract it always was, the unexported correlation field on ToolCall
+// travels with the type, and no caller — in this package, over the socket, or
+// through MCP — notices that they moved. They moved because the observation
+// layer reads the same transcripts and would otherwise need a second, parallel
+// Turn type, and two vocabularies for one thing diverge the first time either
+// side gains a field.
+//
+// The parser moved with them, to claudestate/claude (ParseTurns), for the same
+// reason and one more: a ToolCall's correlation id is unexported, so whatever builds
+// one has to live where it can be set. [parseClaudeTurns] below is what is
+// left here — one line, so that every existing caller and test compiles
+// untouched.
+type (
+	Turn     = model.Turn
+	ToolCall = model.ToolCall
+)
 
 // Turn roles. Deliberately the same two words every tool in this space uses,
-// so a consumer needs no translation table.
+// so a consumer needs no translation table. Aliased to the library's own,
+// which are the values that reach the wire.
 const (
-	TurnUser      = "user"
-	TurnAssistant = "assistant"
+	TurnUser      = model.TurnUser
+	TurnAssistant = model.TurnAssistant
 )
 
 // Transcript request bounds. These bound MEMORY, not presentation: a caller

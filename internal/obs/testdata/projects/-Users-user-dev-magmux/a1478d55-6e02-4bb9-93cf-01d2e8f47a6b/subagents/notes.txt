@@ -1,0 +1,2 @@
+Negative control for the `*.meta.json` suffix filter. This file must never be
+counted as a subagent. See testdata/PROVENANCE.md.

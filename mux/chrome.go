@@ -400,6 +400,47 @@ func (m *Magmux) togglePanel() {
 	}
 }
 
+// showAttentionView reveals the panel if it is hidden and puts it on the
+// attention view. Caller must NOT hold treeMu.
+//
+// It is SHOW and not TOGGLE, which is the same distinction Ctrl-G `[` makes:
+// this key answers a question ("which session needs me"), and a key that
+// sometimes answers it and sometimes hides the answer is a key nobody trusts
+// in the moment they want it. Pressing it twice shows the same thing twice;
+// `p` hides the panel and `v` cycles the view, and both keep working.
+//
+// The panel is revealed through showPanelLocked and the refusal is the same
+// one togglePanel gets: a terminal too narrow for two usable halves is told
+// so in the status bar rather than given a panel with no columns in it.
+//
+// It deliberately does NOT take focus, for the reason CLAUDE.md gives about
+// the panel generally: a human is typing into their agent, and an instrument
+// that takes the keyboard mid-sentence is worse than not having the
+// instrument.
+func (m *Magmux) showAttentionView() {
+	m.treeMu.Lock()
+	p := m.panelLocked()
+	if p == nil {
+		m.treeMu.Unlock()
+		return
+	}
+	shown := true
+	if p.hidden {
+		if shown = m.showPanelLocked(p); !shown {
+			m.noteChromeLocked(panelTooNarrow)
+		}
+	}
+	m.markAllDirtyLocked()
+	m.treeMu.Unlock()
+
+	// cp.mu with treeMu released. The documented order would allow it above;
+	// nothing here needs the two held together and the shorter hold is free.
+	if shown {
+		m.control.setView(viewAttention)
+		m.control.markDirty()
+	}
+}
+
 // toggleStatusBar shows or hides the bottom status row, giving the row to the
 // layout or taking it back. Caller must NOT hold treeMu.
 func (m *Magmux) toggleStatusBar() {
@@ -549,12 +590,13 @@ type hintItem struct {
 }
 
 const (
-	hintRankStatus = iota + 1 // s: hiding the bar hides this hint with it
-	hintRankScroll            // [: only offered when there is history to reach
-	hintRankTab               // Tab: nothing to switch to with one pane on screen
-	hintRankManual            // r: the only way out of a client's size, in the floor
-	hintRankPanel             // p: the surface nothing else can announce
-	hintRankQuit              // q: the way out
+	hintRankStatus    = iota + 1 // s: hiding the bar hides this hint with it
+	hintRankAttention            // a: only offered when a document exists to show
+	hintRankScroll               // [: only offered when there is history to reach
+	hintRankTab                  // Tab: nothing to switch to with one pane on screen
+	hintRankManual               // r: the only way out of a client's size, in the floor
+	hintRankPanel                // p: the surface nothing else can announce
+	hintRankQuit                 // q: the way out
 )
 
 // keyHintItems is the chord's full hint set, in reading order. panelVisible
@@ -577,7 +619,14 @@ const (
 // ABOVE Tab, so it joins the floor beside p and q: the bar is the only place
 // the mode can announce itself and Ctrl-G r is the only local way out of it,
 // the same argument that keeps "q quit" there.
-func keyHintItems(panelVisible, multiPane, canScroll, manual bool) []hintItem {
+//
+// hasAttention offers "a attention" on the same terms as the scroll hint, and
+// for the same reason: the observation layer is off by default (MAGMUX_AGENTS),
+// so on most magmuxes the key would reveal a panel saying it has nothing, which
+// teaches the wrong thing about the feature. It appears the moment a document
+// exists, and it ranks just above "s bar", so it is the second thing to go when
+// the bar is short of room.
+func keyHintItems(panelVisible, multiPane, canScroll, manual, hasAttention bool) []hintItem {
 	panel := "p panel"
 	if panelVisible {
 		panel = "p hide"
@@ -588,6 +637,9 @@ func keyHintItems(panelVisible, multiPane, canScroll, manual bool) []hintItem {
 	}
 	if canScroll {
 		items = append(items, hintItem{"[ back", hintRankScroll})
+	}
+	if hasAttention {
+		items = append(items, hintItem{"a attention", hintRankAttention})
 	}
 	if manual {
 		items = append(items, hintItem{"r auto", hintRankManual})
@@ -624,7 +676,11 @@ func (m *Magmux) keyHintLocked() []hintItem {
 		canScroll = f.screen.sbLen > 0
 		f.mu.Unlock()
 	}
-	return keyHintItems(!m.panelHiddenLocked(), onScreen > 1, canScroll, m.manualRows > 0 && m.manualCols > 0)
+	// cp.mu is taken and released inside hasAttention; the order
+	// treeMu -> cp.mu is the documented one, and this is the same shape
+	// digest() already uses from the same caller.
+	return keyHintItems(!m.panelHiddenLocked(), onScreen > 1, canScroll,
+		m.manualRows > 0 && m.manualCols > 0, m.control.hasAttention())
 }
 
 // keyHintList joins the hints, dropping everything ranked at or below `cut`.

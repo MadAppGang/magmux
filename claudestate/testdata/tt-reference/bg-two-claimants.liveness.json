@@ -1,0 +1,9 @@
+{
+  "scenario": "bg-two-claimants",
+  "root": "bg-two-claimants",
+  "listing": "",
+  "liveness": {
+    "70011": "dead",
+    "70012": "alive"
+  }
+}

@@ -1,0 +1,2 @@
+{"type":"agent-color","agentColor":"WRONG-SESSION-DO-NOT-REPORT-THIS","sessionId":"b0100003-0000-4000-8000-000000000003"}
+{"type":"user","uuid":"u-2026-09-18T01:21:00.000Z","sessionId":"b0100003-0000-4000-8000-000000000003","timestamp":"2026-09-18T01:21:00.000Z","cwd":"/Users/user/dev/colour","message":{"role":"user","content":"SYNTHETIC prompt 1"}}

@@ -1,0 +1,28 @@
+{
+  "state": "blocked",
+  "detail": "SYNTHETIC: awaiting the terminal test",
+  "tempo": "blocked",
+  "inFlight": {
+    "kinds": [],
+    "queued": 0,
+    "tasks": 0
+  },
+  "tokens": 47104,
+  "children": null,
+  "linkScanOffset": 2101161,
+  "linkScanPath": "/testdata/projects/-Users-user-dotfiles/97030e53-3ae6-4b0e-9f5a-1c5d4b2a8e01.jsonl",
+  "template": "bg",
+  "bgIsolation": "none",
+  "name": "SYNTHETIC name",
+  "nameSource": "auto",
+  "sessionId": "97030e53-3ae6-4b0e-9f5a-1c5d4b2a8e01",
+  "resumeSessionId": "97030e53-3ae6-4b0e-9f5a-1c5d4b2a8e01",
+  "daemonShort": "blocked-with-needs",
+  "cliVersion": "2.1.233",
+  "cwd": "/Users/user/dotfiles",
+  "createdAt": "2026-08-24T21:10:22.966Z",
+  "updatedAt": "2026-08-25T03:15:47.319Z",
+  "firstTerminalAt": "2026-08-24T22:47:08.443Z",
+  "backend": "daemon",
+  "needs": "SYNTHETIC: open a terminal and report whether the command works"
+}

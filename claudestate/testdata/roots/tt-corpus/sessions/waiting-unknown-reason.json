@@ -1,0 +1,25 @@
+{
+  "pid": 44231,
+  "sessionId": "371ebab5-6d54-4184-863e-103ba71f6ea9",
+  "cwd": "/Users/user/dotfiles",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.274",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "kappa:@49.%99",
+  "messagingSocketPath": "/tmp/cc-socks/44231.sock",
+  "name": "kappa-observer",
+  "nameSource": "user",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789697111204,
+  "status": "waiting",
+  "statusUpdatedAt": 1789697111204
+}

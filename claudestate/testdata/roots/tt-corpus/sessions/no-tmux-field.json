@@ -1,0 +1,24 @@
+{
+  "pid": 1971,
+  "sessionId": "4a6b8d02-9e17-4c53-8b2f-c1d7e0a35946",
+  "cwd": "/Users/user/mag/gammaapp",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.273",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "messagingSocketPath": "/tmp/cc-socks/1971.sock",
+  "name": "no-pane-session",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789699206204,
+  "status": "idle",
+  "statusUpdatedAt": 1789699206204
+}

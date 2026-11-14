@@ -1,0 +1,29 @@
+[
+  {
+    "id": "ea780079",
+    "cwd": "/Users/user/mag/proxyapp/.claude/worktrees/resume-message",
+    "kind": "background",
+    "startedAt": 1786175947462,
+    "sessionId": "ea780079-5a4c-444f-a80c-c6a7b29bf62c",
+    "name": "s01-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "state": "blocked"
+  },
+  {
+    "id": "7a324a6d",
+    "cwd": "/Users/user/dotfiles",
+    "kind": "background",
+    "startedAt": 1786952050528,
+    "sessionId": "7a324a6d-27ec-4431-b17b-70ab8ac764c7",
+    "name": "s02-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "state": "blocked"
+  },
+  {
+    "id": "97030e53",
+    "cwd": "/Users/user/mag/omega/chatserver-test/chatserver/webapp",
+    "kind": "background",
+    "startedAt": 1787581120044,
+    "sessionId": "97030e53-528c-4452-bbae-535400039def",
+    "name": "s03-xxxxxxxxx",
+    "state": "blocked"
+  }
+]

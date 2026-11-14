@@ -1,0 +1,28 @@
+{
+  "state": "working",
+  "detail": "SYNTHETIC detail",
+  "tempo": "idle",
+  "inFlight": {
+    "kinds": [],
+    "queued": 0,
+    "tasks": 0
+  },
+  "tokens": 143711,
+  "children": null,
+  "linkScanOffset": 2101161,
+  "linkScanPath": "/testdata/projects/-Users-user-mag-gammaapp-gammaapp-cloud/d3ed2cc8-420f-4a35-be7b-5d374345faae.jsonl",
+  "template": "bg",
+  "bgIsolation": "none",
+  "name": "SYNTHETIC name",
+  "nameSource": "auto",
+  "sessionId": "d3ed2cc8-420f-4a35-be7b-5d374345faae",
+  "resumeSessionId": "d3ed2cc8-420f-4a35-be7b-5d374345faae",
+  "daemonShort": "reaped-mid-work",
+  "cliVersion": "2.1.233",
+  "cwd": "/Users/user/mag/gammaapp/gammaapp-cloud",
+  "createdAt": "2026-08-19T11:47:52.541Z",
+  "updatedAt": "2026-08-19T13:24:26.000Z",
+  "firstTerminalAt": "2026-08-19T11:49:42.140Z",
+  "backend": "daemon",
+  "reapedMidWorkAt": "2026-08-19T13:24:24.580Z"
+}

@@ -330,15 +330,15 @@ func (st *SessionState) SeedAggregate(entries []any) {
 		if !ok {
 			continue
 		}
-		idx, ok := evInt(e, "pane")
+		idx, ok := EventInt(e, "pane")
 		if !ok {
 			continue
 		}
 		p := st.paneLocked(idx)
-		if s, ok := evStr(e, "state"); ok {
+		if s, ok := EventString(e, "state"); ok {
 			p.State = AggregateState(s)
 		}
-		if evBool(e, "control") || p.State == "panel" {
+		if EventBool(e, "control") || p.State == "panel" {
 			// The control panel has no process and never takes a turn; every
 			// "every pane" loop has to skip it.
 			p.Control = true
@@ -354,19 +354,19 @@ func (st *SessionState) SeedAggregate(entries []any) {
 // ApplyPane applies a per-pane live `snapshot` (singular `pane`, no `panes`),
 // which is the only event that tracks a turn.
 func (st *SessionState) ApplyPane(e map[string]any) {
-	idx, ok := evInt(e, "pane")
+	idx, ok := EventInt(e, "pane")
 	if !ok {
 		return
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	p := st.paneLocked(idx)
-	if s, ok := evStr(e, "state"); ok && s != "" {
+	if s, ok := EventString(e, "state"); ok && s != "" {
 		p.State = s
 	}
 	// `tool` is cleared rather than merged: it describes the current turn, and
 	// magmux.ts resets it on every per-pane snapshot for exactly that reason.
-	tool, _ := evStr(e, "tool")
+	tool, _ := EventString(e, "tool")
 	p.Tool = tool
 	st.mergeCommonLocked(p, e)
 	// `response` is cleared too — and this is the ONE place the client
@@ -385,7 +385,7 @@ func (st *SessionState) ApplyPane(e map[string]any) {
 	// rather than noticed. The aggregate seed keeps the sticky rule (see
 	// mergeCommonLocked) because buildPaneResults genuinely omits the key when
 	// it is empty — the two paths differ on purpose; do not collapse them.
-	if v, ok := evStr(e, "response"); ok {
+	if v, ok := EventString(e, "response"); ok {
 		p.Response = v
 	}
 	st.bumpLocked()
@@ -402,50 +402,50 @@ func (st *SessionState) ApplyPane(e map[string]any) {
 //
 // Caller holds mu.
 func (st *SessionState) mergeCommonLocked(p *PaneInfo, e map[string]any) {
-	if v, ok := evStr(e, "response"); ok && v != "" {
+	if v, ok := EventString(e, "response"); ok && v != "" {
 		p.Response = v
 	}
-	if v, ok := evStr(e, "prompt"); ok && v != "" {
+	if v, ok := EventString(e, "prompt"); ok && v != "" {
 		p.Prompt = v
 	}
-	if v, ok := evStr(e, "model"); ok && v != "" {
+	if v, ok := EventString(e, "model"); ok && v != "" {
 		p.Model = v
 	}
-	if v, ok := evStr(e, "project"); ok && v != "" {
+	if v, ok := EventString(e, "project"); ok && v != "" {
 		p.Project = v
 	}
-	if v, ok := evStr(e, "controller"); ok && v != "" {
+	if v, ok := EventString(e, "controller"); ok && v != "" {
 		p.Controller = v
 	}
-	if v, ok := evStr(e, "label"); ok && v != "" {
+	if v, ok := EventString(e, "label"); ok && v != "" {
 		p.Label = v
 	}
-	if v, ok := evStr(e, "cmd"); ok && v != "" {
+	if v, ok := EventString(e, "cmd"); ok && v != "" {
 		p.Cmd = v
 	}
-	if v, ok := evStr(e, "cwd"); ok && v != "" {
+	if v, ok := EventString(e, "cwd"); ok && v != "" {
 		p.Cwd = v
 	}
-	if v, ok := evInt(e, "pid"); ok && v > 0 {
+	if v, ok := EventInt(e, "pid"); ok && v > 0 {
 		p.PID = v
 	}
-	if v, ok := evInt(e, "exitCode"); ok {
+	if v, ok := EventInt(e, "exitCode"); ok {
 		p.ExitCode = v
 	}
-	if v, ok := evInt(e, "rows"); ok && v > 0 {
+	if v, ok := EventInt(e, "rows"); ok && v > 0 {
 		p.Rows = v
 	}
-	if v, ok := evInt(e, "cols"); ok && v > 0 {
+	if v, ok := EventInt(e, "cols"); ok && v > 0 {
 		p.Cols = v
 	}
 	if _, has := e["dead"]; has {
-		p.Dead = evBool(e, "dead")
+		p.Dead = EventBool(e, "dead")
 	}
 	if _, has := e["altMode"]; has {
-		p.Alt = evBool(e, "altMode")
+		p.Alt = EventBool(e, "altMode")
 	}
 	if _, has := e["focused"]; has {
-		p.Focused = evBool(e, "focused")
+		p.Focused = EventBool(e, "focused")
 	}
 }
 
@@ -723,7 +723,7 @@ func (s *Session) ingest(line []byte) {
 	if s.cfg.onEvent != nil {
 		defer s.cfg.onEvent(line)
 	}
-	typ, _ := evStr(ev, "type")
+	typ, _ := EventString(ev, "type")
 	switch typ {
 	case protocol.EventSnapshot:
 		// The aggregate carries `panes`; the per-pane live event carries
@@ -737,11 +737,11 @@ func (s *Session) ingest(line []byte) {
 			s.state.ApplyPane(ev)
 		}
 	case protocol.EventExit:
-		idx, ok := evInt(ev, "pane")
+		idx, ok := EventInt(ev, "pane")
 		if !ok {
 			return
 		}
-		code, _ := evInt(ev, "exitCode")
+		code, _ := EventInt(ev, "exitCode")
 		s.state.markExit(idx, code)
 	case protocol.EventResults:
 		if arr, ok := ev["panes"].([]any); ok {
@@ -753,11 +753,11 @@ func (s *Session) ingest(line []byte) {
 	case protocol.EventReply:
 		s.routeReply(line)
 	case protocol.EventPaneOpened:
-		if idx, ok := evInt(ev, "pane"); ok {
+		if idx, ok := EventInt(ev, "pane"); ok {
 			s.state.MarkOpened(idx, ev)
 		}
 	case protocol.EventPaneClosed:
-		if idx, ok := evInt(ev, "pane"); ok {
+		if idx, ok := EventInt(ev, "pane"); ok {
 			s.state.MarkClosed(idx)
 		}
 	case protocol.EventPlugin:
@@ -1128,9 +1128,9 @@ func (s *Session) Transcript(ctx context.Context, pane, turns int) ([]Transcript
 			continue
 		}
 		t := TranscriptTurn{}
-		t.Role, _ = evStr(e, "role")
-		t.Text, _ = evStr(e, "text")
-		t.Timestamp, _ = evStr(e, "timestamp")
+		t.Role, _ = EventString(e, "role")
+		t.Text, _ = EventString(e, "text")
+		t.Timestamp, _ = EventString(e, "timestamp")
 		tools, _ := e["tools"].([]any)
 		for _, rawTool := range tools {
 			tm, ok := rawTool.(map[string]any)
@@ -1138,9 +1138,9 @@ func (s *Session) Transcript(ctx context.Context, pane, turns int) ([]Transcript
 				continue
 			}
 			var call TranscriptTool
-			call.Name, _ = evStr(tm, "name")
-			call.Input, _ = evStr(tm, "input")
-			call.Result, _ = evStr(tm, "result")
+			call.Name, _ = EventString(tm, "name")
+			call.Input, _ = EventString(tm, "input")
+			call.Result, _ = EventString(tm, "result")
 			t.Tools = append(t.Tools, call)
 		}
 		out = append(out, t)
@@ -1352,9 +1352,12 @@ func RunInstruction(ctx context.Context, st *SessionState, pane int, send func()
 //
 // magmux's events are decoded into map[string]any because `pane` is `int or
 // "*"` on the wire and the optional fields are omitted rather than zeroed;
-// these keep the type assertions in one place.
+// these keep the type assertions in one place. They are exported because they
+// are the ONE copy: mcp and mux read the same events and the same connect-time
+// pane entries, and each used to carry its own.
 
-func evStr(m map[string]any, k string) (string, bool) {
+// EventString returns m[k] when it is a string.
+func EventString(m map[string]any, k string) (string, bool) {
 	v, ok := m[k]
 	if !ok {
 		return "", false
@@ -1363,7 +1366,9 @@ func evStr(m map[string]any, k string) (string, bool) {
 	return s, ok
 }
 
-func evInt(m map[string]any, k string) (int, bool) {
+// EventInt returns m[k] as an int: a JSON number (float64 or json.Number), an
+// int, or a decimal string. ok is false when k is absent or not a number.
+func EventInt(m map[string]any, k string) (int, bool) {
 	v, ok := m[k]
 	if !ok {
 		return 0, false
@@ -1383,7 +1388,8 @@ func evInt(m map[string]any, k string) (int, bool) {
 	return 0, false
 }
 
-func evBool(m map[string]any, k string) bool {
+// EventBool returns m[k] when it is a bool, and false otherwise.
+func EventBool(m map[string]any, k string) bool {
 	b, _ := m[k].(bool)
 	return b
 }

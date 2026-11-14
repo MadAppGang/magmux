@@ -1,0 +1,25 @@
+{
+  "pid": 1828,
+  "sessionId": "e2f91a46-8c73-4d15-b0a9-6e347f2c85d1",
+  "cwd": "/Users/user/mag/memidx",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.273",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "memidx:@24.%41",
+  "messagingSocketPath": "/tmp/cc-socks/1828.sock",
+  "name": "memidx-minimal",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789699206204,
+  "status": "idle",
+  "statusUpdatedAt": 1789699206204
+}

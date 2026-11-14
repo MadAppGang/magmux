@@ -1,3 +1,5 @@
+//go:build claude_e2e
+
 package mux
 
 // ── real-tool validation: the input gate against a REAL Claude Code ──────────
@@ -5,9 +7,15 @@ package mux
 // TestClaudeE2E drives V1.1–V1.6 of the input-gate validation criteria against
 // the user's own Claude Code, with the user's own ~/.claude config, through the
 // magmux binary TestMain builds. It costs real model calls (haiku, a handful of
-// one-word turns), so it is opt-in twice over and NEVER runs in CI:
+// one-word turns), so it is opt-in three times over and NEVER runs in CI:
 //
-//	MAGMUX_CLAUDE_E2E=1 go test -run TestClaudeE2E -count=1 -timeout 30m -v ./mux/
+//	MAGMUX_CLAUDE_E2E=1 go test -tags claude_e2e -run TestClaudeE2E -count=1 -timeout 30m -v ./mux/
+//
+// The `claude_e2e` build tag is the first gate: without it this file is not
+// compiled at all, so the default `go test ./...` contains no test that reads
+// the real Claude config or runs `claude`. That is the one, owner-accepted
+// exception to the rule that no test may do either, and no CI job passes the
+// tag. This must stay the ONLY file carrying it.
 //
 // It skips, saying why, unless MAGMUX_CLAUDE_E2E=1 AND `claude` is on PATH.
 // MAGMUX_E2E_LOG=<file> appends every log line (timelines, every reply's

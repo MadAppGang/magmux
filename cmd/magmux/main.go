@@ -9,6 +9,11 @@
 // stdout, because one stray byte on stdout desynchronises a JSON-RPC client.
 // The MCP server lives in package mcp, so the dispatch is the first statement
 // here, above the mux.Main call, and mux.Main never sees an `mcp` argument.
+//
+// `magmux agents` is dispatched beside it, for the first of those reasons: the
+// --help scan would claim a --help meant for the subcommand. It reads Claude
+// Code's session registry and writes nothing anywhere but its own audit trail
+// (and only for `magmux agents focus`); see mux.RunAgents.
 package main
 
 import (
@@ -21,6 +26,9 @@ import (
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
 		os.Exit(mcp.Run(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "agents" {
+		os.Exit(mux.RunAgents(os.Args[2:]))
 	}
 	os.Exit(mux.Main(os.Args[1:]))
 }

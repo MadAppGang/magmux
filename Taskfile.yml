@@ -289,6 +289,57 @@ tasks:
     cmds:
       - THEME=dark demo/showcase.sh
 
+  # ── Session observation: focus and notifications, by hand ─────────────────
+  # `magmux agents` answers "which session needs me" by reading, and two of its
+  # parts cannot be checked by reading anything: `focus` moves a running
+  # magmux's keyboard focus, and the notifier raises a macOS banner. Both need
+  # a session in a known state at a known time.
+  #
+  # The SESSION is staged — one registry record demo/agents.sh writes, holding
+  # the pid of its own pane process. Everything else is real: the fsnotify
+  # watch, the per-session actor, the notify stage, the audit writer, the
+  # socket pane table, the ancestry walk and the actuation gate.
+  #
+  # It stages its own registry under /tmp/magmux-agents-demo, so the 40+ live
+  # Claude Code sessions on this machine are invisible to it and cannot raise a
+  # banner, and nothing under ~/.claude is read or written. See demo/agents.md.
+
+  agents:demo:
+    desc: "One staged session you drive by hand — watch attention, focus and notifications"
+    deps: [build]
+    cmds:
+      - demo/agents.sh up {{.CLI_ARGS}}
+
+  agents:status:
+    desc: 'Move the staged session — task agents:status -- waiting|busy|idle'
+    cmds:
+      - demo/agents.sh status {{.CLI_ARGS}}
+
+  agents:errors:
+    desc: 'Stage or remove a transcript with an API error — task agents:errors -- on|off'
+    cmds:
+      - demo/agents.sh errors {{.CLI_ARGS}}
+
+  agents:table:
+    desc: "Print the demo's own fleet table"
+    cmds:
+      - demo/agents.sh table {{.CLI_ARGS}}
+
+  agents:focus:
+    desc: "Focus the pane the staged session runs in (R5.1, gated and audited)"
+    cmds:
+      - demo/agents.sh focus
+
+  agents:audit:
+    desc: "Print the demo's audit trail — every action and every notification"
+    cmds:
+      - demo/agents.sh audit
+
+  agents:down:
+    desc: "Remove the demo sandbox"
+    cmds:
+      - demo/agents.sh down
+
   # ── Remote control (one magmux, two read-only clients) ────────────────────
   # Unlike the showcase above, NOTHING here is staged. One real magmux with a
   # real HTTP/WebSocket listener, and two independent clients — a terminal one

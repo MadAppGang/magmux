@@ -1,0 +1,10 @@
+{
+  "scenario": "k3-duplicate-both-mismatched",
+  "root": "k3-duplicate-both-mismatched",
+  "listing": "",
+  "liveness": {
+    "100": "alive",
+    "150": "alive",
+    "200": "alive"
+  }
+}

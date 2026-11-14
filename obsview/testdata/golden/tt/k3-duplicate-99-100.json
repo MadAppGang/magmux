@@ -1,0 +1,48 @@
+{
+  "epoch": "2026-09-18T02:40:11.204Z",
+  "sessions": [
+    {
+      "id": "60000000-0000-4000-8000-000000000099",
+      "pid": 200,
+      "paneId": null,
+      "name": "one-hundred",
+      "status": "idle",
+      "statusRaw": "idle",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": false,
+        "reason": "its own record says it has nothing outstanding, for 5.0s"
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    },
+    {
+      "id": "60000000-0000-4000-8000-000000000099",
+      "pid": 200,
+      "paneId": null,
+      "name": "ninety-nine",
+      "status": "busy",
+      "statusRaw": "busy",
+      "confidence": null,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": null,
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": null,
+      "color": null,
+      "attention": {
+        "needed": null
+      },
+      "fault": {
+        "apiErrors": null
+      }
+    }
+  ]
+}

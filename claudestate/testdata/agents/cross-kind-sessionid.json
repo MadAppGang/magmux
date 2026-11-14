@@ -1,0 +1,20 @@
+[
+  {
+    "pid": 78761,
+    "cwd": "/Users/user/dev/epsilonapp/epsilonapp-backend/.claude/worktrees/kilo",
+    "kind": "interactive",
+    "startedAt": 1789536674178,
+    "sessionId": "f350c44d-d22a-4c47-b3ef-00021713db7f",
+    "name": "listed-but-unregistered",
+    "status": "idle"
+  },
+  {
+    "id": "f350c44d",
+    "cwd": "/Users/user/mag/proxyapp/.claude/worktrees/resume-message",
+    "kind": "background",
+    "startedAt": 1786175947462,
+    "sessionId": "f350c44d-d22a-4c47-b3ef-00021713db7f",
+    "name": "s01-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "state": "blocked"
+  }
+]

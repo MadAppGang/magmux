@@ -1,0 +1,25 @@
+{
+  "pid": 98693,
+  "sessionId": "0b3a1d41-1c2f-4a56-9d0e-7f2b10a4c8e1",
+  "cwd": "/Users/user/mag/omega",
+  "startedAt": 1789684811204,
+  "procStart": "Thu Sep 17 22:58:37 2026",
+  "version": "2.1.273",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "tmux": "omega:@15.%24",
+  "messagingSocketPath": "/tmp/cc-socks/98693.sock",
+  "name": "omega-worker",
+  "nameSource": "derived",
+  "nameSince": 1789684811204,
+  "updatedAt": 1789699206204,
+  "status": "busy",
+  "statusUpdatedAt": 1789699206204
+}

@@ -1,0 +1,2482 @@
+{
+  "counts": {
+    "attention": 14,
+    "byKind": {
+      "background": 14,
+      "interactive": 20,
+      "unknown": 0
+    },
+    "byStatus": {
+      "blocked": 8,
+      "busy": 3,
+      "done": 1,
+      "failed": 1,
+      "idle": 9,
+      "shell": 1,
+      "unknown": 2,
+      "waiting": 6,
+      "working": 3
+    },
+    "dead": 3,
+    "live": 2,
+    "total": 34,
+    "unknown": 29
+  },
+  "notCapable": [
+    "time-transitions"
+  ],
+  "observedAt": "2026-10-21T09:35:02.257Z",
+  "schema": 1,
+  "sessions": [
+    {
+      "advisories": [
+        {
+          "code": "status-since-record-later-than-activity",
+          "deltaMs": 1728000000,
+          "lastActivityAt": "2026-08-19T08:33:28.956Z",
+          "recordUpdatedAt": "2026-09-08T08:33:28.956Z"
+        },
+        {
+          "code": "background-gate-disagreement",
+          "listed": false,
+          "recordState": "blocked"
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 3718893301,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/dev/alpha/alphamini",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": "2026-08-19T08:33:28.956Z",
+      "listedBy": [
+        "jobs"
+      ],
+      "live": null,
+      "liveReason": "job-non-terminal-uncorroborated",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": "SYNTHETIC: needs a reply",
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "blocked",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 3718893301,
+      "recordUpdatedAt": "2026-09-08T08:33:28.956Z",
+      "resumeSessionId": "093c8e29-d6e3-47d9-9634-35686cc52c13",
+      "sessionId": "093c8e29-d6e3-47d9-9634-35686cc52c13",
+      "shortId": "record-later-than-activity",
+      "sources": [
+        "jobs",
+        "transcript"
+      ],
+      "stale": false,
+      "startedAt": "2026-08-19T08:00:00.000Z",
+      "status": "blocked",
+      "statusAgeMs": 3718893301,
+      "statusSince": "2026-09-08T08:33:28.956Z",
+      "statusSinceLowerBound": "2026-08-19T08:33:28.956Z",
+      "statusSource": "jobs",
+      "tempo": "blocked",
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": {
+        "agentColor": "",
+        "apiErrors": 0,
+        "colorFound": false,
+        "compactions": 0,
+        "contextTokens": null,
+        "model": "",
+        "path": "/testdata/projects/-Users-user-dev-alpha-alphamini/093c8e29-d6e3-47d9-9634-35686cc52c13.jsonl",
+        "sessionKind": "bg",
+        "sizeBytes": 491,
+        "subagents": null,
+        "subagentsKnown": false,
+        "tailBytes": 491,
+        "truncated": false
+      },
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.273",
+      "cwd": "/Users/user/mag/proxyapp",
+      "detail": null,
+      "formerNames": [
+        "remediate-catalog-v3-review",
+        "remediate-catalog-v2"
+      ],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/46799.sock",
+      "name": "remediate-catalog-v4",
+      "nameSource": "user",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 46799,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "idle",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "0a180476-fe5f-4e29-b117-e10dbca60839",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "idle",
+      "statusAgeMs": 2876096053,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%12",
+        "raw": "proxyapp:@7.%12",
+        "session": "proxyapp",
+        "window": "@7"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "status-suspect",
+          "statusAgeMs": 2876096053
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.273",
+      "cwd": "/Users/user/mag/omega",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/98693.sock",
+      "name": "omega-worker",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 98693,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "busy",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "0b3a1d41-1c2f-4a56-9d0e-7f2b10a4c8e1",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "busy",
+      "statusAgeMs": 2876096053,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%24",
+        "raw": "omega:@15.%24",
+        "session": "omega",
+        "window": "@15"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "background-working-stale",
+          "lastActivityAt": "2026-09-18T02:39:11.204Z",
+          "thresholdMs": 900000
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/dotfiles",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": "2026-09-18T02:39:11.204Z",
+      "listedBy": [
+        "jobs"
+      ],
+      "live": null,
+      "liveReason": "job-working-stale",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "working",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 2876162257,
+      "recordUpdatedAt": "2026-09-18T02:39:00.000Z",
+      "resumeSessionId": "11111111-1111-4111-8111-111111111111",
+      "sessionId": "11111111-1111-4111-8111-111111111111",
+      "shortId": "working-fresh",
+      "sources": [
+        "jobs",
+        "transcript"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-18T02:00:00.000Z",
+      "status": "working",
+      "statusAgeMs": 2876162257,
+      "statusSince": "2026-09-18T02:39:00.000Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": "working",
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": {
+        "agentColor": "",
+        "apiErrors": 0,
+        "colorFound": false,
+        "compactions": 0,
+        "contextTokens": null,
+        "model": "",
+        "path": "/testdata/projects/-Users-user-proj-h/11111111-1111-4111-8111-111111111111.jsonl",
+        "sessionKind": "bg",
+        "sizeBytes": 270,
+        "subagents": null,
+        "subagentsKnown": false,
+        "tailBytes": 270,
+        "truncated": false
+      },
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "status-since-record-later-than-activity",
+          "deltaMs": 2328796,
+          "lastActivityAt": "2026-09-18T02:00:11.204Z",
+          "recordUpdatedAt": "2026-09-18T02:39:00.000Z"
+        },
+        {
+          "code": "background-working-stale",
+          "lastActivityAt": "2026-09-18T02:00:11.204Z",
+          "thresholdMs": 900000
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/dotfiles",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": "2026-09-18T02:00:11.204Z",
+      "listedBy": [
+        "jobs"
+      ],
+      "live": null,
+      "liveReason": "job-working-stale",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "working",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 2876162257,
+      "recordUpdatedAt": "2026-09-18T02:39:00.000Z",
+      "resumeSessionId": "22222222-2222-4222-8222-222222222222",
+      "sessionId": "22222222-2222-4222-8222-222222222222",
+      "shortId": "working-transcript-stale",
+      "sources": [
+        "jobs",
+        "transcript"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-18T02:00:00.000Z",
+      "status": "working",
+      "statusAgeMs": 2876162257,
+      "statusSince": "2026-09-18T02:39:00.000Z",
+      "statusSinceLowerBound": "2026-09-18T02:00:11.204Z",
+      "statusSource": "jobs",
+      "tempo": "working",
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": {
+        "agentColor": "",
+        "apiErrors": 0,
+        "colorFound": false,
+        "compactions": 0,
+        "contextTokens": null,
+        "model": "",
+        "path": "/testdata/projects/-Users-user-proj-i/22222222-2222-4222-8222-222222222222.jsonl",
+        "sessionKind": "bg",
+        "sizeBytes": 282,
+        "subagents": null,
+        "subagentsKnown": false,
+        "tailBytes": 282,
+        "truncated": false
+      },
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.274",
+      "cwd": "/Users/user/mag/proxyapp",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/2348.sock",
+      "name": "proxyapp-shell",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 2348,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "shell",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "2f9c6e77-4b18-4d2a-9c31-55ad0e6f7b02",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "shell",
+      "statusAgeMs": 2876096053,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%91",
+        "raw": "proxyapp:@45.%91",
+        "session": "proxyapp",
+        "window": "@45"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "job-terminal",
+          "state": "done"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/dotfiles",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": "2026-09-11T00:41:45.313Z",
+      "listedBy": [
+        "jobs"
+      ],
+      "live": false,
+      "liveReason": "job-terminal",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "done",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 3487996257,
+      "recordUpdatedAt": "2026-09-11T00:41:46.000Z",
+      "resumeSessionId": "33333333-3333-4333-8333-333333333333",
+      "sessionId": "33333333-3333-4333-8333-333333333333",
+      "shortId": "done",
+      "sources": [
+        "jobs",
+        "transcript"
+      ],
+      "stale": false,
+      "startedAt": "2026-08-17T07:34:10.528Z",
+      "status": "done",
+      "statusAgeMs": 3487996257,
+      "statusSince": "2026-09-11T00:41:46.000Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": "idle",
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": {
+        "agentColor": "",
+        "apiErrors": 0,
+        "colorFound": false,
+        "compactions": 0,
+        "contextTokens": null,
+        "model": "",
+        "path": "/testdata/projects/-Users-user-proj-h/33333333-3333-4333-8333-333333333333.jsonl",
+        "sessionKind": "bg",
+        "sizeBytes": 278,
+        "subagents": null,
+        "subagentsKnown": false,
+        "tailBytes": 278,
+        "truncated": false
+      },
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 2878191053,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.274",
+      "cwd": "/Users/user/dotfiles",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/44231.sock",
+      "name": "kappa-observer",
+      "nameSource": "user",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 44231,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "waiting",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "371ebab5-6d54-4184-863e-103ba71f6ea9",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "waiting",
+      "statusAgeMs": 2878191053,
+      "statusSince": "2026-09-18T02:05:11.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%99",
+        "raw": "kappa:@49.%99",
+        "session": "kappa",
+        "window": "@49"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": "unknown"
+    },
+    {
+      "advisories": [
+        {
+          "code": "status-since-unverifiable",
+          "reason": "the record names no transcript"
+        },
+        {
+          "code": "job-terminal",
+          "state": "failed"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/dotfiles",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": null,
+      "listedBy": [
+        "jobs"
+      ],
+      "live": false,
+      "liveReason": "job-terminal",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "failed",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 3487996257,
+      "recordUpdatedAt": "2026-09-11T00:41:46.000Z",
+      "resumeSessionId": "44444444-4444-4444-8444-444444444444",
+      "sessionId": "44444444-4444-4444-8444-444444444444",
+      "shortId": "failed",
+      "sources": [
+        "jobs"
+      ],
+      "stale": false,
+      "startedAt": "2026-08-17T07:34:10.528Z",
+      "status": "failed",
+      "statusAgeMs": 3487996257,
+      "statusSince": "2026-09-11T00:41:46.000Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": "idle",
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": null,
+      "transcriptCollected": false,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.273",
+      "cwd": "/Users/user/mag/gammaapp",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": true,
+      "liveReason": "proc-only",
+      "messagingSocketPath": "/tmp/cc-socks/1971.sock",
+      "name": "no-pane-session",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 1971,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "idle",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "4a6b8d02-9e17-4c53-8b2f-c1d7e0a35946",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "idle",
+      "statusAgeMs": 2876096053,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": null,
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "shortid-mismatch",
+          "daemonShort": "deadbeef",
+          "dirName": "shortid-mismatch"
+        },
+        {
+          "code": "status-since-unverifiable",
+          "reason": "the record names no transcript"
+        },
+        {
+          "code": "beyond-transcript-retention",
+          "recordAgeMs": 5621125560,
+          "retentionMs": 2592000000
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 5621125560,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/dotfiles",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": null,
+      "listedBy": [
+        "jobs"
+      ],
+      "live": null,
+      "liveReason": "job-beyond-transcript-retention",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "blocked",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 5621125560,
+      "recordUpdatedAt": "2026-08-17T08:09:36.697Z",
+      "resumeSessionId": "55555555-5555-4555-8555-555555555555",
+      "sessionId": "55555555-5555-4555-8555-555555555555",
+      "shortId": "deadbeef",
+      "sources": [
+        "jobs"
+      ],
+      "stale": false,
+      "startedAt": "2026-08-17T07:34:10.528Z",
+      "status": "blocked",
+      "statusAgeMs": 5621125560,
+      "statusSince": "2026-08-17T08:09:36.697Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": "blocked",
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": null,
+      "transcriptCollected": false,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "status-suspect",
+          "statusAgeMs": 2877951053
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.274",
+      "cwd": "/Users/user/dotfiles",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/98158.sock",
+      "name": "kappa-long-busy",
+      "nameSource": "user",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 98158,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "busy",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "5b9e2c84-3a17-4f60-8d25-e1c7b0a94f36",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "busy",
+      "statusAgeMs": 2877951053,
+      "statusSince": "2026-09-18T02:09:11.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%101",
+        "raw": "kappa:@50.%101",
+        "session": "kappa",
+        "window": "@50"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "transcript-absent",
+          "path": "/testdata/projects/../../../etc/passwd"
+        },
+        {
+          "code": "status-since-unverifiable",
+          "reason": "no transcript to bound against"
+        },
+        {
+          "code": "beyond-transcript-retention",
+          "recordAgeMs": 5621125560,
+          "retentionMs": 2592000000
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 5621125560,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/dotfiles",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": null,
+      "listedBy": [
+        "jobs"
+      ],
+      "live": null,
+      "liveReason": "job-beyond-transcript-retention",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "blocked",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 5621125560,
+      "recordUpdatedAt": "2026-08-17T08:09:36.697Z",
+      "resumeSessionId": "66666666-6666-4666-8666-666666666666",
+      "sessionId": "66666666-6666-4666-8666-666666666666",
+      "shortId": "linkscan-outside-root",
+      "sources": [
+        "jobs"
+      ],
+      "stale": false,
+      "startedAt": "2026-08-17T07:34:10.528Z",
+      "status": "blocked",
+      "statusAgeMs": 5621125560,
+      "statusSince": "2026-08-17T08:09:36.697Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": "blocked",
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.273",
+      "cwd": "/Users/user/.other/worktrees/d872/deltax",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/1061.sock",
+      "name": "deltax-1e",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 1061,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "idle",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "6ae3c8cb-426b-4d4c-a218-ca04fe0b5402",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "idle",
+      "statusAgeMs": 3135291053,
+      "statusSince": "2026-09-15T02:40:11.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%35",
+        "raw": "deltax:@22.%35",
+        "session": "deltax",
+        "window": "@22"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "status-since-unverifiable",
+          "reason": "the record names no transcript"
+        },
+        {
+          "code": "beyond-transcript-retention",
+          "recordAgeMs": 5621125560,
+          "retentionMs": 2592000000
+        },
+        {
+          "code": "sessionid-duplicate",
+          "kind": "background",
+          "loser": "dup-b",
+          "source": "jobs",
+          "winner": "dup-a"
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 5621125560,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/dotfiles",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": null,
+      "listedBy": [
+        "jobs"
+      ],
+      "live": null,
+      "liveReason": "job-beyond-transcript-retention",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "blocked",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 5621125560,
+      "recordUpdatedAt": "2026-08-17T08:09:36.697Z",
+      "resumeSessionId": "77777777-7777-4777-8777-777777777777",
+      "sessionId": "77777777-7777-4777-8777-777777777777",
+      "shortId": "dup-a",
+      "sources": [
+        "jobs"
+      ],
+      "stale": false,
+      "startedAt": "2026-08-17T07:34:10.528Z",
+      "status": "blocked",
+      "statusAgeMs": 5621125560,
+      "statusSince": "2026-08-17T08:09:36.697Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": "blocked",
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": null,
+      "transcriptCollected": false,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "transcript-absent",
+          "path": "/testdata/projects/-Users-user-dotfiles/7a324a6d-27ec-4431-b17b-70ab8ac764c7.jsonl"
+        },
+        {
+          "code": "status-since-unverifiable",
+          "reason": "no transcript to bound against"
+        },
+        {
+          "code": "beyond-transcript-retention",
+          "recordAgeMs": 5621125560,
+          "retentionMs": 2592000000
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 5621125560,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/dotfiles",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": null,
+      "listedBy": [
+        "jobs"
+      ],
+      "live": null,
+      "liveReason": "job-beyond-transcript-retention",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": "SYNTHETIC: confirm the alias works in a new terminal",
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "blocked",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 5621125560,
+      "recordUpdatedAt": "2026-08-17T08:09:36.697Z",
+      "resumeSessionId": "7a324a6d-27ec-4431-b17b-70ab8ac764c7",
+      "sessionId": "7a324a6d-27ec-4431-b17b-70ab8ac764c7",
+      "shortId": "blocked-beyond-retention",
+      "sources": [
+        "jobs"
+      ],
+      "stale": false,
+      "startedAt": "2026-08-17T07:34:10.528Z",
+      "status": "blocked",
+      "statusAgeMs": 5621125560,
+      "statusSince": "2026-08-17T08:09:36.697Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": "blocked",
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 2878191053,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.273",
+      "cwd": "/Users/user/mag/omega",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/15775.sock",
+      "name": "omega-review",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 15775,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "waiting",
+      "rawWaitingFor": "input needed",
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "7d1e4b92-8a0c-4f37-b6d5-2e91c3a05f48",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "waiting",
+      "statusAgeMs": 2878191053,
+      "statusSince": "2026-09-18T02:05:11.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%56",
+        "raw": "omega:@15.%56",
+        "session": "omega",
+        "window": "@15"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": "input-needed"
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 2536187358,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.278",
+      "cwd": "/Users/user/dotfiles",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": true,
+      "liveReason": "proc-only",
+      "messagingSocketPath": "/tmp/cc-socks/65863.sock",
+      "name": "flock-setup",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 65863,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "waiting",
+      "rawWaitingFor": "input needed",
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "857ef435-aa77-46f9-bb28-ca9c5374be9d",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-22T01:04:43.526Z",
+      "status": "waiting",
+      "statusAgeMs": 2536187358,
+      "statusSince": "2026-09-22T01:05:14.899Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": null,
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": "input-needed"
+    },
+    {
+      "advisories": [
+        {
+          "code": "status-since-unverifiable",
+          "reason": "the record names no transcript"
+        },
+        {
+          "code": "beyond-transcript-retention",
+          "recordAgeMs": 2876702257,
+          "retentionMs": 2592000000
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/dotfiles",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": null,
+      "listedBy": [
+        "jobs"
+      ],
+      "live": null,
+      "liveReason": "job-beyond-transcript-retention",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "reticulating",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 2876702257,
+      "recordUpdatedAt": "2026-09-18T02:30:00.000Z",
+      "resumeSessionId": "88888888-8888-4888-8888-888888888888",
+      "sessionId": "88888888-8888-4888-8888-888888888888",
+      "shortId": "unknown-state",
+      "sources": [
+        "jobs"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-18T01:00:00.000Z",
+      "status": "unknown",
+      "statusAgeMs": 2876702257,
+      "statusSince": "2026-09-18T02:30:00.000Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": null,
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": null,
+      "transcriptCollected": false,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.263",
+      "cwd": "/Users/user/mag/pinned",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/56526.sock",
+      "name": "pinned-regression",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 56526,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "idle",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "8c3d5b71-0f92-4a68-b41e-9d27c6e0a853",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "idle",
+      "statusAgeMs": 2876096053,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%3",
+        "raw": "pinned:@3.%3",
+        "session": "pinned",
+        "window": "@3"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "background-gate-disagreement",
+          "listed": false,
+          "recordState": "blocked"
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 4947554938,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/dotfiles",
+      "detail": "SYNTHETIC: awaiting the terminal test",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": "2026-08-25T03:15:47.420Z",
+      "listedBy": [
+        "jobs"
+      ],
+      "live": null,
+      "liveReason": "job-non-terminal-uncorroborated",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": "SYNTHETIC: open a terminal and report whether the command works",
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "blocked",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 4947554938,
+      "recordUpdatedAt": "2026-08-25T03:15:47.319Z",
+      "resumeSessionId": "97030e53-3ae6-4b0e-9f5a-1c5d4b2a8e01",
+      "sessionId": "97030e53-3ae6-4b0e-9f5a-1c5d4b2a8e01",
+      "shortId": "blocked-with-needs",
+      "sources": [
+        "jobs",
+        "transcript"
+      ],
+      "stale": false,
+      "startedAt": "2026-08-24T21:10:22.966Z",
+      "status": "blocked",
+      "statusAgeMs": 4947554938,
+      "statusSince": "2026-08-25T03:15:47.319Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": "blocked",
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": {
+        "agentColor": "",
+        "apiErrors": 0,
+        "colorFound": false,
+        "compactions": 0,
+        "contextTokens": null,
+        "model": "",
+        "path": "/testdata/projects/-Users-user-dotfiles/97030e53-3ae6-4b0e-9f5a-1c5d4b2a8e01.jsonl",
+        "sessionKind": "bg",
+        "sizeBytes": 558,
+        "subagents": null,
+        "subagentsKnown": false,
+        "tailBytes": 558,
+        "truncated": false
+      },
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 3135291053,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.273",
+      "cwd": "/Users/user/mag/memidx",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/1613.sock",
+      "name": "memidx-blocked",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 1613,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "waiting",
+      "rawWaitingFor": "input needed",
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "9e57a0d3-2b64-4c18-8ad7-16f0b9c4e237",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "waiting",
+      "statusAgeMs": 3135291053,
+      "statusSince": "2026-09-15T02:40:11.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%38",
+        "raw": "memidx:@23.%38",
+        "session": "memidx",
+        "window": "@23"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": "input-needed"
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 2878191053,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.275",
+      "cwd": "/Users/user/mag/omega",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/25983.sock",
+      "name": "omega-tooling",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 25983,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "waiting",
+      "rawWaitingFor": "permission prompt",
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "a4c07f15-3d6b-42e8-8f19-0c5b7e2a91d6",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "waiting",
+      "statusAgeMs": 2878191053,
+      "statusSince": "2026-09-18T02:05:11.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%108",
+        "raw": "omega:@52.%108",
+        "session": "omega",
+        "window": "@52"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": "permission-prompt"
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        },
+        {
+          "code": "sessionid-duplicate",
+          "kind": "interactive",
+          "loser": 72153,
+          "source": "registry",
+          "winner": 72146
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.275",
+      "cwd": "/Users/user/mag/dupes",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/1000.sock",
+      "name": "dupe-first",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 1000,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "idle",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "aaaaaaaa-1111-2222-3333-444444444444",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "idle",
+      "statusAgeMs": 2876096053,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%1",
+        "raw": "dupes:@1.%1",
+        "session": "dupes",
+        "window": "@1"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.275",
+      "cwd": "/Users/user/mag/memidx",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/1724.sock",
+      "name": "memidx-future",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 1724,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "reticulating",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "b1d4f082-7e35-496a-a2c8-40f7e5b19c63",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "unknown",
+      "statusAgeMs": 2876096053,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%39",
+        "raw": "memidx:@23.%39",
+        "session": "memidx",
+        "window": "@23"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.263",
+      "cwd": "/Users/user/mag/gone",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/999001.sock",
+      "name": "left-over",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 999001,
+      "procAlive": false,
+      "rawKind": null,
+      "rawStatus": "idle",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "c8b2e930-5f41-4a7d-9e08-3b6c1d4f7a25",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "idle",
+      "statusAgeMs": 3135291053,
+      "statusSince": "2026-09-15T02:40:11.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%991",
+        "raw": "gone:@99.%991",
+        "session": "gone",
+        "window": "@99"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "status-since-unavailable",
+          "source": "registry"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": true,
+      "blockedForMs": null,
+      "blockedForUnavailable": "status-since-unavailable",
+      "children": null,
+      "claudeVersion": "2.1.273",
+      "cwd": "/Users/user/mag/gammaapp",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/2063.sock",
+      "name": "no-status-time",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 2063,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "waiting",
+      "rawWaitingFor": "input needed",
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "ce5f7a13-8204-4b96-a7d3-05e21c8b4f70",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "waiting",
+      "statusAgeMs": null,
+      "statusSince": null,
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%45",
+        "raw": "gammaapp:@26.%45",
+        "session": "gammaapp",
+        "window": "@26"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": "input-needed"
+    },
+    {
+      "advisories": [
+        {
+          "code": "job-reaped",
+          "reapedMidWorkAt": "2026-08-19T13:24:24.580Z"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/mag/gammaapp/gammaapp-cloud",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": "2026-08-19T13:27:32.959Z",
+      "listedBy": [
+        "jobs"
+      ],
+      "live": false,
+      "liveReason": "job-reaped",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "working",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": "2026-08-19T13:24:24.580Z",
+      "recordAgeMs": 5429436257,
+      "recordUpdatedAt": "2026-08-19T13:24:26.000Z",
+      "resumeSessionId": "d3ed2cc8-420f-4a35-be7b-5d374345faae",
+      "sessionId": "d3ed2cc8-420f-4a35-be7b-5d374345faae",
+      "shortId": "reaped-mid-work",
+      "sources": [
+        "jobs",
+        "transcript"
+      ],
+      "stale": false,
+      "startedAt": "2026-08-19T11:47:52.541Z",
+      "status": "working",
+      "statusAgeMs": 5429436257,
+      "statusSince": "2026-08-19T13:24:26.000Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": "idle",
+      "tmux": null,
+      "tokens": 143711,
+      "transcript": {
+        "agentColor": "",
+        "apiErrors": 0,
+        "colorFound": false,
+        "compactions": 0,
+        "contextTokens": null,
+        "model": "",
+        "path": "/testdata/projects/-Users-user-mag-gammaapp-gammaapp-cloud/d3ed2cc8-420f-4a35-be7b-5d374345faae.jsonl",
+        "sessionKind": "bg",
+        "sizeBytes": 494,
+        "subagents": null,
+        "subagentsKnown": false,
+        "tailBytes": 494,
+        "truncated": false
+      },
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "status-suspect",
+          "statusAgeMs": 2876096053
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.273",
+      "cwd": "/Users/user/mag/gammaapp",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/1926.sock",
+      "name": "gammaapp-shuffled",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 1926,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "busy",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "d5e83c17-4a29-4b60-9f13-7c82e04a1b95",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "busy",
+      "statusAgeMs": 2876096053,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%43",
+        "raw": "gammaapp:@25.%43",
+        "session": "gammaapp",
+        "window": "@25"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.273",
+      "cwd": "/Users/user/mag/memidx",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/1828.sock",
+      "name": "memidx-minimal",
+      "nameSource": "derived",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 1828,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "idle",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "e2f91a46-8c73-4d15-b0a9-6e347f2c85d1",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "idle",
+      "statusAgeMs": 2876096053,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%41",
+        "raw": "memidx:@24.%41",
+        "session": "memidx",
+        "window": "@24"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "transcript-absent",
+          "path": "/testdata/projects/-Users-user-mag-proxyapp--claude-worktrees-resume-message/4d09bc19-27e6-4f6e-9512-0f7711a6b970.jsonl"
+        },
+        {
+          "code": "status-since-unverifiable",
+          "reason": "no transcript to bound against"
+        },
+        {
+          "code": "tempo-state-disagreement",
+          "state": "blocked",
+          "tempo": "idle"
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 6252728300,
+      "blockedForUnavailable": null,
+      "children": [
+        "https://example.invalid/pull/158"
+      ],
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/mag/proxyapp/.claude/worktrees/resume-message",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": null,
+      "listedBy": [
+        "jobs"
+      ],
+      "live": null,
+      "liveReason": "job-tempo-disagrees",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "blocked",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 6252728300,
+      "recordUpdatedAt": "2026-08-10T00:42:53.957Z",
+      "resumeSessionId": "4d09bc19-27e6-4f6e-9512-0f7711a6b970",
+      "sessionId": "ea780079-5a4c-444f-a80c-c6a7b29bf62c",
+      "shortId": "blocked-no-needs-tempo-idle",
+      "sources": [
+        "jobs"
+      ],
+      "stale": false,
+      "startedAt": "2026-08-08T07:59:07.462Z",
+      "status": "blocked",
+      "statusAgeMs": 6252728300,
+      "statusSince": "2026-08-10T00:42:53.957Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": "idle",
+      "tmux": null,
+      "tokens": 427976,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.263",
+      "cwd": "/Users/user/mag/proxyapp",
+      "detail": null,
+      "formerNames": [
+        "older-name",
+        "oldest-name"
+      ],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/46800.sock",
+      "name": "legacy-shape",
+      "nameSource": "user",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 46800,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "idle",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "f1a27c90-6b48-4e35-9d01-8a5c3e7b2604",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "idle",
+      "statusAgeMs": 2876096053,
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%13",
+        "raw": "proxyapp:@7.%13",
+        "session": "proxyapp",
+        "window": "@7"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "status-since-unverifiable",
+          "reason": "the record names no transcript"
+        },
+        {
+          "code": "beyond-transcript-retention",
+          "recordAgeMs": 5621125560,
+          "retentionMs": 2592000000
+        },
+        {
+          "code": "sessionid-cross-kind",
+          "other": "interactive"
+        }
+      ],
+      "attention": true,
+      "blockedForMs": 5621125560,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.233",
+      "cwd": "/Users/user/dotfiles",
+      "detail": "SYNTHETIC detail",
+      "formerNames": [],
+      "kind": "background",
+      "lastActivityAt": null,
+      "listedBy": [
+        "jobs"
+      ],
+      "live": null,
+      "liveReason": "job-beyond-transcript-retention",
+      "messagingSocketPath": null,
+      "name": "SYNTHETIC name",
+      "nameSource": "auto",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": null,
+      "procAlive": null,
+      "rawKind": null,
+      "rawStatus": "blocked",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": 5621125560,
+      "recordUpdatedAt": "2026-08-17T08:09:36.697Z",
+      "resumeSessionId": "f350c44d-d22a-4c47-b3ef-00021713db7f",
+      "sessionId": "f350c44d-d22a-4c47-b3ef-00021713db7f",
+      "shortId": "cross-kind",
+      "sources": [
+        "jobs"
+      ],
+      "stale": false,
+      "startedAt": "2026-08-17T07:34:10.528Z",
+      "status": "blocked",
+      "statusAgeMs": 5621125560,
+      "statusSince": "2026-08-17T08:09:36.697Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "jobs",
+      "tempo": "blocked",
+      "tmux": null,
+      "tokens": 47104,
+      "transcript": null,
+      "transcriptCollected": false,
+      "waitReason": ""
+    },
+    {
+      "advisories": [
+        {
+          "code": "agents-absent",
+          "observedAt": "2026-10-21T09:35:02.665Z"
+        },
+        {
+          "code": "liveness-unknown",
+          "error": "tmux list-panes: exit status 1",
+          "field": "paneAlive"
+        },
+        {
+          "code": "sessionid-cross-kind",
+          "other": "background"
+        }
+      ],
+      "attention": false,
+      "blockedForMs": null,
+      "blockedForUnavailable": null,
+      "children": null,
+      "claudeVersion": "2.1.275",
+      "cwd": "/Users/user/mag/benchapp",
+      "detail": null,
+      "formerNames": [],
+      "kind": "interactive",
+      "lastActivityAt": null,
+      "listedBy": [
+        "registry"
+      ],
+      "live": null,
+      "liveReason": "gate-error",
+      "messagingSocketPath": "/tmp/cc-socks/78761.sock",
+      "name": "attachments-widget",
+      "nameSource": "user",
+      "needs": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "paneAlive": null,
+      "pid": 78761,
+      "procAlive": true,
+      "rawKind": null,
+      "rawStatus": "idle",
+      "rawWaitingFor": null,
+      "reapedMidWorkAt": null,
+      "recordAgeMs": null,
+      "recordUpdatedAt": null,
+      "resumeSessionId": null,
+      "sessionId": "f350c44d-d22a-4c47-b3ef-00021713db7f",
+      "shortId": null,
+      "sources": [
+        "registry"
+      ],
+      "stale": false,
+      "startedAt": "2026-09-17T22:40:11.204Z",
+      "status": "idle",
+      "statusAgeMs": 2876370172,
+      "statusSince": "2026-09-18T02:35:32.085Z",
+      "statusSinceLowerBound": null,
+      "statusSource": "registry",
+      "tempo": null,
+      "tmux": {
+        "pane": "%107",
+        "raw": "benchapp:@51.%107",
+        "session": "benchapp",
+        "window": "@51"
+      },
+      "tokens": null,
+      "transcript": null,
+      "transcriptCollected": true,
+      "waitReason": ""
+    }
+  ],
+  "sources": {
+    "agents-cli": {
+      "advisories": [],
+      "ageMs": 0,
+      "counters": {
+        "background": 0,
+        "entries": 0,
+        "interactive": 0,
+        "lastSpawnMs": 382,
+        "spawns": 1,
+        "waitedMs": 0
+      },
+      "id": "agents-cli",
+      "labels": {
+        "agentsCache": "miss",
+        "command": "claude agents --json",
+        "crossChecksSuppressed": "false",
+        "trigger": "startup"
+      },
+      "lastError": null,
+      "observedAt": "2026-10-21T09:35:02.665Z",
+      "ok": true,
+      "path": "",
+      "role": "corroboration",
+      "stale": false,
+      "staleAfterMs": 30000,
+      "watch": null
+    },
+    "jobs": {
+      "advisories": [],
+      "ageMs": 0,
+      "counters": {
+        "dirs": 20,
+        "entries": 21,
+        "failures": 2,
+        "nonTerminal": 13,
+        "parseErrors": 2,
+        "records": 15
+      },
+      "id": "jobs",
+      "labels": {},
+      "lastError": null,
+      "observedAt": "2026-10-21T09:35:02.282Z",
+      "ok": true,
+      "path": "/testdata/jobs",
+      "role": "authoritative",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    },
+    "registry": {
+      "advisories": [],
+      "ageMs": 0,
+      "counters": {
+        "failures": 2,
+        "ignoredKeyFiles": 0,
+        "parseErrors": 2,
+        "records": 21,
+        "retriesDeferred": 0
+      },
+      "id": "registry",
+      "labels": {},
+      "lastError": null,
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "ok": true,
+      "path": "/testdata/sessions",
+      "role": "authoritative",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    },
+    "tmux": {
+      "advisories": [
+        {
+          "code": "source-not-ok",
+          "error": "tmux list-panes: exit status 1",
+          "role": "gate",
+          "source": "tmux"
+        }
+      ],
+      "ageMs": 0,
+      "counters": {
+        "panes": 0
+      },
+      "id": "tmux",
+      "labels": {},
+      "lastError": "tmux list-panes: exit status 1",
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "ok": false,
+      "path": "",
+      "role": "gate",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    },
+    "transcripts": {
+      "advisories": [
+        {
+          "code": "source-not-ok",
+          "error": "transcriptfs: path is outside the projects root",
+          "role": "enrichment",
+          "source": "transcripts"
+        }
+      ],
+      "ageMs": 0,
+      "counters": {
+        "absent": 2,
+        "ambiguous": 0,
+        "byLinkScanPath": 9,
+        "colorMisses": 6,
+        "enrichByGlob": 20,
+        "enrichByRecordPath": 9,
+        "enrichLocated": 6,
+        "enrichLookups": 29,
+        "enrichPathMisses": 2,
+        "enrichRefused": 1,
+        "enrichTimingCacheHits": 0,
+        "enrichTimingReads": 0,
+        "factsCacheHits": 0,
+        "factsReads": 6,
+        "globMisses": 20,
+        "located": 6,
+        "lookups": 9,
+        "refused": 1,
+        "tailBytesColor": 204800,
+        "tailBytesTiming": 65536,
+        "timingCacheHits": 0,
+        "timingReads": 6
+      },
+      "id": "transcripts",
+      "labels": {
+        "pass": "timing+enrichment"
+      },
+      "lastError": "transcriptfs: path is outside the projects root",
+      "observedAt": "2026-10-21T09:35:02.257Z",
+      "ok": false,
+      "path": "/testdata/projects",
+      "role": "enrichment",
+      "stale": false,
+      "staleAfterMs": null,
+      "watch": null
+    }
+  },
+  "tt": "devel",
+  "warnings": [
+    {
+      "code": "source-not-ok",
+      "error": "tmux list-panes: exit status 1",
+      "role": "gate",
+      "source": "tmux"
+    },
+    {
+      "code": "source-not-ok",
+      "error": "transcriptfs: path is outside the projects root",
+      "role": "enrichment",
+      "source": "transcripts"
+    }
+  ]
+}

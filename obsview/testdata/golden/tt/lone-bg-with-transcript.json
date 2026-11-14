@@ -1,0 +1,28 @@
+{
+  "epoch": "2026-09-18T02:40:11.204Z",
+  "sessions": [
+    {
+      "id": "30000000-0000-4000-8000-000000000021",
+      "pid": 70021,
+      "paneId": null,
+      "name": "synthetic-session",
+      "status": "waiting",
+      "statusRaw": "waiting",
+      "confidence": "authoritative",
+      "statusSince": "2026-09-18T02:40:06.204Z",
+      "waitingOn": "input",
+      "waitingOnRaw": "input needed",
+      "processAlive": "yes",
+      "paneAlive": null,
+      "subagentCount": 0,
+      "color": "teal",
+      "attention": {
+        "needed": true,
+        "reason": "it is waiting for you to type something, for 5.0s"
+      },
+      "fault": {
+        "apiErrors": 0
+      }
+    }
+  ]
+}

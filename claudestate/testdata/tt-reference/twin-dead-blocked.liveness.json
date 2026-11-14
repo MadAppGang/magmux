@@ -1,0 +1,8 @@
+{
+  "scenario": "twin-dead-blocked",
+  "root": "twin-dead-blocked",
+  "listing": "",
+  "liveness": {
+    "70001": "dead"
+  }
+}

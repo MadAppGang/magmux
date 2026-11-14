@@ -1,0 +1,4 @@
+{"type": "user", "uuid": "u-2026-08-25T03:04:23.384Z", "sessionId": "s", "sessionKind": "bg", "timestamp": "2026-08-25T03:04:23.384Z", "version": "2.1.275", "cwd": "/Users/user/dotfiles", "userType": "external"}
+{"type": "system", "uuid": "u-2026-08-25T03:15:47.420Z", "sessionId": "s", "sessionKind": "bg", "timestamp": "2026-08-25T03:15:47.420Z", "version": "2.1.275", "cwd": "/Users/user/dotfiles", "userType": "external"}
+{"type": "cost-state", "uuid": "u-cost-state", "sessionId": "s"}
+{"type": "last-prompt", "uuid": "u-last-prompt", "sessionId": "s"}

@@ -1,0 +1,26 @@
+{
+  "pid": 65863,
+  "sessionId": "857ef435-aa77-46f9-bb28-ca9c5374be9d",
+  "cwd": "/Users/user/dotfiles",
+  "startedAt": 1790039083526,
+  "procStart": "Sat Sep 19 03:14:33 2026",
+  "version": "2.1.278",
+  "peerProtocol": 1,
+  "peerFeatures": [
+    "notify_idle",
+    "reply_across_default_dirs",
+    "artifact_yield"
+  ],
+  "kind": "bg",
+  "entrypoint": "cli",
+  "pidDomain": "darwin",
+  "messagingSocketPath": "/tmp/cc-socks/65863.sock",
+  "nameSince": 1790039083527,
+  "jobId": "857ef435",
+  "status": "waiting",
+  "updatedAt": 1790039114899,
+  "statusUpdatedAt": 1790039114899,
+  "nameSource": "auto",
+  "name": "flock-setup",
+  "waitingFor": "input needed"
+}

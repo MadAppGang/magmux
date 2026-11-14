@@ -1,0 +1,8 @@
+{"type":"user","uuid":"u-2026-09-18T01:00:00.000Z","sessionId":"c0100001-0000-4000-8000-000000000001","timestamp":"2026-09-18T01:00:00.000Z","cwd":"/Users/user/dev/colour","message":{"role":"user","content":"SYNTHETIC prompt 1"}}
+{"type":"agent-color","agentColor":"blue","sessionId":"c0100001-0000-4000-8000-000000000001"}
+{"type":"assistant","uuid":"a-2026-09-18T01:00:05.000Z","sessionId":"c0100001-0000-4000-8000-000000000001","timestamp":"2026-09-18T01:00:05.000Z","cwd":"/Users/user/dev/colour","message":{"role":"assistant","model":"claude-sample-1","content":[{"type":"text","text":"SYNTHETIC reply 1"}],"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":5}}}
+{"type":"agent-color","agentColor":"green","sessionId":"c0100001-0000-4000-8000-000000000001"}
+{"type":"assistant","uuid":"a-decoy","sessionId":"c0100001-0000-4000-8000-000000000001","timestamp":"2026-09-18T01:01:00.000Z","agentColor":"red","color":"pink","message":{"role":"assistant","model":"claude-sample-1","content":[{"type":"text","text":"SYNTHETIC decoy"}]}}
+{"type":"agent-color","agentColor":"yellow","sessionId":"c0100001-0000-4000-8000-000000000001"}
+{"type":"assistant","uuid":"a-2026-09-18T01:02:00.000Z","sessionId":"c0100001-0000-4000-8000-000000000001","timestamp":"2026-09-18T01:02:00.000Z","cwd":"/Users/user/dev/colour","message":{"role":"assistant","model":"claude-sample-1","content":[{"type":"text","text":"SYNTHETIC reply 2"}],"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":5}}}
+{"type":"agent-name","agentName":"dev:reviewer","color":"red","sessionId":"c0100001-0000-4000-8000-000000000001"}

@@ -1,0 +1,20 @@
+{
+  "notify": {
+    "enabled": true,
+    "on": ["waiting", "error"],
+    "delay": "0s",
+    "quiet": []
+  },
+  "actions": {
+    "navigate": "always",
+    "approve": "rule",
+    "send": "always",
+    "lifecycle": "always",
+    "rules": [
+      {
+        "match": { "cwd": "~/mag/**", "tool": "Read" },
+        "do": "approve"
+      }
+    ]
+  }
+}
