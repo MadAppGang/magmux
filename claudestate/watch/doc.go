@@ -12,9 +12,10 @@
 //     cost nothing for what is already held, and a held target is never
 //     closed and reopened (that would discard whatever the kernel had queued
 //     on it).
-//   - [Watcher.Verify] compares each held target's (dev, ino) with what the
-//     path names now, re-arms a replaced one BEFORE the cycle reads it, and
-//     recounts the budget. An overrun goes into ArmReport.Shed.
+//   - [Watcher.Verify] compares each held target's (dev, ino, file type)
+//     with what the path names now (the type because Linux reuses inode
+//     numbers; see identity), re-arms a replaced one BEFORE the cycle reads
+//     it, and recounts the budget. An overrun goes into ArmReport.Shed.
 //   - [Watcher.Release] is the single releasing call, after publish. It
 //     releases everything not kept and arms nothing.
 //

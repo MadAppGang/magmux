@@ -467,9 +467,10 @@ func (c *coordinator) armJobDirs(cs *cycleState) {
 	}
 }
 
-// verifyIdentity re-checks every held target's (dev, ino), re-arms a replaced
-// one BEFORE it is read, and recounts the budget. An overrun is shed: still
-// read this cycle (it was armed before the read), released at releaseOnce.
+// verifyIdentity re-checks every held target's (dev, ino, type), re-arms a
+// replaced one BEFORE it is read, and recounts the budget. An overrun is shed:
+// still read this cycle (it was armed before the read), released at
+// releaseOnce.
 func (c *coordinator) verifyIdentity(cs *cycleState) {
 	if c.watcher == nil || c.watchDown {
 		return

@@ -3,6 +3,7 @@ package watch
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -116,6 +117,9 @@ type Watcher struct {
 	// add and remove are fsw.Add and fsw.Remove; a package test replaces
 	// them to inject EMFILE and ENOSPC.
 	add, remove func(string) error
+	// stat is identityOf; a package test replaces it to report a REUSED inode
+	// number, which the darwin test host never hands out but Linux does.
+	stat func(string) (identity, fs.FileInfo, error)
 }
 
 type held struct {
@@ -160,6 +164,7 @@ func Start(cfg Config) (*Watcher, error) {
 		held:   map[string]held{},
 		add:    fsw.Add,
 		remove: fsw.Remove,
+		stat:   identityOf,
 	}
 	go w.loop()
 	return w, nil
@@ -311,7 +316,7 @@ func (w *Watcher) recount() int {
 
 // arm adds one target, recording the identity it had across the Add.
 func (w *Watcher) arm(t model.WatchTarget, cost int) *model.Problem {
-	before, fi, err := identityOf(t.Path)
+	before, fi, err := w.stat(t.Path)
 	if err != nil {
 		p := armProblem(t.Path, err)
 		return &p
@@ -324,7 +329,7 @@ func (w *Watcher) arm(t model.WatchTarget, cost int) *model.Problem {
 		p := armProblem(t.Path, err)
 		return &p
 	}
-	after, _, err := identityOf(t.Path)
+	after, _, err := w.stat(t.Path)
 	if err != nil || after != before {
 		// Replaced between the stat and the Add: record no identity, so the
 		// next Verify re-arms it before it is read.
@@ -393,7 +398,7 @@ func (w *Watcher) Arm(targets []model.WatchTarget) ArmReport {
 
 	for _, t := range want {
 		if h, ok := w.held[t.Path]; ok {
-			id, _, err := identityOf(t.Path)
+			id, _, err := w.stat(t.Path)
 			if err == nil && id.ok && id == h.id {
 				rep.Held++
 				continue
@@ -485,7 +490,7 @@ func (w *Watcher) Verify() ArmReport {
 	slices.Sort(paths)
 	for _, p := range paths {
 		h := w.held[p]
-		id, _, err := identityOf(p)
+		id, _, err := w.stat(p)
 		switch {
 		case err != nil:
 			w.drop(p)

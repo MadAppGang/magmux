@@ -8,6 +8,7 @@ import "os"
 // Verify re-arms, which is the safe direction.
 type identity struct {
 	dev, ino uint64
+	typ      os.FileMode
 	ok       bool
 }
 
