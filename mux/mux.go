@@ -145,9 +145,10 @@ type Magmux struct {
 	// this magmux: it was started with MAGMUX_AGENTS=1, so the panel's attention
 	// view lists every Claude Code session on the machine — names and launch
 	// directories — and that document is socket-only (the `agents` verb is not
-	// a hub op). Every pane read of the panel by a caller whose transport is not
-	// the local socket is refused with panel_private: watch, watch_all,
-	// capture, transcript. See panelReadableBy.
+	// a hub op). Every pane read of the panel by a caller that is not on the
+	// local CONTROL socket (an off-box transport, or the read-only view socket)
+	// is refused with panel_private: watch, watch_all, capture, transcript.
+	// See panelReadableBy.
 	//
 	// Written ONCE, in Main, on the struct literal, from the one read of
 	// MAGMUX_AGENTS — before init(), the socket, the hub, the Streamer and the

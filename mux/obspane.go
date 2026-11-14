@@ -938,15 +938,17 @@ var errPanelPublic = errors.New("session observation needs a private control pan
 // watch it, capture it, read its transcript.
 //
 // Always, unless this magmux observes sessions (panelPrivate); then only a
-// caller on the local socket. The socket adapter sets Transport "socket" once,
-// in callerFor, before any verb runs. A ZERO Caller fails closed: something
-// that never said how it arrived is not on-box.
+// caller on the local CONTROL socket. The socket adapter sets Transport
+// "socket" once, in callerFor, before any verb runs. A ZERO Caller fails
+// closed: something that never said how it arrived is not on-box.
 //
 // Every non-socket transport is refused, not only the read-only view token: the
 // `agents` document is socket-only, and a full-token remote controller is
-// still off-box.
+// still off-box. A READ-ONLY socket caller is refused too: that is a
+// connection on the view socket (--view-sock), whose rule is the view
+// token's, and a view token cannot read the `agents` document either.
 func (m *Magmux) panelReadableBy(c hub.Caller) bool {
-	return !m.panelPrivate || c.Transport == "socket"
+	return !m.panelPrivate || (c.Transport == "socket" && !c.ReadOnly)
 }
 
 // refusePanelOffBox is the one refusal every pane read of the panel gives an
@@ -957,5 +959,5 @@ func (m *Magmux) refusePanelOffBox(p *Pane, c hub.Caller) error {
 	}
 	return sockErrf(sockCodePanelPrivate,
 		"pane %d is magmux's control panel, and this magmux observes the Claude Code sessions "+
-			"on its machine (%s=1), so the panel is readable only over the local socket", p.id, obsEnvVar)
+			"on its machine (%s=1), so the panel is readable only over the local control socket", p.id, obsEnvVar)
 }

@@ -346,8 +346,10 @@ token gets over HTTP: the connect-time snapshot and every event, the read verbs
 `call`), `watch` / `unwatch` / `resync` in either mode, and any plugin op
 `--view-op` granted. Everything else is refused before it runs: `send`, `input`,
 `resize`, `open_pane`, `close_pane`, `focus`, `status`, `tint`, `overlay`,
-`pilot`, `agent`, plugin registration, and every plugin op not granted. A
-refusal with an `id` is answered with one code and one reason:
+`pilot`, `agent`, `agents`, plugin registration, and every plugin op not
+granted. In a magmux started with `MAGMUX_AGENTS=1`, a read of the control
+panel is refused `panel_private`, as it is to any off-box caller. A refusal with
+an `id` is answered with one code and one reason:
 
 ```jsonc
 {"type":"send","id":7,"pane":0,"text":"ls"}
@@ -530,7 +532,7 @@ always was.
 | `too_small` | `open_pane`: no room to split without going below the minimum pane size |
 | `obs_off` | `agents`: session observation is not running in this magmux (it is opt-in, `MAGMUX_AGENTS=1`). Restart it with the switch |
 | `obs_pending` | `agents`: observation is running and has not published its first document yet. Ask again |
-| `panel_private` | a read of the control panel by a caller not on the local socket, in a magmux started with `MAGMUX_AGENTS=1` ([why](#the-socket-verb-and-the-mcp-tool)) |
+| `panel_private` | a read of the control panel by a caller not on the local control socket (the view socket included), in a magmux started with `MAGMUX_AGENTS=1` ([why](#the-socket-verb-and-the-mcp-tool)) |
 | `internal` | magmux's own fault |
 
 `reply` is never replayed to a late connection, so it cannot land after
@@ -1885,13 +1887,15 @@ magmux with the switch) or it has not published yet (ask again).
 (`obs_off` and `obs_pending` on the wire.)
 
 **`agents` is a socket verb and NOT a hub op**, so it is not reachable over
-[remote control](#remote-control): the document names every Claude Code session
-on the machine and its launch directory, and a view token is meant to show one
-magmux, not the machine. For the same reason, **a magmux started with
+[remote control](#remote-control) or the read-only view socket (`--view-sock`,
+which refuses it `forbidden`/`read_only`): the document names every Claude Code
+session on the machine and its launch directory, and a viewer is meant to see
+one magmux, not the machine. For the same reason, **a magmux started with
 `MAGMUX_AGENTS=1` keeps its control panel on-box for its whole life**: `watch`,
 `watch_all`, `capture` and `transcript` of the panel are refused with
 `panel_private` (HTTP 403) to any caller that did not arrive on the local
-socket, and `watch_all` and the Firebase mirror simply skip the panel. Without
+control socket, the view socket included, and `watch_all` and the Firebase
+mirror simply skip the panel. Without
 the switch the panel streams as before.
 
 #### The panel's attention view

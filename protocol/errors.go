@@ -92,12 +92,13 @@ const (
 	// narrow window, because the pipeline is refreshed once at startup.
 	CodeObsPending = "obs_pending"
 	// CodePanelPrivate refuses a read of the CONTROL PANEL to a caller that is
-	// not on this machine's socket, in a magmux started with MAGMUX_AGENTS=1.
+	// not on this machine's CONTROL socket (an off-box transport, or the
+	// read-only view socket), in a magmux started with MAGMUX_AGENTS=1.
 	// The panel's attention view lists every Claude Code session on the
 	// machine, names and directories included, and that document is
 	// socket-only; so for the life of such a magmux the panel is too — for
 	// `watch`, `watch_all`, `capture` and `transcript` alike. Not a
-	// pane_is_control: the same request works over the socket.
+	// pane_is_control: the same request works over the control socket.
 	CodePanelPrivate = "panel_private"
 )
 

@@ -422,3 +422,131 @@ func TestTheAgentsVerbIsSocketOnly(t *testing.T) {
 		t.Errorf("the `agents` verb on the socket answered %q, want %q", code, protocol.CodeObsOff)
 	}
 }
+
+// TestTheViewSocketIsOffBoxForThePanelAndTheAgentsDocument: a connection on the
+// read-only view socket (--view-sock) arrives with Transport "socket", the same
+// as the control socket, and ReadOnly set. The view socket exists to be handed
+// to a program that may only read, under the --listen view token's rule, and a
+// view token can reach neither the `agents` document nor, on an observing
+// magmux, the panel drawn from it. So on the view socket:
+//
+//   - `agents` is refused forbidden/read_only by viewerGate, like the other
+//     socket-only protocols with no op behind them (pilot, agent), whether or
+//     not observation is on;
+//   - every pane read of the panel — the capture verb, `call capture`,
+//     transcript, watch, and watch_all's skip — is refused panel_private while
+//     the panel is private, exactly as for an off-box caller;
+//   - the session pane and a public panel are read as before.
+func TestTheViewSocketIsOffBoxForThePanelAndTheAgentsDocument(t *testing.T) {
+	defer deadlineWatchdog(t, 60*time.Second)()
+	viewer := hub.Caller{Transport: "socket", Conn: "view#x5", ReadOnly: true}
+
+	t.Run("the gate refuses agents", func(t *testing.T) {
+		m, _, _ := privatePanelMux(t, true)
+		_, err := m.viewerGate(sockMsg{Type: "agents", caller: viewer})
+		if code := protocol.CodeOf(err); code != protocol.CodeForbidden {
+			t.Fatalf("viewerGate(agents) answered %q (%v), want %q", code, err, protocol.CodeForbidden)
+		}
+		// The control socket's caller is never gated.
+		if _, err := m.viewerGate(sockMsg{Type: "agents", caller: hub.Caller{Transport: "socket"}}); err != nil {
+			t.Fatalf("viewerGate gated a control-socket agents: %v", err)
+		}
+	})
+
+	t.Run("a private panel is not readable by a viewer", func(t *testing.T) {
+		m, session, panel := privatePanelMux(t, true)
+		if m.panelReadableBy(viewer) {
+			t.Fatal("panelReadableBy says a view-socket caller may read a private panel")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, op := range []string{"capture", "transcript"} {
+			raw, _ := json.Marshal(map[string]any{"pane": panel.id})
+			_, err := m.bus().Call(ctx, viewer, op, raw)
+			if code := protocol.CodeOf(err); code != protocol.CodePanelPrivate {
+				t.Errorf("a viewer's %s of the panel answered %q, want %q", op, code, protocol.CodePanelPrivate)
+			}
+		}
+		m.streamer()
+		sub := m.bus().Session(viewer, &capSink{}, nil)
+		sub.Start(nil)
+		defer sub.Close("test over")
+		if _, err := sub.Watch(panel.id, protocol.WatchFrames, 10); protocol.CodeOf(err) != protocol.CodePanelPrivate {
+			t.Errorf("a viewer's watch of the panel answered %v, want %q", err, protocol.CodePanelPrivate)
+		}
+		if err := sub.WatchAll(10); err != nil {
+			t.Fatalf("a viewer's WatchAll: %v", err)
+		}
+		st := m.streamer()
+		st.mu.Lock()
+		panelFramer, sessionFramer := st.framers[panel.id], st.framers[session.id]
+		st.mu.Unlock()
+		if panelFramer != nil {
+			t.Error("a viewer's watch_all started a framer on the private panel")
+		}
+		if sessionFramer == nil {
+			t.Error("a viewer's watch_all did not stream the session pane")
+		}
+	})
+
+	t.Run("a public panel is still readable by a viewer", func(t *testing.T) {
+		m, _, _ := privatePanelMux(t, false)
+		if !m.panelReadableBy(viewer) {
+			t.Fatal("a viewer may not read the panel of a magmux that does not observe sessions")
+		}
+	})
+
+	t.Run("over a real view-socket connection", func(t *testing.T) {
+		m, session, panel := privatePanelMux(t, true)
+		path := filepath.Join(sockTestDir(t), "s.view")
+		ln, err := net.Listen("unix", path)
+		if err != nil {
+			t.Fatalf("listen %s: %v", path, err)
+		}
+		t.Cleanup(func() { ln.Close() })
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				go m.serveSocketConn(conn, true)
+			}
+		}()
+		conn, err := net.Dial("unix", path)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		r := newSockReader(t, conn)
+
+		refused := []struct {
+			msg          map[string]any
+			code, reason string
+		}{
+			{map[string]any{"type": "agents"}, protocol.CodeForbidden, protocol.ReasonReadOnly},
+			{map[string]any{"type": "capture", "pane": panel.id}, protocol.CodePanelPrivate, ""},
+			{map[string]any{"type": "call", "op": "capture", "args": map[string]any{"pane": panel.id}},
+				protocol.CodePanelPrivate, ""},
+			{map[string]any{"type": "transcript", "pane": panel.id}, protocol.CodePanelPrivate, ""},
+			{map[string]any{"type": "watch", "pane": panel.id, "mode": "frames", "fps": 10},
+				protocol.CodePanelPrivate, ""},
+		}
+		for i, c := range refused {
+			id := 10 + i
+			c.msg["id"] = id
+			writeLines(t, conn, c.msg)
+			reply, line := r.reply(fmt.Sprint(id), 10*time.Second)
+			if reply["ok"] == true || reply["code"] != c.code {
+				t.Errorf("view socket %v answered %s, want code %q", c.msg["type"], line, c.code)
+			}
+			if c.reason != "" && reply["reason"] != c.reason {
+				t.Errorf("view socket %v answered %s, want reason %q", c.msg["type"], line, c.reason)
+			}
+		}
+		writeLines(t, conn, map[string]any{"type": "capture", "pane": session.id, "id": 99})
+		if reply, line := r.reply("99", 10*time.Second); reply["ok"] != true {
+			t.Errorf("a viewer's capture of the session pane was refused: %s", line)
+		}
+	})
+}

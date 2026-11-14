@@ -132,6 +132,11 @@ Socket lifecycle:
   (`TestViewSocketIsReadOnly` fails with the gate off: a viewer's `send` is
   ok). The rule is `auth.Store`'s, the view token's, so a plugin op the plugin
   calls `read` still needs `--view-op`. A viewer never sets `driving`.
+  On an observing magmux a viewer is OFF-BOX for X5: `panelReadableBy` is
+  `Transport == "socket" && !ReadOnly`, and `viewerGate` refuses `agents`
+  explicitly, because an unregistered verb otherwise falls through it and
+  `agents` is deliberately not an op. Both leaked until the 0.19.0 merge was
+  checked against X5 (`TestTheViewSocketIsOffBoxForThePanelAndTheAgentsDocument`).
 
 Tool controllers:
 

@@ -69,6 +69,12 @@ commit subjects and remain on the
   under the `claude_e2e` build tag: `MAGMUX_CLAUDE_E2E=1 go test -tags
   claude_e2e -run TestClaudeE2E -count=1 -timeout 30m -v ./mux/`. No CI job
   passes the tag.
+- The read-only view socket (`--view-sock`) is off-box for session
+  observation: it refuses the `agents` verb `forbidden`/`read_only`, and in a
+  magmux started with `MAGMUX_AGENTS=1` it refuses every read of the control
+  panel (`capture`, `transcript`, `watch`, `watch_all`) `panel_private`, as an
+  off-box caller is refused. A viewer sees one magmux, never every Claude Code
+  session on the machine.
 
 ### Fixed
 
