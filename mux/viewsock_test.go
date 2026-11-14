@@ -103,13 +103,22 @@ func TestViewSocketIsReadOnly(t *testing.T) {
 		t.Fatalf("a refused viewer request reached the pane:\n%s", screen)
 	}
 
-	// The viewer's watch carries frames of the live screen.
+	// The viewer's watch carries frames of the live screen. The capture polls
+	// above read past every event that was not their reply, frames included,
+	// and a pane that has gone quiet sends no more: so ask for a keyframe with
+	// resync, which is itself a viewer verb, and read its reply in the same
+	// loop because the keyframe may arrive on either side of it.
+	resyncID := ids.next("resync")
+	view.send(map[string]any{"type": "resync", "pane": 0, "id": resyncID})
 	deadline := time.Now().Add(10 * time.Second)
 	_ = view.c.SetReadDeadline(deadline)
 	for {
 		ev, raw, ok := view.next()
 		if !ok || time.Now().After(deadline) {
 			t.Fatal("the view socket's watch delivered no frame")
+		}
+		if ev["type"] == "reply" && fmt.Sprint(ev["id"]) == resyncID && ev["ok"] != true {
+			t.Fatalf("resync on the view socket was refused: %s", raw)
 		}
 		if ev["type"] != protocol.EventFrame {
 			continue
