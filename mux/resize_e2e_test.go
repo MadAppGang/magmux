@@ -94,6 +94,31 @@ func (ids *rpcIDs) awaitCaptureLine(rc *rpcConn, pane int, want string, within t
 	return ""
 }
 
+// awaitCaptureText polls capture until want appears ANYWHERE on pane's screen.
+//
+// For a marker a SHELL prints after input that was sent to it, the row is not
+// the test's to choose. Input that reaches the PTY before the shell's first
+// prompt is echoed by the line discipline on a row of its own, and the shell
+// then draws its prompt and prints the output on the SAME row: on dash (CI's
+// sh) the screen is "echo CTRL$((40+2))" then "$ CTRL42". So the marker is
+// COMPUTED — the echoed input cannot contain it — and matched as text, never
+// as a whole row. awaitCaptureLine is for output a test's own script prints.
+func (ids *rpcIDs) awaitCaptureText(rc *rpcConn, pane int, want string, within time.Duration) string {
+	rc.t.Helper()
+	var text string
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		res := replyOK(rc.t, ids.ask(rc, map[string]any{"type": "capture", "pane": pane}))
+		text, _ = res["text"].(string)
+		if strings.Contains(text, want) {
+			return text
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	rc.t.Fatalf("pane %d never showed %q within %v; last screen:\n%s", pane, want, within, text)
+	return ""
+}
+
 // TestResizeReachesTheChild is criterion 1, in claudish's own shape: headless,
 // --no-status, one -e, COLUMNS=160 LINES=50. The child traps WINCH and prints
 // `stty size`, so a "40 100" on its screen is the child itself reporting a

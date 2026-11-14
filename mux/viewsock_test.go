@@ -97,8 +97,10 @@ func TestViewSocketIsReadOnly(t *testing.T) {
 	view.send(map[string]any{"type": "send", "pane": 0, "text": "echo VIEWLEAK"})
 
 	// The control client still drives the pane, and the viewer sees it.
+	// CTRL42 is computed so the echoed input cannot match it, and is matched as
+	// text: on dash a send that beats the first prompt prints it after "$ ".
 	replyOK(t, ids.ask(ctrl, map[string]any{"type": "send", "pane": 0, "text": "echo CTRL$((40+2))"}))
-	screen := ids.awaitCaptureLine(view, 0, "CTRL42", 10*time.Second)
+	screen := ids.awaitCaptureText(view, 0, "CTRL42", 10*time.Second)
 	if strings.Contains(screen, "VIEWLEAK") {
 		t.Fatalf("a refused viewer request reached the pane:\n%s", screen)
 	}
