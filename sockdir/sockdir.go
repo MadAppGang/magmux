@@ -104,7 +104,11 @@ func ValidDir(dir string) (string, error) {
 // permissive on purpose — report anything that looks like ours, including an
 // --id name. Deletion cannot be, because the capture group IS the liveness
 // oracle: if it is not a pid, there is nothing to ask.
-var pidSockPattern = regexp.MustCompile(`^magmux-([0-9]+)\.sock$`)
+//
+// It covers both sockets a pid-named magmux binds: the control socket
+// (`.sock`) and the read-only view socket (`.view`, --view-sock), which is
+// killed with the same process and so goes stale with it.
+var pidSockPattern = regexp.MustCompile(`^magmux-([0-9]+)\.(sock|view)$`)
 
 // pidTokenPattern and pidTokenTmpPattern gate deletion of the REMOTE-CONTROL
 // token file, under exactly the same rule and for exactly the same reason.
@@ -295,7 +299,7 @@ func ReapStale(dir, self string, deadline time.Duration) int {
 			continue // rule 1
 		}
 		pid, err := strconv.Atoi(m[1])
-		if err != nil || fmt.Sprintf("magmux-%d.sock", pid) != name {
+		if err != nil || fmt.Sprintf("magmux-%d.%s", pid, m[2]) != name {
 			continue // rule 2
 		}
 		path := filepath.Join(dir, name)

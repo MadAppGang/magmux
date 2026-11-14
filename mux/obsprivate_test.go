@@ -195,7 +195,8 @@ func TestObservationRefusesToStartOnAPublicPanel(t *testing.T) {
 }
 
 // TestASocketVerbCaptureOfThePanelIsOnBox drives the REAL socket adapter: a
-// unix socket served by handleSocketConn, whose reader sets msg.caller once,
+// unix socket served by handleSocketConn (serveSocketConn, shared with the view
+// socket), whose reader sets msg.caller once,
 // with callerFor. A capture of the panel over it is on-box and is served; the
 // same request through the hub as an HTTP caller is refused. And the caller the
 // adapter builds (callerFor) carries the connection's self-declared Client, and
@@ -285,9 +286,9 @@ func TestASocketVerbCaptureOfThePanelIsOnBox(t *testing.T) {
 	// second time (review 3 Issue 19). Assignments to a sockMsg's `caller`
 	// in non-test code: the socket adapter and the op adapter, nothing else.
 	if sites := assignmentSites(t, "caller"); !sameSites(sites, map[string]string{
-		"handleSocketConn": "sockconn.go", "opMsg": "ops_builtin.go",
+		"serveSocketConn": "sockconn.go", "opMsg": "ops_builtin.go",
 	}) {
-		t.Errorf("msg.caller is assigned at %v, want exactly handleSocketConn (sockconn.go) and opMsg "+
+		t.Errorf("msg.caller is assigned at %v, want exactly serveSocketConn (sockconn.go) and opMsg "+
 			"(ops_builtin.go)", sites)
 	}
 

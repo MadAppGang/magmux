@@ -123,6 +123,15 @@ Socket lifecycle:
 - `mux/socket.go` — `listenSocket` (reaper sweep, stale remove, bind) runs
   SYNCHRONOUSLY in `Main` before any pane or plugin forks, and a failed bind
   exits 1; `serveSocket` is the accept loop and its teardown, on a goroutine.
+- `mux/viewsock.go` — `--view-sock`: a second listener at `magmux-<id>.view`
+  (NOT `.sock`: `magmux mcp` and claudish discover sessions by
+  `magmux-*.sock`), bound right after the control one and fatal on failure,
+  closed by `serveSocket`'s teardown. Its connections are `Caller.ReadOnly`,
+  and `viewerGate` runs on the RAW message before `handleSocketMsg`, because
+  the legacy verbs never reach `hub.Call` and its class check
+  (`TestViewSocketIsReadOnly` fails with the gate off: a viewer's `send` is
+  ok). The rule is `auth.Store`'s, the view token's, so a plugin op the plugin
+  calls `read` still needs `--view-op`. A viewer never sets `driving`.
 
 Tool controllers:
 

@@ -121,6 +121,10 @@ func Main(args []string) int {
 			fmt.Println("  --view-op plugin.op  Also let the view token call one plugin op. Repeatable.")
 			fmt.Println("            The name must be fully qualified; anything else is ignored with a")
 			fmt.Println("            message, because ignoring a grant can only ever narrow access.")
+			fmt.Println("  --view-sock  Also bind a READ-ONLY socket, {sock-dir}/magmux-{id}.view,")
+			fmt.Println("            beside the control socket. A client on it gets what the view token")
+			fmt.Println("            gets: read-class built-in ops, watch, and --view-op grants. Anything")
+			fmt.Println("            else is refused with code forbidden, reason read_only. No token.")
 			fmt.Println("  --tls-cert FILE / --tls-key FILE  Serve https/wss. Both or neither.")
 			fmt.Println("  --plugin CMD  Run CMD as a plugin and let it add its own ops. Repeatable.")
 			fmt.Println("            It is started through the shell with MAGMUX_SOCK, MAGMUX_PLUGIN_ID")
@@ -293,6 +297,7 @@ func Main(args []string) int {
 	headless := false
 	var autoClose time.Duration
 	var sockID string
+	viewSock := false
 	var sockDirArg string
 	var themePref string
 	var remoteOpts remoteOptions
@@ -486,6 +491,8 @@ func Main(args []string) int {
 					fmt.Fprintf(os.Stderr, "magmux: ignoring --id %q (allowed: A-Z a-z 0-9 _ -, max 64, not all digits)\n", args[i])
 				}
 			}
+		case "--view-sock":
+			viewSock = true
 		case "--sock-dir":
 			if i+1 < len(args) {
 				i++
@@ -608,6 +615,8 @@ func Main(args []string) int {
 		headless:       headless,
 		autoCloseAfter: autoClose,
 		sockID:         sockID,
+		viewSock:       viewSock,
+		viewGrants:     auth.NewStore("", "", remoteOpts.viewOps),
 		sockDir:        muxSockDir,
 		themePref:      themePref,
 		sockDone:       make(chan struct{}),
@@ -703,6 +712,24 @@ func Main(args []string) int {
 		rem.cleanup()
 		fmt.Fprintf(os.Stderr, "magmux: socket %s: %v\n", mux.sockPath, err)
 		os.Exit(1)
+	}
+	// The view socket binds right after it, under the same rule: before any
+	// child forks, and fatal when it cannot bind, because a viewer told to
+	// watch this path would otherwise wait forever. The control socket was
+	// already bound, so a failure here removes it too.
+	if mux.viewSock {
+		mux.viewSockPath = mux.viewSocketPath()
+		vln, err := mux.listenViewSocket()
+		if err != nil {
+			ln.Close()
+			os.Remove(mux.sockPath)
+			mux.restore()
+			rem.cleanup()
+			fmt.Fprintf(os.Stderr, "magmux: view socket %s: %v\n", mux.viewSockPath, err)
+			os.Exit(1)
+		}
+		mux.viewLn = vln
+		go mux.serveViewSocket(vln)
 	}
 	// The accept loop and its teardown run on their own goroutine; the
 	// listener is already bound, so a client connecting from here on is
@@ -886,6 +913,9 @@ func Main(args []string) int {
 	// Cleanup socket (normally already removed by the teardown above)
 	if mux.sockPath != "" {
 		os.Remove(mux.sockPath)
+	}
+	if mux.viewSockPath != "" {
+		os.Remove(mux.viewSockPath)
 	}
 
 	mux.cleanup()

@@ -123,7 +123,13 @@ var sockConnSeq atomic.Uint64
 // lock, then wrote and registered under it; anything published in between was
 // simply lost, and it was also why an event could never be published from a
 // goroutine that held that lock.
-func (m *Magmux) handleSocketConn(conn net.Conn) {
+func (m *Magmux) handleSocketConn(conn net.Conn) { m.serveSocketConn(conn, false) }
+
+// serveSocketConn is handleSocketConn for either socket. readOnly is true for a
+// connection accepted on the view socket (--view-sock): its Caller is
+// read-only for the life of the connection, every message passes viewerGate
+// before it runs, and it is never counted as a controller.
+func (m *Magmux) serveSocketConn(conn net.Conn, readOnly bool) {
 	// Step 0, BEFORE the hub hears about this connection: wait for the layout.
 	// The listener is bound before the first child forks, on purpose —
 	// MAGMUX_SOCK must be in that child's environment — so connections do
@@ -150,7 +156,7 @@ func (m *Magmux) handleSocketConn(conn net.Conn) {
 	// Step 1: register, BUFFERING. From this moment every Publish is queued for
 	// this connection, and nothing is written yet.
 	sink := &sockSink{conn: conn}
-	sub := m.bus().Session(hub.Caller{Transport: "socket", Conn: connID}, sink, pc.Plugin)
+	sub := m.bus().Session(hub.Caller{Transport: "socket", Conn: connID, ReadOnly: readOnly}, sink, pc.Plugin)
 	// The host writes to a plugin through the SAME Sub as everything else: one
 	// writer per connection is what stops an `invoke` interleaving mid-line with
 	// a broadcast, and Sub.Send never blocks, so a wedged plugin fills its own
@@ -232,6 +238,12 @@ func (m *Magmux) handleSocketConn(conn net.Conn) {
 		if err := json.Unmarshal(line, &env); err != nil {
 			continue
 		}
+		if readOnly && protocol.IsPluginMessage(env.Type) {
+			// A viewer cannot become a plugin: registering adds ops and claims
+			// panes.
+			m.replyTo(sub, env.ID, nil, errReadOnly(env.Type))
+			continue
+		}
 		if pc.Handle(env, line) {
 			continue
 		}
@@ -243,6 +255,21 @@ func (m *Magmux) handleSocketConn(conn net.Conn) {
 		// sockMsg.caller: the field is unexported precisely so this is the
 		// only way it can ever be set.
 		msg.caller = callerFor(sub, msg)
+		if readOnly {
+			grant, err := m.viewerGate(msg)
+			if err != nil {
+				m.replyTo(sub, msg.ID, nil, err)
+				continue
+			}
+			if grant {
+				m.viewerGrantedCall(msg, sub)
+				continue
+			}
+			// A viewer reads; it never drives, so the panel never reports it
+			// as a controller arriving or leaving.
+			m.handleSocketMsg(msg, sub)
+			continue
+		}
 		if m.handleSocketMsg(msg, sub) && !driving {
 			driving = true
 			m.control.noteController(true)

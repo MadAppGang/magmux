@@ -50,4 +50,10 @@ const (
 	// ReasonUnconfirmed: Enter was pressed and no evidence attributable to a
 	// user prompt appeared in time. The outcome is uncertain.
 	ReasonUnconfirmed = "unconfirmed"
+
+	// ── forbidden ──
+
+	// ReasonReadOnly: the request came in on the read-only view socket
+	// (--view-sock), which may only read and watch.
+	ReasonReadOnly = "read_only"
 )

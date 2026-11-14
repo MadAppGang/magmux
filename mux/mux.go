@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/MadAppGang/magmux/auth"
 	"github.com/MadAppGang/magmux/claudestate/claude"
 	"github.com/MadAppGang/magmux/hub"
 	"github.com/MadAppGang/magmux/plugin"
@@ -191,6 +192,14 @@ type Magmux struct {
 	noIdleDone bool
 	sockPath   string // /tmp/magmux-{pid}.sock, or {name} with --id
 	sockID     string // --id NAME: bind a named socket instead of the pid one
+	// viewSock is --view-sock: also bind a READ-ONLY socket at viewSockPath
+	// (magmux-{id}.view beside the control socket). viewLn is its listener,
+	// closed by serveSocket's teardown. viewGrants carries --view-op, the
+	// same grants a --listen view token gets; nil grants nothing.
+	viewSock     bool
+	viewSockPath string
+	viewLn       net.Listener
+	viewGrants   *auth.Store
 	// sockDir overrides where this magmux binds (--sock-dir / MAGMUX_SOCK_DIR).
 	// Empty means the package default in sockdir.go, i.e. /tmp — so every
 	// existing struct literal keeps binding exactly where it always did. Same
