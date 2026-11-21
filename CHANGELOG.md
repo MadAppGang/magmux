@@ -11,6 +11,26 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-11-21
+
+### Fixed
+
+- **A retyped send no longer submits its prompt twice.** When a gated `send`
+  saw Claude Code's input box stay empty after typing (`never_drawn`,
+  `terminal_reset`), it typed the text once more straight after the first
+  copy. An empty screen does not prove an empty input buffer: under load
+  Claude Code reads typed bytes well before it draws them, so both copies
+  reached the box and one Enter submitted them together. Every retype is now
+  preceded by paced ctrl-u keys that clear whatever part of the first copy
+  the box holds, counted at the narrowest box magmux admits so no resize can
+  leave it short. A send the clear cannot cover — a pane under 14 columns, a
+  text needing more than `protocol.SendRetypeClearMax` (104) keys, a
+  multi-line text, or one starting with `!` — is answered `text_mismatch`
+  and not retyped, and the Enter is withheld if the box held more than was
+  typed after a retype. `protocol.SendBudget` counts the clear once. Reply
+  fields and reason strings are unchanged, and a send that needs no retype
+  gains no bytes and no latency.
+
 ## [0.20.0] - 2026-11-14
 
 ### Added
