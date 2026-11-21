@@ -115,8 +115,8 @@ func TestRealControllerRetypesOnlyAfterAReset(t *testing.T) {
 				if got := replyOf(o)["retypeCause"]; got != tc.wantCause {
 					t.Errorf("retypeCause %v, want %q", got, tc.wantCause)
 				}
-				if got := log.settle(); got != prompt+prompt+"\r" {
-					t.Errorf("bytes %q, want the text twice and one Enter", got)
+				if got := log.settle(); got != retypeBytes(prompt)+"\r" {
+					t.Errorf("bytes %q, want the text, the clear, the text again and one Enter", got)
 				}
 				return
 			}

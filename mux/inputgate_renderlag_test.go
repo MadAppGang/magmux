@@ -115,8 +115,8 @@ func TestTrulyLostTextIsRetypedOnceThenOK(t *testing.T) {
 	if o.err != nil {
 		t.Fatalf("send: %v", o.err)
 	}
-	if got := log.settle(); got != "hellohello\r" {
-		t.Errorf("bytes %q, want the text twice (one retype) and one Enter", got)
+	if got := log.settle(); got != retypeBytes("hello")+"\r" {
+		t.Errorf("bytes %q, want the text, a clear and the text again (one retype) and one Enter", got)
 	}
 	if !o.rep.retyped {
 		t.Errorf("report %+v: want retyped", o.rep)
@@ -140,8 +140,8 @@ func TestDoubleTextAfterRetypeIsMismatchNoSecondRetype(t *testing.T) {
 	if !strings.Contains(o.err.Error(), "more than was typed") {
 		t.Errorf("error %q does not say the box holds more than was typed", o.err)
 	}
-	if got := log.settle(); got != "hellohello" {
-		t.Errorf("bytes %q, want the text twice (exactly one retype) and no Enter", got)
+	if got := log.settle(); got != retypeBytes("hello") {
+		t.Errorf("bytes %q, want the text, a clear and the text again (exactly one retype) and no Enter", got)
 	}
 }
 

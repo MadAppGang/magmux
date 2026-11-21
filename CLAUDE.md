@@ -1471,9 +1471,10 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   the settle interval, so a settled verdict always fits in it. The constants
   are protocol's and `SendBudget` counts them: the windows sit inside the
   readiness deadline, and the typing + `SendSettle` + `SendVerifyMin` + one
-  `SendVerifyStep` overshoot are counted per attempt, twice (the retype) — a
-  short submit's bound is 20 780 ms. `SendVerifySettle` is above the worst lag
-  measured, with margin, because it is what licenses the retype below.
+  `SendVerifyStep` overshoot are counted per attempt, twice (the retype), and
+  the clear before the retype once — a short submit's bound is 23 068 ms.
+  `SendVerifySettle` is above the worst lag measured, with margin, because it
+  is what licenses the retype below.
   `TestRenderLagVerifiesWithoutRetype`, `TestRenderLagRealController`,
   `TestRenderLagBeyondWindowIsMismatchNoRetype`,
   `TestVerifyWindowNeverPassesTheDeadline`,
@@ -1522,8 +1523,32 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   A box with neither signal is `text_mismatch` whose detail says which was
   missing ("no stdin reset, and the deadline left less than the 3s verify
   window", or "...was not seen empty on every read"), never a retype — one
-  empty read was V1's double text. The delivery goes back through the gate to
-  the SAME deadline, types again, and settles again under the same verify
+  empty read was V1's double text. **Every retype is preceded by a CLEAR,
+  because an empty screen does not prove an empty buffer**: under load Claude
+  can have READ the first copy and not drawn it, and a retype typed behind it
+  is submitted with it by the Enter a late frame of copy 1 licenses — no rule
+  about which frame to wait for can tell the two apart. Claude reads the pty
+  in order, so after the regate the delivery writes `retypeClearKeys` ctrl-u
+  keys (one per write, paced by `keyGap`, each checked like a named key):
+  one ctrl-u deletes one wrapped row and is a no-op on an empty box
+  (measured on 2.1.330), so the count is `2*rows+2` and over-counting is
+  free. The rows are counted at the row model's own floor
+  (`retypeClearCols` = 14, a 10-cell box), never at the pane's width of the
+  moment: a resize between the count and the clear — and SIGWINCH reshape
+  clamps below `minPaneCols` — would otherwise leave a narrowed box
+  under-cleared. A pane already narrower than 14 columns, a text needing more
+  than `SendRetypeClearMax` (104: 51 rows, a 510-cell line), one holding a
+  newline, or one starting with `!` (a clear at a logical line's start and in
+  bash mode is unmeasured) is `text_mismatch` and not retyped; a pane shrunk
+  below 14 after the check is the one width the clear does not cover. An
+  `Excess` read after a retype withholds the Enter (the clear under-counted).
+  `SendBudget` counts the clear once (104 × 22 ms).
+  `TestReadButUndrawnTextIsSubmittedOnce`, `TestRetypeClearKeysCoversWrappedRows`,
+  `TestRetypeClearIsCountedAtTheNarrowestPane`,
+  `TestPaneNarrowerThanTheClearFloorIsNotRetyped`,
+  `TestMultiLineTypedOrShellTextIsNotRetyped`, `TestTooLongToClearIsNotRetyped`,
+  `TestExcessAfterRetypeWithholdsEnter`. The delivery goes back through the gate to
+  the SAME deadline, clears, types again, and settles again under the same verify
   (the 3 s extension included); `retyped:true` is set only once a retype byte
   has actually gone in. Lost twice is `text_mismatch` saying it was "already
   retyped once". NEVER retyped: a box that showed ANY of the text on any read
