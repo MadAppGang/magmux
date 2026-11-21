@@ -51,8 +51,8 @@ func TestNeverDrawnIsRetypedOnceThenOK(t *testing.T) {
 	if o.err != nil {
 		t.Fatalf("send: %v", o.err)
 	}
-	if got := log.settle(); got != "hellohello\r" {
-		t.Errorf("bytes %q, want the text twice (one retype) and one Enter", got)
+	if got := log.settle(); got != retypeBytes("hello")+"\r" {
+		t.Errorf("bytes %q, want the text, a clear and the text again (one retype) and one Enter", got)
 	}
 	res := replyOf(o)
 	if res["retyped"] != true || res["retypeCause"] != retypeNeverDrawn {
@@ -188,8 +188,8 @@ func TestNeverDrawnTwiceIsTextMismatch(t *testing.T) {
 	if !strings.Contains(o.err.Error(), "retyped once") {
 		t.Errorf("error %q does not say it was already retyped", o.err)
 	}
-	if got := log.settle(); got != "hellohello" {
-		t.Errorf("bytes %q, want the text twice and no Enter", got)
+	if got := log.settle(); got != retypeBytes("hello") {
+		t.Errorf("bytes %q, want the text, a clear and the text again and no Enter", got)
 	}
 }
 

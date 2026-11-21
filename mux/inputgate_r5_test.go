@@ -98,8 +98,8 @@ func TestSilentDropWithAnUnchangedConversationIsStillRetyped(t *testing.T) {
 	if o.err != nil {
 		t.Fatalf("send: %v", o.err)
 	}
-	if got := log.settle(); got != "hellohello\r" {
-		t.Errorf("bytes %q, want one retype and one Enter", got)
+	if got := log.settle(); got != retypeBytes("hello")+"\r" {
+		t.Errorf("bytes %q, want one cleared retype and one Enter", got)
 	}
 	if res := replyOf(o); res["retyped"] != true || res["retypeCause"] != retypeNeverDrawn {
 		t.Errorf("reply %v: want retyped:true, retypeCause:%q", res, retypeNeverDrawn)

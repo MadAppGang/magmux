@@ -571,6 +571,22 @@ func submits(evs []event) []string {
 
 func countEnter(s string) int { return strings.Count(s, "\r") + strings.Count(s, "\n") }
 
+// wantClearBeforeRetype: a retype reached the child as the text, at least one
+// ctrl-u, then the text again. An empty box on screen does not prove an empty
+// input buffer, so nothing may be typed onto the first copy.
+func wantClearBeforeRetype(t *testing.T, evs []event, text string) {
+	t.Helper()
+	rcv := received(evs)
+	first, last := strings.Index(rcv, text), strings.LastIndex(rcv, text)
+	if first < 0 || last == first {
+		t.Errorf("child received %q: want the text twice", rcv)
+		return
+	}
+	if !strings.Contains(rcv[first+len(text):last], "\x15") {
+		t.Errorf("child received %q: want a ctrl-u between the first copy and the retype", rcv)
+	}
+}
+
 // ── assertions ──────────────────────────────────────────────────────────────
 
 func wantBusy(t *testing.T, r reply, reasons ...string) {

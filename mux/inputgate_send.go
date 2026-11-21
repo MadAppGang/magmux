@@ -140,6 +140,30 @@ func printableKey(k string) (rune, bool) {
 	return r, true
 }
 
+// retypeClearKey is the clear written before a retype, one per write.
+var retypeClearKey = namedKeys["ctrl-u"]
+
+// retypeClearCols is the width the clear before a retype is counted at: the
+// narrowest pane whose box is retypeClearKeys' 10-cell floor. A box is never
+// counted narrower than that floor, so a count taken here covers every pane
+// at least this wide, whatever width it has when the clear lands.
+const retypeClearCols = 14
+
+// retypeClearKeys is how many ctrl-u keys clear a copy of text that may sit,
+// read but undrawn, in the input buffer of a pane cols wide: one ctrl-u
+// deletes one wrapped row, so the copy's rows at the box's width (the pane
+// less its frame and prompt, never below 10), doubled for word-wrap waste,
+// plus two. A ctrl-u on an empty box does nothing, so over-counting is free.
+func retypeClearKeys(text string, cols int) int {
+	width := max(cols-4, 10)
+	cells := 0
+	for _, r := range text {
+		cells += runeWidth(r)
+	}
+	rows := (cells + width - 1) / width
+	return 2*rows + 2
+}
+
 // classifySend applies the Enter-position rule and classifies the send (§3.2).
 // On a pane that is not gated, or with noGate, it changes nothing.
 //
@@ -636,6 +660,7 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		pasteLost bool   // a paste's box stayed empty: never retyped
 		leftBox   bool   // the box showed the text, then emptied without our Enter
 		convMoved string // the box stayed empty and THIS changed since the pre-typing baseline: not retyped
+		noClear   string // the text would have been retyped, but the clear before a retype is unsafe for it: why
 	)
 	for attempt := 0; ; attempt++ {
 		attemptN = attempt
@@ -802,10 +827,36 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		//
 		// A box that is merely slow to draw shows neither (V1: retyping slow
 		// text put it in the box twice). The pre-typing baseline must exist
-		// and show nothing submitted (above). Nothing was submitted and
-		// nothing partial is left, so typing again cannot duplicate anything.
-		// Back through the gate to the same deadline, then the same typing and
-		// the same settle wait. A box holding PARTIAL text, a box still
+		// and show nothing submitted (above).
+		//
+		// Every retype is preceded by a CLEAR, because an empty screen does
+		// not prove an empty buffer: under load Claude can have read the first
+		// copy and not drawn it yet, and a second copy typed behind it would
+		// be submitted with it by the Enter a late frame of the first copy
+		// licenses. Claude reads the pty in order, so ctrl-u keys written
+		// between the copies remove whatever part of the first one it holds,
+		// one wrapped row per key, and a key on an empty box does nothing
+		// (measured): retypeClearKeys over-counts, and only an under-count
+		// could leave residue. The count is taken at the row model's own
+		// floor (retypeClearCols, a 10-cell box), never at the pane's width of
+		// the moment: the pane can be resized between the count and the clear
+		// (a SIGWINCH reshape clamps, even below minPaneCols), a narrower box
+		// wraps the copy onto more rows, and a count taken at the old width
+		// would fall short. A pane already narrower than that floor is not
+		// retyped; a pane shrunk below it after the check is the one width the
+		// clear does not cover. The clear is authorised by the same regate as
+		// the retype, so it never lands in a visible vim INSERT box (rule d);
+		// vim NORMAL mode with no marker is beyond what readiness can see.
+		// A human keystroke takes no typing token and already interleaves with
+		// any gated delivery; text appearing in the box during the clear is
+		// most likely the first copy drawn late, which the clear exists to
+		// remove. A text with a newline (ctrl-u at a logical line's start) or a
+		// leading "!" (bash mode) is not retyped, because what a clear does
+		// there is unmeasured; nor is a text whose clear would exceed
+		// SendRetypeClearMax keys.
+		//
+		// Back through the gate to the same deadline, the clear, then the
+		// same typing and the same settle wait. A box holding PARTIAL text, a box still
 		// changing when the window closed, or one that ever held MORE than
 		// typed, is never retyped; nor is a box that showed ANY of the text
 		// and then emptied (the text left it, perhaps through somebody
@@ -815,8 +866,29 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		// late plus its retype are two tokens, and Enter would submit both
 		// (r4 M1).
 		lost := settle.termiosChanged || (settle.neverDrawn && settle.convChanged == "")
-		if attempt == 0 && settle.emptyHeld && lost && sawExcess == "" && !settle.sawText &&
-			!expect.Pasted && typedText && expect.Exact != "" && !pre.At.IsZero() {
+		retypable := attempt == 0 && settle.emptyHeld && lost && sawExcess == "" && !settle.sawText &&
+			!expect.Pasted && typedText && expect.Exact != "" && !pre.At.IsZero()
+		clearKeys := 0
+		if retypable {
+			switch {
+			case strings.ContainsAny(expect.Exact, "\r\n"):
+				noClear = "the text holds more than one line, and clearing the box before a retype is unmeasured there"
+			case strings.HasPrefix(expect.Exact, "!"):
+				noClear = `the text starts with "!" (bash mode), and clearing the box before a retype is unmeasured there`
+			default:
+				if _, cols := d.p.size(); cols < retypeClearCols {
+					noClear = fmt.Sprintf("the pane is narrower than %d columns, where the clear before a retype cannot be counted",
+						retypeClearCols)
+					break
+				}
+				clearKeys = retypeClearKeys(expect.Exact, retypeClearCols)
+				if clearKeys > protocol.SendRetypeClearMax {
+					noClear = fmt.Sprintf("the text is too long to clear safely before a retype (%d ctrl-u keys, at most %d)",
+						clearKeys, protocol.SendRetypeClearMax)
+				}
+			}
+		}
+		if retypable && noClear == "" {
 			rep.retypeCause = retypeNeverDrawn
 			if settle.termiosChanged {
 				rep.retypeCause = retypeTerminalReset
@@ -834,10 +906,38 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 				finish(err)
 				return
 			}
+			// The clear: one ctrl-u per write, paced and checked like a named
+			// key. The retyped text follows the last one with no pause, so the
+			// check before that key is the last readiness decision before it.
+			// The keys are written while attemptN is still 0, so they set
+			// neither the retype's typedAt nor rep.retyped: `retyped` still
+			// means a byte of the retyped TEXT went in.
+			for range clearKeys {
+				if !pause(ctx, keyGap) {
+					finish(cancelledTyped("retype"))
+					return
+				}
+				stop, err := between()
+				if err != nil {
+					fail(err)
+					return
+				}
+				if stop {
+					fail(gateErr(protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true,
+						"pane %d: the input box was empty after typing (the text was lost), and the pane stopped being ready while the box was being cleared for the retype; nothing was retyped, Enter was not pressed, and the box may hold partial text",
+						d.idx))
+					return
+				}
+				if err := write(retypeClearKey, "key ctrl-u"); err != nil {
+					fail(err)
+					return
+				}
+			}
 			continue
 		}
 		if chk.Verdict == BoxEmpty && typedText {
 			switch {
+			case noClear != "":
 			case settle.sawText:
 				leftBox = true
 			case !settle.emptyHeld:
@@ -868,6 +968,8 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 			detail = "it differs from what was sent"
 		}
 		switch {
+		case noClear != "":
+			detail += fmt.Sprintf("; it stayed empty, so the text looked lost, but %s, so it was not retyped", noClear)
 		case noLoss && windowCut:
 			detail += fmt.Sprintf("; it stayed empty but the terminal showed no stdin reset, and the deadline left less than the %s verify window that tells a silent drop from a slow draw, so the text was not retyped", verifyMax)
 		case noLoss:
@@ -905,6 +1007,15 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		fail(gateErr(protocol.CodeNotAccepted, reason, true,
 			"pane %d: the input box does not hold what was typed (%s); Enter was not pressed, nothing was submitted, and the box may hold partial text",
 			d.idx, detail))
+		return
+	}
+	if rep.retyped && settle.excess != "" {
+		// The box held MORE than was typed after the retype and verified
+		// later: the clear under-counted, so the buffer may still hold part
+		// of the first copy behind what the box shows.
+		fail(gateErr(protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true,
+			"pane %d: the input box held more than was typed after the retype (%s); the box may hold part of the first copy, so Enter was not pressed",
+			d.idx, settle.excess))
 		return
 	}
 	rep.verified = chk.Verified

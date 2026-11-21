@@ -285,7 +285,7 @@ func TestREQ4_NoHistoryEntryIsUnconfirmedWithEveryContractField(t *testing.T) {
 // so that half is pinned in package mux, TestEmptiedBoxTwiceIsTextMismatch.)
 func TestREQ4_LostTextIsRetypedOnceThenConfirmed(t *testing.T) {
 	t.Parallel()
-	m, cn, pane := declared(t, fake{"FAKE_LOSE_ON_INPUT": "1", "FAKE_LOSE_LEN_MS": "400"})
+	m, cn, pane := declared(t, fake{"FAKE_LOSE_ON_INPUT": "1", "FAKE_LOSE_LEN_MS": "400", "FAKE_CTRLU_ROW": "1"})
 	text := "lost " + shortID(t)
 
 	r := cn.send(pane, map[string]any{"text": text})
@@ -296,13 +296,16 @@ func TestREQ4_LostTextIsRetypedOnceThenConfirmed(t *testing.T) {
 	evs := m.events(t)
 	var kept []string
 	for _, e := range ofKind(evs, "in") {
-		if !e.Dropped && e.Data == text {
+		// The retype follows the clear's last ctrl-u with no pause, so the
+		// pty may deliver the two as one chunk.
+		if !e.Dropped && strings.TrimLeft(e.Data, "\x15") == text {
 			kept = append(kept, e.Data)
 		}
 	}
 	if len(kept) != 1 {
 		t.Errorf("the text reached the child undropped %d times, want exactly 1 (the retype)", len(kept))
 	}
+	wantClearBeforeRetype(t, evs, text)
 	if n := countEnter(received(evs)); n != 1 {
 		t.Errorf("child received %d Enters, want 1", n)
 	}
@@ -320,7 +323,7 @@ func TestREQ4_LostTextIsRetypedOnceThenConfirmed(t *testing.T) {
 // one Enter, and the child submitted exactly the text.
 func TestREQ4_SilentlyDroppedTextIsRetypedOnce(t *testing.T) {
 	t.Parallel()
-	m, cn, pane := declared(t, fake{"FAKE_DROP_SILENT_ONCE": "1"})
+	m, cn, pane := declared(t, fake{"FAKE_DROP_SILENT_ONCE": "1", "FAKE_CTRLU_ROW": "1"})
 	text := "silent " + shortID(t)
 
 	r := cn.send(pane, map[string]any{"text": text})
@@ -331,7 +334,7 @@ func TestREQ4_SilentlyDroppedTextIsRetypedOnce(t *testing.T) {
 	evs := m.events(t)
 	var kept, silent int
 	for _, e := range ofKind(evs, "in") {
-		if e.Data != text {
+		if strings.TrimLeft(e.Data, "\x15") != text { // the clear's last ctrl-u may share the retype's chunk
 			continue
 		}
 		switch {
@@ -344,6 +347,7 @@ func TestREQ4_SilentlyDroppedTextIsRetypedOnce(t *testing.T) {
 	if silent != 1 || kept != 1 {
 		t.Errorf("the text was silently dropped %d times and kept %d times, want 1 and 1", silent, kept)
 	}
+	wantClearBeforeRetype(t, evs, text)
 	if n := len(ofKind(evs, "reset-start")); n > 1 {
 		t.Errorf("%d resets, want only the boot reset: the drop must not be a termios event", n)
 	}

@@ -27,6 +27,8 @@
 //	                    up is discarded with NO termios change and NO redraw:
 //	                    the box never shows any of it (the V1 rerun's silent
 //	                    drop, as Claude re-mounts its prompt after startup)
+//	FAKE_CTRLU_ROW=1    ctrl-u deletes one wrapped row of the box (the last
+//	                    one), as Claude Code 2.1.330 does, not the whole box
 //	FAKE_NO_HISTORY=1   Enter clears the box but never adds a history entry
 //	FAKE_IGNORE_ENTERS  number of Enter presses ignored before one submits
 //	FAKE_EXIT_MS        exit(0) at this time; -1 never         (default -1)
@@ -142,6 +144,7 @@ var (
 	noHistory  = os.Getenv("FAKE_NO_HISTORY") == "1"
 	loseOnIn   = os.Getenv("FAKE_LOSE_ON_INPUT") == "1"
 	dropSilent = os.Getenv("FAKE_DROP_SILENT_ONCE") == "1"
+	ctrlURow   = os.Getenv("FAKE_CTRLU_ROW") == "1"
 	ignoreEnts = envInt("FAKE_IGNORE_ENTERS", 0)
 	renderLag  = time.Duration(envInt("FAKE_RENDER_DELAY_MS", 0)) * time.Millisecond
 	outMu      sync.Mutex
@@ -387,7 +390,7 @@ func feed(p []byte) {
 			}
 			i++
 		case c == 0x15:
-			st.box = st.box[:0]
+			st.box = clearRow(st.box)
 			i++
 		case c < 0x20:
 			i++
@@ -532,4 +535,33 @@ func main() {
 	if cooked != nil {
 		_ = unix.IoctlSetTermios(0, ioctlSetFlush, cooked)
 	}
+}
+
+// clearRow is ctrl-u: the whole box, or under FAKE_CTRLU_ROW the last wrapped
+// row of its last line, at Claude's box width (the pane less its frame and
+// prompt). The gate counts its clear at a 10-cell box, never wider than this.
+func clearRow(box []rune) []rune {
+	if !ctrlURow {
+		return box[:0]
+	}
+	_, cols := size()
+	w := max(cols-4, 1)
+	lineStart := 0
+	for i, r := range box {
+		if r == '\n' {
+			lineStart = i + 1
+		}
+	}
+	n := len(box) - lineStart
+	if n == 0 {
+		if lineStart > 0 {
+			return box[:lineStart-1] // an empty last line: join it to the one above
+		}
+		return box
+	}
+	last := n % w
+	if last == 0 {
+		last = w
+	}
+	return box[:len(box)-last]
 }

@@ -335,8 +335,8 @@ func TestEmptiedBoxIsRetypedOnce(t *testing.T) {
 	if o.err != nil {
 		t.Fatalf("send: %v", o.err)
 	}
-	if got := log.settle(); got != "hellohello\r" {
-		t.Errorf("bytes %q, want the text twice and one Enter", got)
+	if got := log.settle(); got != retypeBytes("hello")+"\r" {
+		t.Errorf("bytes %q, want the text, a clear and the text again and one Enter", got)
 	}
 	res := map[string]any{}
 	o.rep.addTo(res)
@@ -353,8 +353,8 @@ func TestEmptiedBoxTwiceIsTextMismatch(t *testing.T) {
 	m, _, log := gatedMux(t, g)
 	o := runSend(t, m, sendRequest{text: "hello", enter: true})
 	wantErr(t, o, protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true)
-	if got := log.settle(); got != "hellohello" {
-		t.Errorf("bytes %q, want the text twice and no Enter", got)
+	if got := log.settle(); got != retypeBytes("hello") {
+		t.Errorf("bytes %q, want the text, a clear and the text again and no Enter", got)
 	}
 }
 
