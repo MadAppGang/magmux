@@ -113,5 +113,8 @@ func errBody(code string, err error) map[string]any {
 	if protocol.MaybeSubmittedOf(err) {
 		body["maybeSubmitted"] = true
 	}
+	if empty, ok := protocol.BoxEmptyOf(err); ok {
+		body["boxEmpty"] = empty
+	}
 	return body
 }

@@ -160,7 +160,7 @@ func (f *fakeGate) InputAccepted(b AcceptBaseline) AcceptVerdict {
 	f.mu.Unlock()
 	if fn == nil {
 		if b.SentKey == fakePreKey {
-			return AcceptVerdict{State: AcceptNone} // nothing was submitted before the retype
+			return AcceptVerdict{State: AcceptNone} // the emptied box was not submitted by another Enter
 		}
 		return AcceptVerdict{State: AcceptTaken, Evidence: evidenceHistory}
 	}

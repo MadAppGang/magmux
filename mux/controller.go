@@ -177,8 +177,8 @@ type ReadinessQuery struct {
 	Paste bool // the text goes out bracketed: rule i (bracketed paste on) applies
 	// Baseline, when set, is the content this delivery will type into an
 	// empty box; the answer then carries Pre, an acceptance baseline for it
-	// taken from the SAME read. It is what lets a delivery ask, before a
-	// retype, whether somebody else's Enter already submitted its text.
+	// taken from the SAME read. It is what lets a delivery whose box emptied
+	// ask whether somebody else's Enter already submitted its text.
 	Baseline string
 }
 
@@ -210,11 +210,10 @@ type BoxExpect struct {
 	// WIDENS what verifies; equality still verifies.
 	Pasted     bool
 	PasteAbove int // MaxPaste at the post-token check; a verifying token must exceed it
-	// TypedAt is the moment of this attempt's first byte: a termios change
-	// after it (BoxCheck.TermiosChanged) is the positive evidence of a reset
-	// that the auto-retype requires.
+	// TypedAt is the moment of the delivery's first byte: a termios change
+	// after it is BoxCheck.TermiosChanged, which the reply's detail names.
 	TypedAt time.Time
-	// Pre is the attempt's pre-typing acceptance baseline (InputReadiness.Pre),
+	// Pre is the delivery's pre-typing acceptance baseline (InputReadiness.Pre),
 	// when it has one: what BoxCheck.ConvChanged compares the conversation
 	// against.
 	Pre AcceptBaseline
@@ -242,19 +241,21 @@ type BoxCheck struct {
 	// tell a box still being drawn from one that has stopped changing.
 	Box string
 	// Excess: a mismatch where the box holds MORE than the send typed (the
-	// text drawn twice). It forbids the auto-retype.
+	// text drawn twice). Its detail is the reply's.
 	Excess bool
 	// TermiosChanged: the pty's termios fingerprint changed after
-	// BoxExpect.TypedAt (a cooked/reset sample in the watch's history). It
-	// is the evidence that typed text was SWALLOWED by a stdin reset, rather
-	// than merely slow to draw, and the auto-retype requires it.
+	// BoxExpect.TypedAt (a cooked/reset sample in the watch's history). The
+	// reply's detail says so when the box stayed empty. It does NOT prove the
+	// text was lost: a raw-mode switch with TCSADRAIN does not flush the
+	// input queue, so the text can still be unread in the pty.
 	TermiosChanged bool
 	// ConvChanged, when BoxExpect.Pre is set and Readiness.Ready: what changed
 	// since that pre-typing baseline that a SUBMIT would have changed — the
 	// conversation above the box, or a turn starting. "" = nothing. A submit
 	// by another writer before the text was ever drawn leaves an empty box
 	// that looks exactly like a silent drop; this is how the two are told
-	// apart, and a change forbids the never_drawn retype (r5 M1).
+	// apart, and a change makes the reply say another writer may have
+	// submitted the text (r5 M1).
 	ConvChanged string
 }
 

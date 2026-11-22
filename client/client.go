@@ -185,6 +185,7 @@ type mcpReply struct {
 	Reason         string          `json:"reason,omitempty"`
 	Typed          bool            `json:"typed,omitempty"`
 	MaybeSubmitted bool            `json:"maybeSubmitted,omitempty"`
+	BoxEmpty       *bool           `json:"boxEmpty,omitempty"`
 }
 
 // sockRequestError is a structured failure reported by magmux itself. The code
@@ -194,12 +195,13 @@ type mcpReply struct {
 type sockRequestError struct {
 	Code string
 	Msg  string
-	// Reason, Typed and MaybeSubmitted are carried for protocol.ReasonOf,
-	// TypedOf and MaybeSubmittedOf, and are deliberately not in Error's
-	// wording, which is unchanged.
+	// Reason, Typed, MaybeSubmitted and BoxEmpty are carried for
+	// protocol.ReasonOf, TypedOf, MaybeSubmittedOf and BoxEmptyOf, and are
+	// deliberately not in Error's wording, which is unchanged.
 	Reason         string
 	Typed          bool
 	MaybeSubmitted bool
+	BoxEmpty       *bool
 }
 
 func (e *sockRequestError) Error() string {
@@ -216,7 +218,7 @@ func (e *sockRequestError) Error() string {
 // protocol.CodeOf reads its code. Error keeps its own wording, with the code
 // beside the message, because that is what the model is shown.
 func (e *sockRequestError) Unwrap() error {
-	return &protocol.Error{Code: e.Code, Msg: e.Msg, Reason: e.Reason, Typed: e.Typed, MaybeSubmitted: e.MaybeSubmitted}
+	return &protocol.Error{Code: e.Code, Msg: e.Msg, Reason: e.Reason, Typed: e.Typed, MaybeSubmitted: e.MaybeSubmitted, BoxEmpty: e.BoxEmpty}
 }
 
 // sockTimeoutError is "our own timer fired and magmux said nothing". It is a
@@ -974,7 +976,7 @@ func (s *Session) requestRaw(ctx context.Context, msg map[string]any, timeout ti
 	select {
 	case r := <-ch:
 		if !r.OK {
-			return r.Result, &sockRequestError{Code: r.Code, Msg: r.Error, Reason: r.Reason, Typed: r.Typed, MaybeSubmitted: r.MaybeSubmitted}
+			return r.Result, &sockRequestError{Code: r.Code, Msg: r.Error, Reason: r.Reason, Typed: r.Typed, MaybeSubmitted: r.MaybeSubmitted, BoxEmpty: r.BoxEmpty}
 		}
 		return r.Result, nil
 	case <-ctx.Done():

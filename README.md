@@ -515,7 +515,9 @@ sub-code that says which failure of that kind it was, `"typed":true`,
 which says bytes of this request reached the pane before it failed, and
 `"maybeSubmitted":true`, which says the text may already be in the
 conversation through an Enter that was not magmux's — never answer that one by
-sending again. All three are omitted when they do not apply, so a failure without them is the line it
+sending again — and `"boxEmpty":true|false`, present on every `text_mismatch`
+from a gated send, which says whether the input box was empty or held text at
+the final verify. All four are omitted when they do not apply, so a failure without them is the line it
 always was.
 
 | `code` | Meaning |
@@ -746,8 +748,8 @@ preferring files that appeared after the pane started. Claude Code writes no
 transcript until its first prompt is accepted, so at the first send every
 candidate is somebody else's — a sibling started a moment later, or the parent
 session in the same directory — and the guess sticks. The gate then reads that
-session: a false `busy dialog:permission` from its registry, a refused retype
-from its conversation.
+session: a false `busy dialog:permission` from its registry, or a send
+misreported from its conversation.
 
 A caller that knows the session says so, and magmux stops guessing:
 
@@ -845,32 +847,30 @@ add `noGate`.
    (`transcript`). An emptied box is never evidence, because a lost prompt
    looks exactly like a submitted one. If the text is still in the box, magmux
    verifies it again and presses Enter once more, and the reply then says
-   `accept:"resent_enter"`. If the box never showed any of the text, nothing
-   was submitted and nothing partial is left, and magmux types it ONCE more
-   (back to step 1, within the same deadline) on either of two signals of
-   loss: the box stayed COMPLETELY empty for that whole second AND the
-   terminal went through a reset after the text was typed (a late startup
-   terminal reset swallows the text whole: `retypeCause:"terminal_reset"`);
-   or the box was COMPLETELY empty on every read for the whole 3 s window,
-   with no reset (Claude dropped the text silently and never drew a rune of
-   it; render lag tops out well under a second, so a 3 s blank is not a slow
-   draw: `retypeCause:"never_drawn"`) and the conversation above the box did
-   not change and no turn started meanwhile (if either did, another writer's
-   Enter may have submitted the text before it was drawn, so it is
-   `text_mismatch` and not retyped). The ok reply then carries
-   `retyped:true` and `retypeCause`. A blank box with no reset whose 3 s
-   window the deadline cut short cannot be told from a slow draw, so it is
-   `text_mismatch`, never a retype. Before retyping, magmux checks whether
-   the text was in fact submitted by another Enter (a person at the
-   keyboard, say); if it was, the reply is ok with
-   `accept:"submitted_by_other"`, that evidence, and `enter:false`, because
-   magmux pressed no Enter (a TYPE send too: its text is no longer in the
-   box), and nothing is retyped. A box that held part of the text, all of
-   it, or more than was typed is never retyped, and nor is a paste (paste
-   mode, a bracketed multi-line auto send, or an auto send over 800 runes):
-   a late-drawn paste and its retype would be two tokens, and Enter would
-   submit both. After the one retype the same verify applies, and a second
-   loss is `text_mismatch`.
+   `accept:"resent_enter"`. If the box shows none of the text, magmux does
+   NOT type it again, whatever the screen and the terminal showed: an empty
+   box does not prove Claude read the text. A Claude Code that drew its box
+   and stopped reading its input leaves the text unread in the terminal, and
+   anything typed after it — a second copy, even a ctrl-u clear in front of
+   one — queues behind it and lands with it when Claude resumes (Claude Code
+   ignores ctrl-u inside a large read of its input, and drops it during
+   early-input capture). A terminal reset after the text was typed does not
+   prove a loss either, and nor does a box blank for the whole 3 s window.
+   The reply is `text_mismatch` with the text typed once and no Enter, and
+   its detail says what was seen: the box "stayed empty" after the terminal
+   reset its stdin, or "stayed empty on every read of the whole 3s verify
+   window (never drawn)", or stayed empty with neither, and in each case
+   that it was "not retyped". If the conversation above the box changed or a
+   turn started meanwhile, another writer's Enter may have submitted the
+   text before it was drawn, and the detail says so (`maybeSubmitted`).
+   First, though, magmux checks whether the text was in fact submitted by
+   another Enter (a person at the keyboard, say); if it was, the reply is ok
+   with `accept:"submitted_by_other"`, that evidence, and `enter:false`,
+   because magmux pressed no Enter (a TYPE send too: its text is no longer
+   in the box). A paste (paste mode, a bracketed multi-line auto send, or an
+   auto send over 800 runes) that leaves the box empty is `text_mismatch`
+   too. Whether to send the text again is the caller's decision: look at the
+   box first, because the text may still arrive.
 
 `readyTimeoutMs` (default 10000, at most 60000) is ONE deadline. Waiting for
 the box, waiting for another delivery to finish typing into the same pane, the
@@ -884,10 +884,10 @@ so it is the most a send ever waits for readiness.
 ```
 
 `waitedMs` is the time spent waiting for readiness, including any return to
-the gate before the first key or a retype. `dismissed` lists the
+the gate before the first key. `dismissed` lists the
 dialogs that were Escaped, in order, and is omitted when there were none.
-`retyped:true` and `retypeCause` (`terminal_reset` or `never_drawn`) appear
-only when the one automatic retype ran. `accept` is `confirmed`,
+`retyped` and `retypeCause` no longer appear: magmux never retypes. `accept`
+is `confirmed`,
 `resent_enter`, `in_box` (a TYPE send, left in the box), or
 `submitted_by_other`: the text left the box through somebody else's Enter and
 evidence for it appeared, so magmux pressed none, and `enter` is then false.
@@ -924,7 +924,7 @@ prescribe a retry.
 | `busy` `dialog:<kind>` | no | a blocking dialog: `permission`, `question`, `plan`, `select`, `trust`, `bypass`, `api_key` or `onboarding`. Only Escapes were written before typing |
 | `busy` `typing_in_progress` | no | another delivery was still typing into the pane at the deadline |
 | `busy` with `typed:true` | no | the text was typed and the Enter withheld, by a dialog or by a terminal that did not come back in time. The box may hold the text, or part of it |
-| `not_accepted` `text_mismatch` | no (not by magmux) | the box held something other than what was typed: partial text, more than was typed (two paste tokens included), a box still changing after 3 s, or nothing — after the one automatic retype, for a paste (never retyped), or with neither loss signal (no terminal reset, and the 3 s window cut short by the deadline or interrupted), when the text may still appear. The detail says which. Nothing was submitted, EXCEPT when the detail says the box showed the text and then emptied without magmux's Enter: then it is unknown whether another Enter submitted it, so check the conversation before sending it again (the reply carries `"maybeSubmitted":true`). A retype is refused `box_not_empty` until the box is cleared |
+| `not_accepted` `text_mismatch` | no (not by magmux) | the box held something other than what was typed: partial text, more than was typed (two paste tokens included), a box still changing after 3 s, or nothing — the box stayed empty after a terminal reset, was never drawn for the whole 3 s window, or neither (the window cut short by the deadline or interrupted), or a paste left it empty. magmux never types the text a second time: an empty box does not prove Claude read it, and it may still appear. The detail says which, and `boxEmpty` says whether the box was empty (`true`) or held text (`false`) at the final verify. Nothing was submitted, EXCEPT when the detail says the box showed the text and then emptied without magmux's Enter, or the conversation changed: then it is unknown whether another Enter submitted it, so check the conversation before sending it again (the reply carries `"maybeSubmitted":true`). A resend is refused `box_not_empty` until the box is cleared |
 | `not_accepted` `empty_box` | no | a submit found the box empty, so there was nothing to submit |
 | `not_accepted` `still_in_box` | yes, once or twice | the text is still in the box, unsubmitted. **Do not retype it**: it is there |
 | `not_accepted` `unconfirmed` | yes | no user-prompt entry and no transcript entry that can be attributed to THIS send appeared within the windows. An identical older prompt does not count. A history entry must be a NEW user-prompt entry after the ones the verify saw, and magmux must be able to tell where those end: when the visible prompts are all the same text (a resent `continue`) and the top of the conversation is not on screen, or a command wipes the screen (`/clear`), the history cannot say, and only the transcript can. A transcript record must have been SUBMITTED after the verify: a queued prompt counts from its enqueue, and an older identical queued prompt that runs later is still the older one. The prompt may have been lost, or taken without a visible sign. You decide |
@@ -932,9 +932,10 @@ prescribe a retry.
 **How long to wait for the reply.** Every part of a gated send is paced by a
 constant, so its upper bound is a formula: `readyTimeoutMs`, plus the typing,
 plus 22 ms per key, plus the 150 ms settle and the verify's 1.2 s minimum
-window (each counted twice, for the one retype), plus three 2 s acceptance
-windows, plus 2 s of slack (`protocol.SendBudget`). A short prompt comes to
-about 21 s, and `readyTimeoutMs:60000` to about 71 s. A caller that names no timeout is
+window (each counted twice), plus 104 × 22 ms, plus three 2 s acceptance
+windows, plus 2 s of slack (`protocol.SendBudget`); the second count and the
+104 keys are headroom, kept so the bound does not change. A short prompt comes
+to about 23 s, and `readyTimeoutMs:60000` to about 73 s. A caller that names no timeout is
 never cut off before that:
 
 | Transport | Default wait for a gated send |

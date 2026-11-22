@@ -1,13 +1,14 @@
 package mux
 
-// The second loss signal (V1 rerun): Claude Code sometimes drops typed text
-// right after the gate opens WITHOUT any termios change — the box never draws
-// any of it. Render lag tops out well under a second (300–800 ms), so a box
-// that is COMPLETELY empty on every read for the whole verify window
-// (verifyMax, 3 s) is a silent drop, not a slow draw, and licenses the one
-// retype (`retypeCause:"never_drawn"`). Everything else about the retype is
-// unchanged: no retype after partial text or excess, a second loss is
-// text_mismatch, and the window must not have been cut short by the deadline.
+// Claude Code sometimes leaves typed text undrawn right after the gate opens
+// WITHOUT any termios change — the box never draws any of it. Render lag tops
+// out well under a second (300–800 ms), so a box that is COMPLETELY empty on
+// every read for the whole verify window (verifyMax, 3 s) is reported as
+// never drawn. It is NOT retyped: an empty box does not prove Claude Code
+// read the text, and a second copy could land behind the first, unread. The
+// send answers text_mismatch with the text typed once and no Enter; a box
+// that showed partial text, a deadline that cut the window short and a
+// not-ready read in the window keep their own details.
 
 import (
 	"strings"
@@ -25,81 +26,84 @@ func replyOf(o sendOutcome) map[string]any {
 	return res
 }
 
-// TestNeverDrawnIsRetypedOnceThenOK: the box shows the placeholder on every
-// read for the whole 3 s window, with no terminal reset. One retype, then the
-// text is drawn: ok, retyped:true, retypeCause:"never_drawn", and the retype
-// came no sooner than the window closed.
-func TestNeverDrawnIsRetypedOnceThenOK(t *testing.T) {
-	var clk lagClock
-	var mu sync.Mutex
-	var retypeAt time.Duration
-	g := &fakeGate{}
-	g.checkFn = func(BoxExpect, int) BoxCheck {
-		el := clk.since()
-		if strings.Count(g.log.String(), "hello") >= 2 {
-			mu.Lock()
-			if retypeAt == 0 {
-				retypeAt = el
-			}
-			mu.Unlock()
-			return verifiedBox(verifiedExact)
+// wantNotRetyped: the send answered not_accepted / text_mismatch, typed, for
+// a box that stayed empty, and the error carries the words a client keys on
+// ("stayed empty", "not retyped") plus words. The reply has no retype keys.
+func wantNotRetyped(t *testing.T, o sendOutcome, words ...string) {
+	t.Helper()
+	wantErr(t, o, protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true)
+	if o.err == nil {
+		return
+	}
+	for _, w := range append([]string{"stayed empty", "not retyped"}, words...) {
+		if !strings.Contains(o.err.Error(), w) {
+			t.Errorf("error %q does not contain %q", o.err, w)
 		}
-		return boxEmptyCheck() // dropped silently: no termios change, never drawn
-	}
-	m, _, log := gatedMux(t, g)
-	o := runSend(t, m, sendRequest{text: "hello", enter: true})
-	if o.err != nil {
-		t.Fatalf("send: %v", o.err)
-	}
-	if got := log.settle(); got != retypeBytes("hello")+"\r" {
-		t.Errorf("bytes %q, want the text, a clear and the text again (one retype) and one Enter", got)
 	}
 	res := replyOf(o)
-	if res["retyped"] != true || res["retypeCause"] != retypeNeverDrawn {
-		t.Errorf("reply %v: want retyped:true, retypeCause:%q", res, retypeNeverDrawn)
-	}
-	if ack := lastAck(m); !strings.Contains(ack, "never drawn") {
-		t.Errorf("ack %q does not name the cause", ack)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if retypeAt < verifyMax {
-		t.Errorf("retyped %v after the first check, want no sooner than the %v window", retypeAt, verifyMax)
+	for _, k := range []string{"retyped", "retypeCause"} {
+		if _, ok := res[k]; ok {
+			t.Errorf("reply %v carries %s", res, k)
+		}
 	}
 }
 
-// TestTerminalResetRetypeNamesItsCause: the reset signal still retypes at the
-// settle interval (it does not wait out the whole window), and says so.
-func TestTerminalResetRetypeNamesItsCause(t *testing.T) {
+// TestNeverDrawnIsTypedOnceAndNotRetyped: the box shows the placeholder on
+// every read for the whole 3 s window, with no terminal reset. The text is
+// typed once, with no clear and no Enter, and the send answers text_mismatch
+// saying the box was never drawn — no sooner than the window closed.
+func TestNeverDrawnIsTypedOnceAndNotRetyped(t *testing.T) {
 	var clk lagClock
 	var mu sync.Mutex
-	var retypeAt time.Duration
-	g := &fakeGate{}
-	g.checkFn = func(BoxExpect, int) BoxCheck {
+	var lastCheck time.Duration
+	g := &fakeGate{checkFn: func(BoxExpect, int) BoxCheck {
 		el := clk.since()
-		if strings.Count(g.log.String(), "hello") >= 2 {
-			mu.Lock()
-			if retypeAt == 0 {
-				retypeAt = el
-			}
-			mu.Unlock()
-			return verifiedBox(verifiedExact)
-		}
-		return lostBoxCheck()
-	}
-	m, _, _ := gatedMux(t, g)
+		mu.Lock()
+		lastCheck = el
+		mu.Unlock()
+		return boxEmptyCheck() // never drawn, no termios change
+	}}
+	m, _, log := gatedMux(t, g)
 	o := runSend(t, m, sendRequest{text: "hello", enter: true})
-	if o.err != nil {
-		t.Fatalf("send: %v", o.err)
+	wantNotRetyped(t, o, "never drawn")
+	if got := log.settle(); got != "hello" {
+		t.Errorf("bytes %q, want the text once, no clear and no Enter", got)
 	}
-	res := replyOf(o)
-	if res["retyped"] != true || res["retypeCause"] != retypeTerminalReset {
-		t.Errorf("reply %v: want retyped:true, retypeCause:%q", res, retypeTerminalReset)
+	if ack := lastAck(m); strings.Contains(ack, "· retyped") {
+		t.Errorf("ack %q claims a retype", ack)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if retypeAt >= verifyMax {
-		t.Errorf("retyped %v after the first check: the reset signal must not wait out the %v window", retypeAt, verifyMax)
+	if lastCheck < verifyMax {
+		t.Errorf("concluded %v after the first check, want no sooner than the %v window", lastCheck, verifyMax)
+	}
+}
+
+// TestTerminalResetIsTypedOnceAndNotRetyped: the box stays empty after a
+// termios change. The reset does not prove the text was lost, so it is typed
+// once, with no clear and no Enter, and the answer — given at the settle
+// interval, not after the whole window — says the terminal reset.
+func TestTerminalResetIsTypedOnceAndNotRetyped(t *testing.T) {
+	var clk lagClock
+	var mu sync.Mutex
+	var lastCheck time.Duration
+	g := &fakeGate{checkFn: func(BoxExpect, int) BoxCheck {
+		el := clk.since()
+		mu.Lock()
+		lastCheck = el
+		mu.Unlock()
+		return lostBoxCheck()
+	}}
+	m, _, log := gatedMux(t, g)
+	o := runSend(t, m, sendRequest{text: "hello", enter: true})
+	wantNotRetyped(t, o, "reset")
+	if got := log.settle(); got != "hello" {
+		t.Errorf("bytes %q, want the text once, no clear and no Enter", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if lastCheck >= verifyMax {
+		t.Errorf("concluded %v after the first check: a reset must not wait out the %v window", lastCheck, verifyMax)
 	}
 }
 
@@ -175,22 +179,6 @@ func TestDeadlineShorterThanWindowIsNotRetypedNeverDrawn(t *testing.T) {
 		t.Errorf("bytes %q, want the text once and no Enter", got)
 	}
 	noRetype(t, o)
-}
-
-// TestNeverDrawnTwiceIsTextMismatch: the retyped text is never drawn either.
-// A second loss is text_mismatch, typed exactly twice, no Enter, and the
-// error says it was already retyped once.
-func TestNeverDrawnTwiceIsTextMismatch(t *testing.T) {
-	g := &fakeGate{checkFn: func(BoxExpect, int) BoxCheck { return boxEmptyCheck() }}
-	m, _, log := gatedMux(t, g)
-	o := runSend(t, m, sendRequest{text: "hello", enter: true})
-	wantErr(t, o, protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true)
-	if !strings.Contains(o.err.Error(), "retyped once") {
-		t.Errorf("error %q does not say it was already retyped", o.err)
-	}
-	if got := log.settle(); got != retypeBytes("hello") {
-		t.Errorf("bytes %q, want the text, a clear and the text again and no Enter", got)
-	}
 }
 
 // TestNeverDrawnInterruptedByANotReadyReadIsNotADrop: the box is empty on

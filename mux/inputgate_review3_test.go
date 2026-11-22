@@ -4,7 +4,7 @@ package mux
 // smoke's lost early send): history evidence is anchored on USER-PROMPT
 // entries only, a subcommand is only the first argument, the turn is announced
 // at the first byte, transcript freshness is the entry's own submit time, an
-// emptied box is retyped once, and a bash-mode send's keys drop the `!`.
+// emptied box is never retyped, and a bash-mode send's keys drop the `!`.
 
 import (
 	"encoding/json"
@@ -308,53 +308,30 @@ func TestAbsorbedQueuedPromptDoesNotMisdateTheNextSend(t *testing.T) {
 	}
 }
 
-// ── 5 (the real-Claude smoke): an emptied box is retyped once ──────────────
+// ── 5 (the real-Claude smoke): an emptied box is never retyped ─────────────
 
 // boxEmptyCheck is an empty box with the terminal unchanged since the first
-// byte: text slow to draw, or nothing evidencing a loss. lostBoxCheck is an
-// empty box after a termios change: the stdin reset that swallows text.
+// byte: text slow to draw, or never drawn. lostBoxCheck is an empty box after
+// a termios change: a stdin reset, which does not prove the text was lost.
 func boxEmptyCheck() BoxCheck { return BoxCheck{Readiness: readyNow(), Verdict: BoxEmpty} }
 
 func lostBoxCheck() BoxCheck {
 	return BoxCheck{Readiness: readyNow(), Verdict: BoxEmpty, TermiosChanged: true}
 }
 
-// The box must stay empty for the whole settle interval (verifySettle) before
-// the retype: ONE empty read is a slow frame, not lost text
-// (TestRenderLagVerifiesWithoutRetype).
-func TestEmptiedBoxIsRetypedOnce(t *testing.T) {
-	g := &fakeGate{}
-	g.checkFn = func(BoxExpect, int) BoxCheck {
-		if strings.Count(g.log.String(), "hello") < 2 {
-			return lostBoxCheck() // the late startup reset swallowed the text
-		}
-		return verifiedBox(verifiedExact)
-	}
-	m, _, log := gatedMux(t, g)
-	o := runSend(t, m, sendRequest{text: "hello", enter: true})
-	if o.err != nil {
-		t.Fatalf("send: %v", o.err)
-	}
-	if got := log.settle(); got != retypeBytes("hello")+"\r" {
-		t.Errorf("bytes %q, want the text, a clear and the text again and one Enter", got)
-	}
-	res := map[string]any{}
-	o.rep.addTo(res)
-	if res["retyped"] != true {
-		t.Errorf("reply %v: want retyped:true", res)
-	}
-	if n := g.notified.Load(); n != 1 {
-		t.Errorf("NotifyInput called %d times, want 1", n)
-	}
-}
-
-func TestEmptiedBoxTwiceIsTextMismatch(t *testing.T) {
+// TestEmptiedBoxIsTypedOnceAndNotifiedOnce: the box stays empty after a
+// reset. The text is typed once with no clear and no Enter, the answer says
+// the box stayed empty and was not retyped, and the turn was announced once.
+func TestEmptiedBoxIsTypedOnceAndNotifiedOnce(t *testing.T) {
 	g := &fakeGate{checkFn: func(BoxExpect, int) BoxCheck { return lostBoxCheck() }}
 	m, _, log := gatedMux(t, g)
 	o := runSend(t, m, sendRequest{text: "hello", enter: true})
-	wantErr(t, o, protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true)
-	if got := log.settle(); got != retypeBytes("hello") {
-		t.Errorf("bytes %q, want the text, a clear and the text again and no Enter", got)
+	wantNotRetyped(t, o, "reset")
+	if got := log.settle(); got != "hello" {
+		t.Errorf("bytes %q, want the text once, no clear and no Enter", got)
+	}
+	if n := g.notified.Load(); n != 1 {
+		t.Errorf("NotifyInput called %d times, want 1", n)
 	}
 }
 

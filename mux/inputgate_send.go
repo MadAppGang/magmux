@@ -64,19 +64,6 @@ const (
 	acceptSubmittedByOther = "submitted_by_other"
 )
 
-// retypeCause values (the reply's `retypeCause`, present only with
-// `retyped:true`): which loss signal licensed the one retype.
-const (
-	// retypeTerminalReset: the box stayed empty for the settle interval and
-	// the pty's termios changed after the first typed byte (the late startup
-	// stdin reset).
-	retypeTerminalReset = "terminal_reset"
-	// retypeNeverDrawn: the box was completely empty on every read for the
-	// whole verify window (verifyMax) with no reset — Claude never drew any of
-	// the text. Render lag is well under a second, so that is a silent drop.
-	retypeNeverDrawn = "never_drawn"
-)
-
 // sendClassification is admit's verdict on a send.
 type sendClassification struct {
 	g     InputGate
@@ -138,30 +125,6 @@ func printableKey(k string) (rune, bool) {
 		return 0, false
 	}
 	return r, true
-}
-
-// retypeClearKey is the clear written before a retype, one per write.
-var retypeClearKey = namedKeys["ctrl-u"]
-
-// retypeClearCols is the width the clear before a retype is counted at: the
-// narrowest pane whose box is retypeClearKeys' 10-cell floor. A box is never
-// counted narrower than that floor, so a count taken here covers every pane
-// at least this wide, whatever width it has when the clear lands.
-const retypeClearCols = 14
-
-// retypeClearKeys is how many ctrl-u keys clear a copy of text that may sit,
-// read but undrawn, in the input buffer of a pane cols wide: one ctrl-u
-// deletes one wrapped row, so the copy's rows at the box's width (the pane
-// less its frame and prompt, never below 10), doubled for word-wrap waste,
-// plus two. A ctrl-u on an empty box does nothing, so over-counting is free.
-func retypeClearKeys(text string, cols int) int {
-	width := max(cols-4, 10)
-	cells := 0
-	for _, r := range text {
-		cells += runeWidth(r)
-	}
-	rows := (cells + width - 1) / width
-	return 2*rows + 2
 }
 
 // classifySend applies the Enter-position rule and classifies the send (§3.2).
@@ -228,12 +191,6 @@ type sendReport struct {
 	accept      string
 	evidence    string
 	resentEnter bool
-	// retyped: the box was found completely empty after typing and the text
-	// was typed once more (the auto-retype). Additive in the reply.
-	retyped bool
-	// retypeCause: the loss signal that licensed the retype
-	// (retypeTerminalReset / retypeNeverDrawn). Reported only with retyped.
-	retypeCause string
 	lastEsc     time.Time
 }
 
@@ -258,12 +215,6 @@ func (r sendReport) addTo(result map[string]any) {
 	if r.evidence != "" {
 		result["evidence"] = r.evidence
 	}
-	if r.retyped {
-		result["retyped"] = true
-		if r.retypeCause != "" {
-			result["retypeCause"] = r.retypeCause
-		}
-	}
 }
 
 // gatedAckText is the ⇦ continuation for a gated send:
@@ -275,16 +226,6 @@ func gatedAckText(bytes int, r sendReport, err error) string {
 		parts = append(parts, "dismissed "+protocol.ReasonDialogPrefix+k)
 	}
 	parts = append(parts, deliveryParts(bytes, r.keys, r.enter))
-	if r.retyped {
-		switch r.retypeCause {
-		case retypeNeverDrawn:
-			parts = append(parts, "retyped (the box was empty: never drawn)")
-		case retypeTerminalReset:
-			parts = append(parts, "retyped (the box was empty: terminal reset)")
-		default:
-			parts = append(parts, "retyped (the box was empty)")
-		}
-	}
 	if r.verified != "" {
 		parts = append(parts, "verified "+strings.ReplaceAll(r.verified, "_", " "))
 	}
@@ -341,6 +282,16 @@ func gateErr(code, reason string, typed bool, format string, a ...any) *protocol
 // never answer by sending again, so it carries a flag rather than only words.
 func maybeSubmitted(e *protocol.Error) *protocol.Error {
 	e.MaybeSubmitted = true
+	return e
+}
+
+// withBoxEmpty states on a text_mismatch whether the final verify read the
+// box EMPTY after this send typed, so a caller can branch on it without
+// parsing the detail. Any other error is returned unchanged.
+func withBoxEmpty(e *protocol.Error, empty bool) *protocol.Error {
+	if e.Code == protocol.CodeNotAccepted && e.Reason == protocol.ReasonTextMismatch {
+		e.BoxEmpty = &empty
+	}
 	return e
 }
 
@@ -570,7 +521,7 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 	}
 	// regate is the gate entered again, token released, to the SAME
 	// deadline: when the first byte's own re-ask (the keys loop) finds the
-	// pane not ready, and before a retype. Its time is the gate's, so
+	// pane not ready. Its time is the gate's, so
 	// waitedMs counts it (r3 LOW).
 	regate := func() (InputReadiness, error) {
 		if held {
@@ -593,7 +544,7 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 	// then (D9, r3 M1). announce runs inside write and before the Enter —
 	// after the last readiness check that authorised that byte — so a send
 	// that writes nothing (busy at the first key's re-ask, cancelled) never
-	// announces a turn, and a retype does not announce a second one.
+	// announces a turn.
 	announced := false
 	announce := func() {
 		if !announced {
@@ -602,14 +553,13 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		}
 	}
 
-	// Step 4: typing. Before every write after an attempt's first, a
+	// Step 4: typing, once. Before every write after the first, a
 	// screen-and-termios check: a dialog stops the typing (busy, typed);
 	// anything else not ready stops it and goes to the box check, which
-	// re-waits and then verifies. wrote is the whole delivery's (the typed
-	// flag); this is the current attempt's.
-	wrote, this := false, false
+	// re-waits and then verifies. wrote is the typed flag.
+	wrote := false
 	between := func() (stop bool, err *protocol.Error) {
-		if !this {
+		if !wrote {
 			return false, nil
 		}
 		c := d.g.InputReadiness(ReadinessQuery{Class: ClassSubmit})
@@ -623,22 +573,18 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		}
 		return true, nil
 	}
-	// typedAt is the current attempt's first byte; attemptN the attempt.
+	// typedAt is the delivery's first byte.
 	var typedAt time.Time
-	attemptN := 0
 	write := func(b []byte, what string) *protocol.Error {
 		announce()
-		if !this {
+		if !wrote {
 			typedAt = time.Now()
 		}
 		if !d.p.injectPTY(b) {
 			return gateErr(protocol.CodePaneDead, "", wrote,
 				"pane %d rejected the %s: its child has exited or its PTY is closed", d.idx, what)
 		}
-		wrote, this = true, true
-		if attemptN > 0 {
-			rep.retyped = true // only once a retype byte has actually gone in
-		}
+		wrote = true
 		return nil
 	}
 	cancelledTyped := func(before string) error {
@@ -649,96 +595,16 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		return err
 	}
 
-	var (
-		chk       BoxCheck
-		expect    BoxExpect
-		settle    boxSettle
-		sawExcess string // the detail of a read that held MORE than typed, on any attempt
-		noLoss    bool   // the box stayed empty with neither loss signal: not retyped
-		windowCut bool   // ... and the deadline cut the verify window short
-		lostAgain bool   // the box stayed empty after the one retype
-		pasteLost bool   // a paste's box stayed empty: never retyped
-		leftBox   bool   // the box showed the text, then emptied without our Enter
-		convMoved string // the box stayed empty and THIS changed since the pre-typing baseline: not retyped
-		noClear   string // the text would have been retyped, but the clear before a retype is unsafe for it: why
-	)
-	for attempt := 0; ; attempt++ {
-		attemptN = attempt
-		boxWasEmpty, pasteAbove := !r.BoxHasText, r.MaxPaste
-		pre := r.Pre // the pre-typing acceptance baseline, from the read that authorised the first byte
-		typedText, pasted, stopped := false, false, false
-		this, typedAt = false, time.Time{}
+	boxWasEmpty, pasteAbove := !r.BoxHasText, r.MaxPaste
+	pre := r.Pre // the pre-typing acceptance baseline, from the read that authorised the first byte
+	typedText, pasted, stopped := false, false, false
 
-		switch d.mode {
-		case sendTyped:
-			for i, w := range typedWrites(d.text) {
-				if i > 0 && !pause(ctx, typedChunkGap) {
-					finish(cancelledTyped("rest of the typed text"))
-					return
-				}
-				stop, err := between()
-				if err != nil {
-					fail(err)
-					return
-				}
-				if stop {
-					stopped = true
-					break
-				}
-				if err := write(w, "text"); err != nil {
-					fail(err)
-					return
-				}
-				typedText = true
-			}
-		case sendPaste:
-			// Written even when empty: the markers alone are the gesture.
-			if err := write([]byte("\x1b[200~"+d.text+"\x1b[201~"), "text"); err != nil {
-				fail(err)
+	switch d.mode {
+	case sendTyped:
+		for i, w := range typedWrites(d.text) {
+			if i > 0 && !pause(ctx, typedChunkGap) {
+				finish(cancelledTyped("rest of the typed text"))
 				return
-			}
-			typedText, pasted = d.text != "", true
-		default:
-			if d.text != "" {
-				b, bracketed := d.p.pasteWrapped(d.text)
-				if err := write(b, "text"); err != nil {
-					fail(err)
-					return
-				}
-				typedText = true
-				pasted = bracketed || utf8.RuneCountInString(d.text) > pasteCollapseRunes || len(d.text) > pasteCollapseRunes
-			}
-		}
-		var exactKeys []rune
-		allPrintable := true
-		for _, k := range d.keys {
-			kr, printable := printableKey(k)
-			if printable {
-				exactKeys = append(exactKeys, kr)
-			} else {
-				allPrintable = false
-			}
-			if stopped {
-				continue
-			}
-			if !pause(ctx, keyGap) {
-				finish(cancelledTyped("key " + k))
-				return
-			}
-			if !this {
-				// The attempt's FIRST byte is this key, and the readiness that
-				// authorised it is a keyGap old now: a reset or a dialog in
-				// that pause would be missed (review H4). Re-ask with the
-				// gate's own query; not ready sends the delivery back to the
-				// gate, nothing written.
-				rr := d.g.InputReadiness(q)
-				if !rr.Ready {
-					if rr, err = regate(); err != nil {
-						finish(err)
-						return
-					}
-				}
-				boxWasEmpty, pasteAbove, pre = !rr.BoxHasText, rr.MaxPaste, rr.Pre
 			}
 			stop, err := between()
 			if err != nil {
@@ -747,235 +613,189 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 			}
 			if stop {
 				stopped = true
-				continue
+				break
 			}
-			b, _ := keyBytes(k)
-			if err := write(b, "key "+k); err != nil {
+			if err := write(w, "text"); err != nil {
 				fail(err)
 				return
 			}
-			if printable {
-				typedText = true
-			}
+			typedText = true
 		}
-
-		// Step 5: let the TUI draw the last write.
-		if !pause(ctx, pilotSendDelay) {
-			finish(cancelledTyped("box check"))
+	case sendPaste:
+		// Written even when empty: the markers alone are the gesture.
+		if err := write([]byte("\x1b[200~"+d.text+"\x1b[201~"), "text"); err != nil {
+			fail(err)
 			return
 		}
-
-		// Step 6: the box check — a bounded settle wait (settleBox), to the
-		// SAME deadline, run at least once.
-		expect = BoxExpect{Class: d.class, TypedText: typedText, Pasted: pasted, PasteAbove: pasteAbove, TypedAt: typedAt, Pre: pre}
-		if boxWasEmpty && allPrintable && (d.text != "" || len(exactKeys) > 0) {
-			// The box was empty when the first byte went in and nothing edited
-			// it, so its content is knowable. Pastes included: Claude shows them
-			// expanded in history, so the SENT key is what confirms them (phase 3).
-			expect.Exact = d.text + string(exactKeys)
-		}
-		var ok bool
-		if settle, ok = d.settleBox(ctx, expect, deadline, wrote, rep, &waitedPre, fail, func() {
-			finish(cancelledTyped("enter"))
-		}); !ok {
-			return
-		}
-		chk = settle.chk
-		if settle.excess != "" {
-			sawExcess = settle.excess
-		}
-
-		// An empty box after typing knowable content: before anything else,
-		// ask whether the text was SUBMITTED. A human keystroke, a noGate
-		// send or a remote `input` op takes no typing token, so somebody
-		// else's Enter can have submitted it while it sat in the box (r3
-		// review M2). Evidence against the pre-typing baseline — a new user
-		// entry or a fresh transcript record for this text — is the answer:
-		// the text was taken, so the send is ok and is NEVER retyped. The
-		// reply says WHO submitted it (r4 M3): accept:"submitted_by_other",
-		// and `enter` false, because magmux pressed no Enter — for a TYPE send
-		// as much as for a SUBMIT, since the text is no longer in the box.
-		if chk.Verdict == BoxEmpty && typedText && expect.Exact != "" && !pre.At.IsZero() {
-			if v := d.g.InputAccepted(pre); v.State == AcceptTaken {
-				rep.accept, rep.evidence, rep.enter = acceptSubmittedByOther, v.Evidence, false
-				finish(nil)
+		typedText, pasted = d.text != "", true
+	default:
+		if d.text != "" {
+			b, bracketed := d.p.pasteWrapped(d.text)
+			if err := write(b, "text"); err != nil {
+				fail(err)
 				return
 			}
+			typedText = true
+			pasted = bracketed || utf8.RuneCountInString(d.text) > pasteCollapseRunes || len(d.text) > pasteCollapseRunes
 		}
-
-		// The auto-retype, ONCE, and only on POSITIVE evidence that the text
-		// was swallowed. The box stayed COMPLETELY empty (the placeholder
-		// only) on every read for the WHOLE settle interval, and ONE of:
-		//
-		//   terminal_reset  the pty's termios changed after the attempt's
-		//                   first byte — the late startup stdin reset IS a
-		//                   termios event (F3);
-		//   never_drawn     every read of the WHOLE verify window (verifyMax,
-		//                   not cut short by the deadline) was ready and empty
-		//                   — Claude never drew a rune of it (the V1 rerun's
-		//                   silent drop). Render lag tops out well under a
-		//                   second, so a 3 s blank is not a slow draw. AND no
-		//                   read saw the conversation change or a turn start
-		//                   since the pre-typing baseline (convChanged): a
-		//                   foreign Enter before the first draw leaves the
-		//                   same empty box, and the acceptance evidence
-		//                   above can be blind (the history blind spot plus a
-		//                   transcript lagging or never found), but a submit
-		//                   always adds an entry or starts a turn (r5 M1).
-		//                   terminal_reset needs no such check: a reset is a
-		//                   terminal event, not a submit.
-		//
-		// A box that is merely slow to draw shows neither (V1: retyping slow
-		// text put it in the box twice). The pre-typing baseline must exist
-		// and show nothing submitted (above).
-		//
-		// Every retype is preceded by a CLEAR, because an empty screen does
-		// not prove an empty buffer: under load Claude can have read the first
-		// copy and not drawn it yet, and a second copy typed behind it would
-		// be submitted with it by the Enter a late frame of the first copy
-		// licenses. Claude reads the pty in order, so ctrl-u keys written
-		// between the copies remove whatever part of the first one it holds,
-		// one wrapped row per key, and a key on an empty box does nothing
-		// (measured): retypeClearKeys over-counts, and only an under-count
-		// could leave residue. The count is taken at the row model's own
-		// floor (retypeClearCols, a 10-cell box), never at the pane's width of
-		// the moment: the pane can be resized between the count and the clear
-		// (a SIGWINCH reshape clamps, even below minPaneCols), a narrower box
-		// wraps the copy onto more rows, and a count taken at the old width
-		// would fall short. A pane already narrower than that floor is not
-		// retyped; a pane shrunk below it after the check is the one width the
-		// clear does not cover. The clear is authorised by the same regate as
-		// the retype, so it never lands in a visible vim INSERT box (rule d);
-		// vim NORMAL mode with no marker is beyond what readiness can see.
-		// A human keystroke takes no typing token and already interleaves with
-		// any gated delivery; text appearing in the box during the clear is
-		// most likely the first copy drawn late, which the clear exists to
-		// remove. A text with a newline (ctrl-u at a logical line's start) or a
-		// leading "!" (bash mode) is not retyped, because what a clear does
-		// there is unmeasured; nor is a text whose clear would exceed
-		// SendRetypeClearMax keys.
-		//
-		// Back through the gate to the same deadline, the clear, then the
-		// same typing and the same settle wait. A box holding PARTIAL text, a box still
-		// changing when the window closed, or one that ever held MORE than
-		// typed, is never retyped; nor is a box that showed ANY of the text
-		// and then emptied (the text left it, perhaps through somebody
-		// else's Enter, r4 M3c). Nor is a send that may have collapsed into a
-		// `[Pasted text #N]` token (expect.Pasted: paste mode, a bracketed
-		// auto text, an auto text over the collapse threshold): a paste drawn
-		// late plus its retype are two tokens, and Enter would submit both
-		// (r4 M1).
-		lost := settle.termiosChanged || (settle.neverDrawn && settle.convChanged == "")
-		retypable := attempt == 0 && settle.emptyHeld && lost && sawExcess == "" && !settle.sawText &&
-			!expect.Pasted && typedText && expect.Exact != "" && !pre.At.IsZero()
-		clearKeys := 0
-		if retypable {
-			switch {
-			case strings.ContainsAny(expect.Exact, "\r\n"):
-				noClear = "the text holds more than one line, and clearing the box before a retype is unmeasured there"
-			case strings.HasPrefix(expect.Exact, "!"):
-				noClear = `the text starts with "!" (bash mode), and clearing the box before a retype is unmeasured there`
-			default:
-				if _, cols := d.p.size(); cols < retypeClearCols {
-					noClear = fmt.Sprintf("the pane is narrower than %d columns, where the clear before a retype cannot be counted",
-						retypeClearCols)
-					break
-				}
-				clearKeys = retypeClearKeys(expect.Exact, retypeClearCols)
-				if clearKeys > protocol.SendRetypeClearMax {
-					noClear = fmt.Sprintf("the text is too long to clear safely before a retype (%d ctrl-u keys, at most %d)",
-						clearKeys, protocol.SendRetypeClearMax)
-				}
-			}
+	}
+	var exactKeys []rune
+	allPrintable := true
+	for _, k := range d.keys {
+		kr, printable := printableKey(k)
+		if printable {
+			exactKeys = append(exactKeys, kr)
+		} else {
+			allPrintable = false
 		}
-		if retypable && noClear == "" {
-			rep.retypeCause = retypeNeverDrawn
-			if settle.termiosChanged {
-				rep.retypeCause = retypeTerminalReset
-			}
-			if r, err = regate(); err != nil {
-				if e, ok := err.(*protocol.Error); ok && e.Code == protocol.CodeBusy {
-					msg := "pane %d: the input box was empty after typing (the text was lost) and the pane was not ready to retype it (%s); Enter was not pressed, nothing was submitted"
-					if e.Reason == protocol.ReasonBoxNotEmpty {
-						msg = "pane %d: the input box was empty after typing, then showed text before it could be retyped (%s); nothing was retyped, Enter was not pressed, and the box may hold the text"
-					}
-					err = gateErr(protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true, msg, d.idx, e.Msg)
-				} else if ok {
-					e.Typed = true
-				}
-				finish(err)
-				return
-			}
-			// The clear: one ctrl-u per write, paced and checked like a named
-			// key. The retyped text follows the last one with no pause, so the
-			// check before that key is the last readiness decision before it.
-			// The keys are written while attemptN is still 0, so they set
-			// neither the retype's typedAt nor rep.retyped: `retyped` still
-			// means a byte of the retyped TEXT went in.
-			for range clearKeys {
-				if !pause(ctx, keyGap) {
-					finish(cancelledTyped("retype"))
-					return
-				}
-				stop, err := between()
-				if err != nil {
-					fail(err)
-					return
-				}
-				if stop {
-					fail(gateErr(protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true,
-						"pane %d: the input box was empty after typing (the text was lost), and the pane stopped being ready while the box was being cleared for the retype; nothing was retyped, Enter was not pressed, and the box may hold partial text",
-						d.idx))
-					return
-				}
-				if err := write(retypeClearKey, "key ctrl-u"); err != nil {
-					fail(err)
-					return
-				}
-			}
+		if stopped {
 			continue
 		}
-		if chk.Verdict == BoxEmpty && typedText {
-			switch {
-			case noClear != "":
-			case settle.sawText:
-				leftBox = true
-			case !settle.emptyHeld:
-			case attempt > 0:
-				lostAgain = true
-			case expect.Pasted:
-				pasteLost = true
-			case settle.convChanged != "":
-				convMoved = settle.convChanged
-			case !lost:
-				noLoss, windowCut = true, settle.windowCut
-			}
+		if !pause(ctx, keyGap) {
+			finish(cancelledTyped("key " + k))
+			return
 		}
-		break
+		if !wrote {
+			// The delivery's FIRST byte is this key, and the readiness that
+			// authorised it is a keyGap old now: a reset or a dialog in
+			// that pause would be missed (review H4). Re-ask with the
+			// gate's own query; not ready sends the delivery back to the
+			// gate, nothing written.
+			rr := d.g.InputReadiness(q)
+			if !rr.Ready {
+				if rr, err = regate(); err != nil {
+					finish(err)
+					return
+				}
+			}
+			boxWasEmpty, pasteAbove, pre = !rr.BoxHasText, rr.MaxPaste, rr.Pre
+		}
+		stop, err := between()
+		if err != nil {
+			fail(err)
+			return
+		}
+		if stop {
+			stopped = true
+			continue
+		}
+		b, _ := keyBytes(k)
+		if err := write(b, "key "+k); err != nil {
+			fail(err)
+			return
+		}
+		if printable {
+			typedText = true
+		}
+	}
+
+	// Step 5: let the TUI draw the last write.
+	if !pause(ctx, pilotSendDelay) {
+		finish(cancelledTyped("box check"))
+		return
+	}
+
+	// Step 6: the box check — a bounded settle wait (settleBox), to the
+	// SAME deadline, run at least once.
+	expect := BoxExpect{Class: d.class, TypedText: typedText, Pasted: pasted, PasteAbove: pasteAbove, TypedAt: typedAt, Pre: pre}
+	if boxWasEmpty && allPrintable && (d.text != "" || len(exactKeys) > 0) {
+		// The box was empty when the first byte went in and nothing edited
+		// it, so its content is knowable. Pastes included: Claude shows them
+		// expanded in history, so the SENT key is what confirms them (phase 3).
+		expect.Exact = d.text + string(exactKeys)
+	}
+	settle, ok := d.settleBox(ctx, expect, deadline, wrote, rep, &waitedPre, fail, func() {
+		finish(cancelledTyped("enter"))
+	})
+	if !ok {
+		return
+	}
+	chk := settle.chk
+
+	// An empty box after typing knowable content: before anything else,
+	// ask whether the text was SUBMITTED. A human keystroke, a noGate
+	// send or a remote `input` op takes no typing token, so somebody
+	// else's Enter can have submitted it while it sat in the box (r3
+	// review M2). Evidence against the pre-typing baseline — a new user
+	// entry or a fresh transcript record for this text — is the answer:
+	// the text was taken, so the send is ok. The reply says WHO submitted
+	// it (r4 M3): accept:"submitted_by_other", and `enter` false, because
+	// magmux pressed no Enter — for a TYPE send as much as for a SUBMIT,
+	// since the text is no longer in the box.
+	if chk.Verdict == BoxEmpty && typedText && expect.Exact != "" && !pre.At.IsZero() {
+		if v := d.g.InputAccepted(pre); v.State == AcceptTaken {
+			rep.accept, rep.evidence, rep.enter = acceptSubmittedByOther, v.Evidence, false
+			finish(nil)
+			return
+		}
+	}
+
+	// An emptied box is NEVER retyped. An empty box does not prove Claude
+	// Code read the text: a Claude Code that drew its box and stopped
+	// reading stdin leaves the copy unread in the pty, and anything written
+	// after it queues behind it. A ctrl-u is no cancel for unread bytes —
+	// Claude Code ignores it inside a read of about 64 bytes or more, and
+	// its early-input capture drops every byte below 0x20 but tab, LF and
+	// CR while keeping the printable ones — so a clear plus a second copy
+	// lands, when it resumes reading, as two joined copies. Nothing seen
+	// from outside proves the text was lost: a termios reset does not
+	// (libuv's raw mode switch uses TCSADRAIN, which does not flush the
+	// input queue), and neither does a box blank for the whole verify
+	// window. So the send answers with what it saw, one copy typed, and
+	// the caller decides.
+	var (
+		noLoss     bool   // the box stayed empty with no reset and not for the whole window
+		windowCut  bool   // ... and the deadline cut the verify window short
+		resetSeen  bool   // the box stayed empty, and the termios changed after the first byte
+		neverDrawn bool   // the box stayed empty on every read of the whole verify window
+		pasteLost  bool   // a paste's box stayed empty
+		leftBox    bool   // the box showed the text, then emptied without our Enter
+		convMoved  string // the box stayed empty and THIS changed since the pre-typing baseline
+	)
+	if chk.Verdict == BoxEmpty && typedText {
+		switch {
+		case settle.sawText:
+			leftBox = true
+		case !settle.emptyHeld:
+		case expect.Pasted:
+			pasteLost = true
+		case settle.convChanged != "":
+			convMoved = settle.convChanged
+		case settle.termiosChanged:
+			resetSeen = true
+		case settle.neverDrawn:
+			neverDrawn = true
+		default:
+			noLoss, windowCut = true, settle.windowCut
+		}
 	}
 	if chk.Verdict != BoxVerified {
 		reason := boxVerdictReason(chk.Verdict, expect)
+		// boxEmpty: the final verify read the box empty after this send typed
+		// (stayed empty, never drawn, a reset, a lost paste, a conversation
+		// change, or text that showed and then left); false when it held text.
+		boxEmpty := chk.Verdict == BoxEmpty
 		if reason == protocol.ReasonEmptyBox {
 			fail(gateErr(protocol.CodeNotAccepted, reason, wrote,
 				"pane %d: the input box is empty, so there is nothing to submit; Enter was not pressed", d.idx))
 			return
 		}
 		detail := chk.Detail
-		if sawExcess != "" {
-			detail = sawExcess
+		if settle.excess != "" {
+			detail = settle.excess
 		}
 		if detail == "" {
 			detail = "it differs from what was sent"
 		}
 		switch {
-		case noClear != "":
-			detail += fmt.Sprintf("; it stayed empty, so the text looked lost, but %s, so it was not retyped", noClear)
 		case noLoss && windowCut:
 			detail += fmt.Sprintf("; it stayed empty but the terminal showed no stdin reset, and the deadline left less than the %s verify window that tells a silent drop from a slow draw, so the text was not retyped", verifyMax)
 		case noLoss:
 			detail += fmt.Sprintf("; it stayed empty but the terminal showed no stdin reset, and the box was not seen empty on every read for the whole %s verify window, so the text was not retyped", verifyMax)
-		case lostAgain:
-			detail += fmt.Sprintf("; the text was already retyped once (%s) and the box stayed empty again, so it was not retyped a second time", strings.ReplaceAll(rep.retypeCause, "_", " "))
+		case resetSeen:
+			detail += "; it stayed empty, and the terminal reset its stdin after the text was typed, but an empty box does not prove Claude Code read the text, so it was not retyped (a second copy could land behind the first, unread)"
+		case neverDrawn:
+			detail += fmt.Sprintf("; it stayed empty on every read of the whole %s verify window (never drawn), but an empty box does not prove Claude Code read the text, so it was not retyped (a second copy could land behind the first, unread)", verifyMax)
 		case pasteLost:
 			detail += "; a paste is never retyped, because a late-drawn paste and its retype would be two tokens and Enter would submit both"
 		case convMoved != "":
@@ -990,32 +810,23 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 			// Enter: another writer may have submitted it with no evidence on
 			// screen or in the transcript yet. "Nothing was submitted" would
 			// invite a retry into a duplicate (r4 M3c).
-			fail(maybeSubmitted(gateErr(protocol.CodeNotAccepted, reason, true,
+			fail(withBoxEmpty(maybeSubmitted(gateErr(protocol.CodeNotAccepted, reason, true,
 				"pane %d: the input box showed the text and then emptied without magmux's Enter (%s); it is unknown whether another Enter submitted it, so check the conversation before sending it again; magmux pressed no Enter and did not retype it",
-				d.idx, detail)))
+				d.idx, detail)), boxEmpty))
 			return
 		}
 		if convMoved != "" {
 			// Never drawn, and something a submit changes did change: the
 			// text may be in the conversation already, through an Enter that
 			// was not magmux's (r5 M1). Same honesty as leftBox.
-			fail(maybeSubmitted(gateErr(protocol.CodeNotAccepted, reason, true,
+			fail(withBoxEmpty(maybeSubmitted(gateErr(protocol.CodeNotAccepted, reason, true,
 				"pane %d: the input box stayed empty after typing (%s); it is unknown whether another writer's Enter submitted it, so check the conversation before sending it again; magmux pressed no Enter",
-				d.idx, detail)))
+				d.idx, detail)), boxEmpty))
 			return
 		}
-		fail(gateErr(protocol.CodeNotAccepted, reason, true,
+		fail(withBoxEmpty(gateErr(protocol.CodeNotAccepted, reason, true,
 			"pane %d: the input box does not hold what was typed (%s); Enter was not pressed, nothing was submitted, and the box may hold partial text",
-			d.idx, detail))
-		return
-	}
-	if rep.retyped && settle.excess != "" {
-		// The box held MORE than was typed after the retype and verified
-		// later: the clear under-counted, so the buffer may still hold part
-		// of the first copy behind what the box shows.
-		fail(gateErr(protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true,
-			"pane %d: the input box held more than was typed after the retype (%s); the box may hold part of the first copy, so Enter was not pressed",
-			d.idx, settle.excess))
+			d.idx, detail), boxEmpty))
 		return
 	}
 	rep.verified = chk.Verified
@@ -1047,12 +858,12 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 type boxSettle struct {
 	chk BoxCheck // the last ready read: verified, or the mismatch it settled on
 	// emptyHeld: the box was COMPLETELY empty, and ready, on every read for
-	// the whole settle interval at the end of the wait — the one fact that
-	// licenses the auto-retype. Never true on a single read.
+	// the whole settle interval at the end of the wait — the fact every
+	// "it stayed empty" detail rests on. Never true on a single read.
 	emptyHeld bool
 	excess    string // the detail of a read that held MORE than typed
 	// termiosChanged: some read in the wait saw the termios change after
-	// the attempt's first byte (BoxCheck.TermiosChanged).
+	// the first typed byte (BoxCheck.TermiosChanged).
 	termiosChanged bool
 	// neverDrawn: every read from the first ready read to the end of the
 	// WHOLE verify window (verifyMax) was ready and COMPLETELY empty, with no
@@ -1063,13 +874,14 @@ type boxSettle struct {
 	// the deadline fell before the full verify window could pass.
 	windowCut bool
 	// sawText: some ready read showed the box holding something (part of the
-	// text, all of it, or more). A box that then empties is never retyped:
-	// the text LEFT it, perhaps through another writer's Enter.
+	// text, all of it, or more). A box that then empties is reported as one
+	// the text LEFT, perhaps through another writer's Enter.
 	sawText bool
 	// convChanged: what the first ready read to see one reported as
 	// BoxCheck.ConvChanged — the conversation changed, or a turn started,
 	// since the pre-typing baseline. Sticky: a turn that came and went inside
-	// the window was still a submit. It forbids the never_drawn retype.
+	// the window was still a submit. The reply then says another writer may
+	// have submitted the text.
 	convChanged string
 	unsettled   time.Duration // >0: the window closed with the box still changing
 }
@@ -1100,9 +912,9 @@ func sameBox(a, b BoxCheck) bool {
 // typed knowable content, is NOT concluded at the settle interval when the
 // whole verify window fits before the deadline. The wait runs on to
 // verifyMax: text drawn late (inside the window) verifies as usual, and a box
-// still blank at the window's end is neverDrawn — a silent drop, the second
-// retype signal. A termios change during the extension ends it at the next
-// settled read (the reset signal). If the deadline would cut the window
+// still blank at the window's end is neverDrawn, which the reply's detail
+// names. A termios change during the extension ends it at the next settled
+// read. If the deadline would cut the window
 // short, the wait ends at the settle interval as before, windowCut.
 //
 // fail and cancelled answer the send; ok=false means it has been answered.
@@ -1119,12 +931,12 @@ func (d *sendDelivery) settleBox(ctx context.Context, expect BoxExpect, deadline
 	// cuts it below verifyMin from here, so a send that became ready in the
 	// deadline's last moments, or a caller with a small readyTimeoutMs, still
 	// waits out the measured render lag instead of judging one read 150 ms
-	// after typing (V1). SendBudget counts it per attempt.
+	// after typing (V1). SendBudget counts it.
 	if floor := time.Now().Add(verifyMin); deadline.Before(floor) {
 		deadline = floor
 	}
 	// Only typed knowable content that is never a paste token can be "never
-	// drawn": anything else has no retype to license, and waiting longer
+	// drawn": for anything else the fact means nothing, and waiting longer
 	// would only delay the answer.
 	drawable := expect.TypedText && expect.Exact != "" && !expect.Pasted
 	for {

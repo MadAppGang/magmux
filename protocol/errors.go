@@ -118,6 +118,11 @@ type Error struct {
 	// Enter that was not magmux's, so the caller must check before sending it
 	// again. Wire-visible as "maybeSubmitted", only when set.
 	MaybeSubmitted bool
+	// BoxEmpty: whether the input box was EMPTY at the final verify after a
+	// gated send typed (true), or held text (false). Nil means not stated.
+	// Wire-visible as "boxEmpty", present on every text_mismatch from a gated
+	// send, and only when stated.
+	BoxEmpty *bool
 }
 
 func (e *Error) Error() string { return e.Msg }
@@ -161,6 +166,18 @@ func MaybeSubmittedOf(err error) bool {
 		return se.MaybeSubmitted
 	}
 	return false
+}
+
+// BoxEmptyOf reports what a verb failure says about the input box: empty is
+// whether it was empty at the final verify, and stated whether the failure
+// says so at all. Wire-visible as boxEmpty, present on every text_mismatch
+// from a gated send. Both are false for nil and for any other error.
+func BoxEmptyOf(err error) (empty, stated bool) {
+	var se *Error
+	if errors.As(err, &se) && se.BoxEmpty != nil {
+		return *se.BoxEmpty, true
+	}
+	return false, false
 }
 
 // CodeOf extracts the machine-readable code from a verb failure, or "".
