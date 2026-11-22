@@ -8,9 +8,10 @@ package mux
 // blind in the history blind spot with a transcript that is lagging or was
 // never found. A submit always CHANGES something the silent drop does not:
 // the conversation above the box gains a `❯` entry (or a queued one), or a
-// turn starts. So `never_drawn` additionally requires the conversation to be
-// unchanged since the pre-typing baseline, and the turn not to have started;
-// a change is text_mismatch, named, and never retyped.
+// turn starts. So a box reported as never drawn also requires the
+// conversation to be unchanged since the pre-typing baseline, and the turn
+// not to have started; a change is text_mismatch, named as a possible submit
+// by another writer. Neither is ever retyped.
 
 import (
 	"strings"
@@ -31,7 +32,7 @@ func emptyConvChanged(what string) BoxCheck {
 // TestForeignSubmitBeforeFirstDrawIsNotRetyped: the box is empty on every
 // read for the whole verify window with no terminal reset — never_drawn's
 // shape — but the conversation changed since the text was typed. Somebody
-// else may have submitted it: no retype, no Enter, text_mismatch, and the
+// else may have submitted it: typed once, no Enter, text_mismatch, and the
 // error names the change and does not claim nothing was submitted.
 func TestForeignSubmitBeforeFirstDrawIsNotRetyped(t *testing.T) {
 	const entry = "the conversation above the input box changed"
@@ -81,28 +82,26 @@ func TestForeignSubmitBeforeFirstDrawIsNotRetyped(t *testing.T) {
 	}
 }
 
-// TestSilentDropWithAnUnchangedConversationIsStillRetyped is the positive
-// control: the same empty box with the conversation unchanged is the genuine
-// silent drop, and still gets its one retype — and the verify was handed the
-// pre-typing baseline it compares the conversation against.
-func TestSilentDropWithAnUnchangedConversationIsStillRetyped(t *testing.T) {
-	g := &fakeGate{}
-	g.checkFn = func(BoxExpect, int) BoxCheck {
-		if strings.Count(g.log.String(), "hello") >= 2 {
-			return verifiedBox(verifiedExact)
-		}
+// TestSilentDropWithAnUnchangedConversationIsNeverDrawn is the positive
+// control: the same empty box with the conversation unchanged is reported as
+// never drawn — not as another writer's submit — and is still not retyped;
+// the verify was handed the pre-typing baseline it compares the conversation
+// against.
+func TestSilentDropWithAnUnchangedConversationIsNeverDrawn(t *testing.T) {
+	g := &fakeGate{checkFn: func(BoxExpect, int) BoxCheck {
 		return boxEmptyCheck() // ConvChanged "": nothing above the box moved
-	}
+	}}
 	m, _, log := gatedMux(t, g)
 	o := runSend(t, m, sendRequest{text: "hello", enter: true})
-	if o.err != nil {
-		t.Fatalf("send: %v", o.err)
+	wantNotRetyped(t, o, "never drawn")
+	if got := log.settle(); got != "hello" {
+		t.Errorf("bytes %q, want the text once, no clear and no Enter", got)
 	}
-	if got := log.settle(); got != retypeBytes("hello")+"\r" {
-		t.Errorf("bytes %q, want one cleared retype and one Enter", got)
+	if o.err != nil && strings.Contains(o.err.Error(), "another writer") {
+		t.Errorf("error %q blames another writer for an unchanged conversation", o.err)
 	}
-	if res := replyOf(o); res["retyped"] != true || res["retypeCause"] != retypeNeverDrawn {
-		t.Errorf("reply %v: want retyped:true, retypeCause:%q", res, retypeNeverDrawn)
+	if protocol.MaybeSubmittedOf(o.err) {
+		t.Error("the reply carries maybeSubmitted for an unchanged conversation")
 	}
 	g.mu.Lock()
 	first := g.expects[0]
@@ -112,26 +111,31 @@ func TestSilentDropWithAnUnchangedConversationIsStillRetyped(t *testing.T) {
 	}
 }
 
-// TestTerminalResetRetypeKeepsItsRules: the conversation check is
-// never_drawn's alone. A reset is a terminal event, not a submit, and the
-// terminal_reset retype is decided by its own rules, as before.
-func TestTerminalResetRetypeKeepsItsRules(t *testing.T) {
-	g := &fakeGate{}
-	g.checkFn = func(BoxExpect, int) BoxCheck {
-		if strings.Count(g.log.String(), "hello") >= 2 {
-			return verifiedBox(verifiedExact)
-		}
+// TestTerminalResetWithAConversationChangeNamesTheChange: a reset and a
+// conversation change together. The change is what a submit leaves, so the
+// answer says another writer may have submitted the text, ahead of the
+// reset, and nothing more is typed.
+func TestTerminalResetWithAConversationChangeNamesTheChange(t *testing.T) {
+	const what = "the conversation above the input box changed"
+	g := &fakeGate{checkFn: func(BoxExpect, int) BoxCheck {
 		c := lostBoxCheck()
-		c.ConvChanged = "the conversation above the input box changed"
+		c.ConvChanged = what
 		return c
-	}
-	m, _, _ := gatedMux(t, g)
+	}}
+	m, _, log := gatedMux(t, g)
 	o := runSend(t, m, sendRequest{text: "hello", enter: true})
-	if o.err != nil {
-		t.Fatalf("send: %v", o.err)
+	wantErr(t, o, protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true)
+	if got := log.settle(); got != "hello" {
+		t.Errorf("bytes %q, want the text once, no clear and no Enter", got)
 	}
-	if res := replyOf(o); res["retyped"] != true || res["retypeCause"] != retypeTerminalReset {
-		t.Errorf("reply %v: want retyped:true, retypeCause:%q", res, retypeTerminalReset)
+	noRetype(t, o)
+	for _, want := range []string{what, "another writer", "not retyped"} {
+		if !strings.Contains(o.err.Error(), want) {
+			t.Errorf("error %q does not say %q", o.err, want)
+		}
+	}
+	if !protocol.MaybeSubmittedOf(o.err) {
+		t.Error("the reply does not carry maybeSubmitted")
 	}
 }
 

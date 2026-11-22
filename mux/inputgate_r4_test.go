@@ -3,8 +3,8 @@ package mux
 // Code review r4, MEDIUMs 1–3:
 //
 //  1. A send that may collapse into a `[Pasted text #N]` token is never
-//     auto-retyped (two tokens would satisfy the paste-token rule and Enter
-//     would submit both), and a box holding more than one NEW paste token is a
+//     retyped (two tokens would satisfy the paste-token rule and Enter would
+//     submit both), and a box holding more than one NEW paste token is a
 //     mismatch on every verify.
 //  2. The settle wait has its own minimum window (verifyMin), which the
 //     readiness deadline does not cut short.

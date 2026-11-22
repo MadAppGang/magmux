@@ -207,6 +207,9 @@ func errorEvent(pane int, err error) []byte {
 	if protocol.MaybeSubmittedOf(err) {
 		ev["maybeSubmitted"] = true
 	}
+	if empty, ok := protocol.BoxEmptyOf(err); ok {
+		ev["boxEmpty"] = empty
+	}
 	if pane > 0 {
 		ev["pane"] = pane
 	}

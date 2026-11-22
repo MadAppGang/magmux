@@ -35,9 +35,9 @@ const (
 	// every SendVerifyStep until it holds what was typed, or until its content
 	// has been unchanged for SendVerifySettle and still differs, or until
 	// SendVerifyMax after the first ready read. SendVerifySettle exceeds the
-	// worst render lag measured (~800 ms) with margin, because a box that is
-	// EMPTY for the whole settle interval is what licenses the one auto-retype,
-	// and retyping text that was only slow to draw puts it in the box twice.
+	// worst render lag measured (~800 ms) with margin, because text that is
+	// only slow to draw must verify rather than be reported as a box that
+	// stayed empty.
 	// Every verify is also capped by the readiness deadline, but never below
 	// SendVerifyMin from the verify's start: a send that became ready in the
 	// deadline's last moments, or a small readyTimeoutMs, must still wait out
@@ -50,15 +50,12 @@ const (
 	// SendGateCheckCost is the allowance for the readiness check made before
 	// every write after the first.
 	SendGateCheckCost = 2 * time.Millisecond
-	// SendRetypeClearMax caps the ctrl-u keys written before the one
-	// auto-retype, each paced by SendKeyGap and checked like a named key. A
-	// box that LOOKS empty does not prove the tool's input buffer is empty:
-	// the first copy may have been read and not yet drawn, so every retype is
-	// preceded by a clear, one ctrl-u per wrapped row with margin. A text that
-	// would need more is not retyped. The count is taken at the row model's
-	// floor (a 10-cell box, a 14-column pane), so that no resize the model
-	// admits can make it short: 104 = 2*51+2 clears 51 rows, a single-line
-	// text of up to 510 cells; a longer one is not retyped.
+	// SendRetypeClearMax was the cap on the ctrl-u keys written before an
+	// automatic retype of an emptied box. magmux types a gated send's text
+	// once and never clears or retypes it, so nothing writes these keys; the
+	// constant stays because SendBudget still counts it as headroom.
+	//
+	// Deprecated: magmux no longer retypes; nothing writes a clear.
 	SendRetypeClearMax = 104
 	// SendAcceptWindow is one acceptance window; at most SendAcceptWindows run.
 	SendAcceptWindow  = 2 * time.Second
@@ -94,12 +91,14 @@ func ReadyWait(ms int) time.Duration {
 // moment it starts running. The gate, the typing token, the pre-Enter
 // re-wait and the verify's settle wait share ONE deadline, so the readiness
 // wait is counted once and covers every verify window (SendVerifyMax is
-// capped by it). What runs outside that deadline is counted per ATTEMPT: the
-// typing, the SendSettle pause, the verify's own minimum window, which the
-// deadline does not cut (SendVerifyMin), and the one verify read that may
-// land past it (SendVerifyStep). A send can make two attempts (the one
-// auto-retype of an emptied box), so the attempt is counted twice, and the
-// clear before the retype (at most SendRetypeClearMax paced keys) once.
+// capped by it). What runs outside that deadline is the ATTEMPT: the typing,
+// the SendSettle pause, the verify's own minimum window, which the deadline
+// does not cut (SendVerifyMin), and the one verify read that may land past it
+// (SendVerifyStep). A send makes one attempt: magmux types the text once and
+// never retypes it. The attempt is still counted twice, and
+// SendRetypeClearMax paced keys once, as headroom: those terms once paid for
+// an automatic retype and its clear, and they stay so that the bound every
+// client waits on does not change. The bound is only looser than the work.
 func SendBudget(s SendShape) time.Duration {
 	b := ReadyWait(s.ReadyTimeoutMs)
 	var attempt time.Duration

@@ -1456,133 +1456,110 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   2.1.301 can take 300–800 ms to DRAW typed text into its box (an Ink frame,
   worse under load), so a single read after the 150 ms `SendSettle` saw an
   empty box for text that had arrived (the real-Claude e2e, V1: correct sends
-  refused, and a retype that put the text in the box TWICE — `the box holds 96
-  of 48`). `settleBox` reads the box every `SendVerifyStep` (40 ms), each read
-  a synchronous `CheckBox` (termios sample + fresh screen), until it VERIFIES;
-  or until its content (`BoxCheck.Box`, verdict, detail) has been unchanged
-  for `SendVerifySettle` (1 s) and still mismatches; or until `SendVerifyMax`
-  (3 s) after the first ready read, capped by the readiness deadline. A
-  not-ready read restarts the stability clock. **The verify has its OWN
-  minimum window, `SendVerifyMin` (1.2 s from the verify's start), which the
-  readiness deadline never cuts** (r4 M2): `settleBox` lifts its local
-  deadline to that floor, so a send that became ready in the deadline's last
-  moment, or a caller with `readyTimeoutMs:400`, still waits out the render
-  lag instead of judging one read — the V1 shape again. The floor is above
-  the settle interval, so a settled verdict always fits in it. The constants
-  are protocol's and `SendBudget` counts them: the windows sit inside the
-  readiness deadline, and the typing + `SendSettle` + `SendVerifyMin` + one
-  `SendVerifyStep` overshoot are counted per attempt, twice (the retype), and
-  the clear before the retype once — a short submit's bound is 23 068 ms.
-  `SendVerifySettle` is above the worst lag measured, with margin, because it
-  is what licenses the retype below.
+  refused, and a second copy that put the text in the box TWICE — `the box
+  holds 96 of 48`). `settleBox` reads the box every `SendVerifyStep` (40 ms),
+  each read a synchronous `CheckBox` (termios sample + fresh screen), until it
+  VERIFIES; or until its content (`BoxCheck.Box`, verdict, detail) has been
+  unchanged for `SendVerifySettle` (1 s) and still mismatches; or until
+  `SendVerifyMax` (3 s) after the first ready read, capped by the readiness
+  deadline. A not-ready read restarts the stability clock. **The verify has
+  its OWN minimum window, `SendVerifyMin` (1.2 s from the verify's start),
+  which the readiness deadline never cuts** (r4 M2): `settleBox` lifts its
+  local deadline to that floor, so a send that became ready in the deadline's
+  last moment, or a caller with `readyTimeoutMs:400`, still waits out the
+  render lag instead of judging one read — the V1 shape again. The floor is
+  above the settle interval, so a settled verdict always fits in it. The
+  constants are protocol's and `SendBudget` counts them: the windows sit
+  inside the readiness deadline, and the typing + `SendSettle` +
+  `SendVerifyMin` + one `SendVerifyStep` overshoot are the attempt. The
+  attempt is counted twice and `SendRetypeClearMax` paced keys once — terms
+  that paid for an automatic retype and its clear, kept as HEADROOM so the
+  public bound does not change (a short submit's bound is still 23 068 ms;
+  the bound is only looser than the work). `SendVerifySettle` is above the
+  worst lag measured, with margin, because text that is only slow to draw
+  must verify rather than be reported as a box that stayed empty.
   `TestRenderLagVerifiesWithoutRetype`, `TestRenderLagRealController`,
   `TestRenderLagBeyondWindowIsMismatchNoRetype`,
-  `TestVerifyWindowNeverPassesTheDeadline`,
+  `TestVerifyWindowIsFlooredAtItsMinimum`,
   `TestSmallReadyTimeoutStillWaitsForTheDraw`,
   `TestReadyAtTheDeadlineStillWaitsForTheDraw`,
   `TestREQ4_RenderLagIsWaitedForNotRetyped`.
 
-- **An emptied box is retyped ONCE, and only on POSITIVE evidence of loss.
-  There are exactly two loss signals, and the reply names the one that fired
-  (`retypeCause`, additive, only with `retyped:true`).** Both need the settle
-  wait to end with the box COMPLETELY empty (`BoxEmpty`: placeholder only) on
-  every ready read for the WHOLE settle interval, the send to have typed
-  knowable content (`Exact`) into an empty box, and nothing submitted (next
-  bullet). Then:
-  (a) **`terminal_reset`** — the pty's termios fingerprint CHANGED after the
-  attempt's first byte (`BoxExpect.TypedAt` → `BoxCheck.TermiosChanged`, from
-  the ttyWatch history the hot sampler keeps): the late startup stdin reset
-  is a TERMIOS event. It fires at the settle interval.
-  (b) **`never_drawn`** — EVERY read of the WHOLE verify window
-  (`SendVerifyMax`, 3 s from the first ready read) was ready and empty, with
-  no termios change (`boxSettle.neverDrawn`). The V1 rerun found Claude
-  dropping input right after the gate opened with no termios change at all
-  (2/10 early sends; the mechanism is unproven, probably the prompt
-  re-mounting as startup hooks finish). Render lag tops out well under a
-  second, so a 3 s blank is a silent drop, not a slow draw. To observe it,
-  `settleBox` does NOT conclude a blank box at the settle interval when the
-  full window fits before the (floored) deadline; it runs on to 3 s, so text
-  drawn late inside the window still verifies (`TestDrawnLateAt2500msIsNotRetyped`).
-  A not-ready read in the window, any non-empty read, or a deadline that
-  falls inside the window (`windowCut`) voids (b); the last ends the wait at
-  the settle interval as before. So does any ready read whose
-  `BoxCheck.ConvChanged` is set (`boxSettle.convChanged`, sticky; r5 M1):
-  another writer's Enter inside the ~150 ms before the first verify read
-  submits the text before it is drawn and leaves exactly (b)'s empty box,
-  and the acceptance evidence can be blind (history blind spot + a transcript
-  lagging or unfound). A submit always adds an entry or starts a turn, so
-  `convChange` compares against the PRE-TYPING baseline (`BoxExpect.Pre`):
-  `convKey` (the region above the top rule minus the parser's own spinner
-  rows and faint runes — the same rows that set `Working`, no second
-  classification; the row under the spinner is content), a spinner APPEARING,
-  and the registry going `busy`. Any change is `text_mismatch` "another writer
-  may have submitted it", never "nothing was submitted". (a) does not take
-  the check: a reset is a terminal event, not a submit. A conversation that
-  streams during the window (a turn already running) voids (b) too; that is
-  the fail-safe direction.
-  A box with neither signal is `text_mismatch` whose detail says which was
-  missing ("no stdin reset, and the deadline left less than the 3s verify
-  window", or "...was not seen empty on every read"), never a retype — one
-  empty read was V1's double text. **Every retype is preceded by a CLEAR,
-  because an empty screen does not prove an empty buffer**: under load Claude
-  can have READ the first copy and not drawn it, and a retype typed behind it
-  is submitted with it by the Enter a late frame of copy 1 licenses — no rule
-  about which frame to wait for can tell the two apart. Claude reads the pty
-  in order, so after the regate the delivery writes `retypeClearKeys` ctrl-u
-  keys (one per write, paced by `keyGap`, each checked like a named key):
-  one ctrl-u deletes one wrapped row and is a no-op on an empty box
-  (measured on 2.1.330), so the count is `2*rows+2` and over-counting is
-  free. The rows are counted at the row model's own floor
-  (`retypeClearCols` = 14, a 10-cell box), never at the pane's width of the
-  moment: a resize between the count and the clear — and SIGWINCH reshape
-  clamps below `minPaneCols` — would otherwise leave a narrowed box
-  under-cleared. A pane already narrower than 14 columns, a text needing more
-  than `SendRetypeClearMax` (104: 51 rows, a 510-cell line), one holding a
-  newline, or one starting with `!` (a clear at a logical line's start and in
-  bash mode is unmeasured) is `text_mismatch` and not retyped; a pane shrunk
-  below 14 after the check is the one width the clear does not cover. An
-  `Excess` read after a retype withholds the Enter (the clear under-counted).
-  `SendBudget` counts the clear once (104 × 22 ms).
-  `TestReadButUndrawnTextIsSubmittedOnce`, `TestRetypeClearKeysCoversWrappedRows`,
-  `TestRetypeClearIsCountedAtTheNarrowestPane`,
-  `TestPaneNarrowerThanTheClearFloorIsNotRetyped`,
-  `TestMultiLineTypedOrShellTextIsNotRetyped`, `TestTooLongToClearIsNotRetyped`,
-  `TestExcessAfterRetypeWithholdsEnter`. The delivery goes back through the gate to
-  the SAME deadline, clears, types again, and settles again under the same verify
-  (the 3 s extension included); `retyped:true` is set only once a retype byte
-  has actually gone in. Lost twice is `text_mismatch` saying it was "already
-  retyped once". NEVER retyped: a box that showed ANY of the text on any read
-  of the attempt (`boxSettle.sawText` — partial, whole, or more; the text left
-  the box, see the foreign-Enter bullet), one still changing when the window
-  closed, one that EVER held MORE than was typed (`BoxCheck.Excess`, both
-  renders landed: `the box holds more than was typed`), and **any send that
-  may collapse into a `[Pasted text #N]` token** (`BoxExpect.Pasted`: paste
-  mode, a bracketed multi-line auto send, an auto send over
-  `pasteCollapseRunes`). A paste drawn late plus its retype are TWO tokens,
-  the paste-token rule would verify that box, and Enter would submit both
-  (r4 M1). Independently of the retype, `judgeBox` refuses a box holding more
-  than one paste token newer than `PasteAbove` on EVERY verify, and
+- **An emptied box is NEVER retyped, and nothing writes a clear.** A gated
+  send types its text ONCE. An empty box does not prove Claude Code read the
+  text: a Claude Code that drew its box and stopped reading stdin (measured
+  under a concurrent boot, ~20 s) leaves the copy UNREAD in the pty, and
+  anything written after it queues behind it. A ctrl-u is no cancel for
+  unread bytes. "One ctrl-u deletes one wrapped row and is a no-op on an
+  empty box" (measured on 2.1.330) holds only when each ctrl-u reaches Claude
+  Code in a short read of its own WHILE it is reading: Claude Code ignores
+  ctrl-u inside a read of about 64 bytes or more, and its early-input capture
+  drops every byte below 0x20 except TAB/LF/CR while keeping the printable
+  ones. So a clear plus a second copy queued behind an unread first copy
+  lands, when Claude resumes reading, as TWO JOINED COPIES. And nothing seen
+  from outside proves an emptied box LOST its text: a termios reset does not
+  (libuv's raw mode uses `TCSADRAIN`, which does not flush the input queue),
+  and a 3 s blank does not. No pty-side proof of a drained input queue would
+  cover bytes Node has read into userspace and not processed, so the retype
+  is removed rather than gated.
+  What the settle wait observed still decides the ANSWER, which is always
+  `not_accepted`/`text_mismatch`, `typed:true`, no Enter, and a detail
+  suffix chosen in this order (clients key on its words). The main message
+  is "the input box does not hold what was typed (...); Enter was not
+  pressed, nothing was submitted, and the box may hold partial text", except
+  for the two `maybeSubmitted` cases, which say it is unknown whether another
+  Enter submitted it:
+  `sawText` — the box showed the text and then emptied (the foreign-Enter
+  bullet's message, `maybeSubmitted`); a box not empty for the whole settle
+  interval — no suffix; `BoxExpect.Pasted` — "a paste is never retyped";
+  `boxSettle.convChanged` (sticky; r5 M1) — the conversation changed or a
+  turn started since the PRE-TYPING baseline (`BoxExpect.Pre`: `convKey`,
+  the region above the top rule minus the parser's own spinner rows and
+  faint runes; a spinner APPEARING; the registry going `busy`), so "another
+  writer may have submitted it" (`maybeSubmitted`), never "nothing was
+  submitted"; `boxSettle.termiosChanged` (`BoxExpect.TypedAt` →
+  `BoxCheck.TermiosChanged`) — "it stayed empty, and the terminal reset its
+  stdin ... so it was not retyped"; `boxSettle.neverDrawn` — EVERY read of
+  the WHOLE verify window (`SendVerifyMax`) was ready and empty with no
+  termios change: "it stayed empty on every read of the whole 3s verify
+  window (never drawn) ... so it was not retyped"; otherwise the
+  "no stdin reset" detail, with the deadline (`windowCut`) or "not seen empty
+  on every read" variant. To observe never-drawn, `settleBox` does NOT
+  conclude a blank box at the settle interval when the full window fits
+  before the (floored) deadline; it runs on to 3 s, so text drawn late inside
+  the window still verifies (`TestDrawnLateAt2500msIsNotRetyped`). The reply
+  never carries `retyped` or `retypeCause`. Every such error states
+  `boxEmpty` (see the serialisation bullet): true when the final verify read
+  the box empty, false when it held text. `judgeBox` refuses a box holding
+  more than one paste token newer than `PasteAbove` on EVERY verify, and
   `CheckBox` flags it `Excess` (`newPasteTokens`).
-  `TestEmptiedBoxIsRetypedOnce`, `TestTrulyLostTextIsRetypedOnceThenOK`,
-  `TestNeverDrawnIsRetypedOnceThenOK`, `TestTerminalResetRetypeNamesItsCause`,
+  `TestStalledReaderNeverGetsASecondCopy` (a stalled reader that reads the
+  backlog in one ≥64-byte chunk: one copy, no 0x15, no Enter),
+  `TestReadButUndrawnTextIsSubmittedOnce`,
+  `TestNoEmptiedBoxSendWritesAClearOrASecondCopy`,
+  `TestNeverDrawnIsTypedOnceAndNotRetyped`,
+  `TestTerminalResetIsTypedOnceAndNotRetyped`,
+  `TestEmptiedBoxIsTypedOnceAndNotifiedOnce`,
+  `TestRealControllerNeverRetypesAnEmptiedBox`,
   `TestDrawnPartiallyIsNotRetyped`,
   `TestDeadlineShorterThanWindowIsNotRetypedNeverDrawn`,
-  `TestNeverDrawnTwiceIsTextMismatch`,
   `TestNeverDrawnInterruptedByANotReadyReadIsNotADrop`,
   `TestEmptyWithoutTermiosChangeIsNotRetyped`,
-  `TestRealControllerRetypesOnlyAfterAReset`,
   `TestCheckBoxReportsTermiosChangeSinceTheFirstByte`,
-  `TestEmptiedBoxTwiceIsTextMismatch`, `TestPartialBoxIsNeverRetyped`,
-  `TestDoubleTextAfterRetypeIsMismatchNoSecondRetype`,
-  `TestExcessSeenOnceForbidsRetype`, `TestEmptyShorterThanSettleIsNotRetyped`,
+  `TestPartialBoxIsNeverRetyped`, `TestDoubleTextIsMismatchNoEnter`,
+  `TestExcessSeenOnceThenEmptyKeepsTheExcessDetail`,
+  `TestEmptyShorterThanSettleIsNotRetyped`,
   `TestNotReadyReadRestartsTheSettleClock`, `TestPasteIsNeverRetyped`,
   `TestTwoNewPasteTokensAreAMismatch`,
-  `TestREQ4_LostTextIsRetypedOnceThenConfirmed` (`terminal_reset`),
-  `TestREQ4_SilentlyDroppedTextIsRetypedOnce` (fakeclaude
-  `FAKE_DROP_SILENT_ONCE=1`, `never_drawn`).
+  `TestSilentDropWithAnUnchangedConversationIsNeverDrawn`,
+  `TestTerminalResetWithAConversationChangeNamesTheChange`,
+  `TestBoxEmptyOnEveryTextMismatch`,
+  `TestREQ4_LostTextIsTypedOnceAndNotRetyped` (reset),
+  `TestREQ4_SilentlyDroppedTextIsTypedOnceAndNotRetyped` (fakeclaude
+  `FAKE_DROP_SILENT_ONCE=1`, never drawn).
 
-- **An emptied box may have been SUBMITTED by somebody else, so it is asked
-  before any retype, and the reply never claims magmux's Enter.** A human
+- **An emptied box may have been SUBMITTED by somebody else, so that is asked
+  first, and the reply never claims magmux's Enter.** A human
   keystroke (`writePTY`), a `noGate` send or a remote `input` op takes no
   typing token, so its Enter can submit this send's text while it sits in the
   box (r3 review M2). The gate's post-token read carries `InputReadiness.Pre`,
@@ -1595,10 +1572,10 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   and **`enter:false`** — on a gated reply `enter` says whether MAGMUX pressed
   Enter, and here it pressed none (r4 M3a/b). That holds for a TYPE send too:
   its text is no longer in the box, so `in_box` would be false and
-  `confirmed` would claim a submit magmux did not make. It is NEVER retyped.
-  No baseline means no retype: the check fails closed. When there is no
-  evidence YET (the history blind spot, a lagging transcript) and the box
-  showed the text before it emptied (`sawText`), the error never says
+  `confirmed` would claim a submit magmux did not make. No baseline means the
+  check cannot answer, and the send reports the empty box as it saw it. When
+  there is no evidence YET (the history blind spot, a lagging transcript) and
+  the box showed the text before it emptied (`sawText`), the error never says
   "nothing was submitted": it says the box emptied without magmux's Enter and
   that it is unknown whether another Enter submitted it, because a caller
   that believed "nothing" would retry into a duplicate (r4 M3c).
@@ -1660,7 +1637,7 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   `waitedMs`. `NotifyInput` itself fires exactly ONCE, inside the first actual
   delivery write (or before the Enter of a submit that typed nothing), after
   the last readiness check that authorised it — never for a send that wrote
-  zero bytes, and not again for a retype (review r3 M1/M3). Timeout is
+  zero bytes (review r3 M1/M3). Timeout is
   `busy`/`typing_in_progress`, nothing typed.
   `TestTypingTokenSerialisesConnections`, `TestTokenDeadlineIsTypingInProgress`,
   `TestFirstKeyRechecksReadinessAfterItsGap`, `TestFirstKeyNotReadyToDeadlineIsBusy`,
@@ -1747,7 +1724,10 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   its first byte, never on an ungated send, and a plugin's own errors never carry
   it. Every `busy` on the wire carries a reason (`queue_full` / `in_flight` for
   the hub's own). `TestReplyCarriesReasonAndTyped` covers the socket, HTTP, WS
-  and SSE; `TestCommandResultCarriesReasonAndTyped` Firebase.
+  and SSE; `TestCommandResultCarriesReasonAndTyped` Firebase. `boxEmpty`
+  (`protocol.Error.BoxEmpty`, `BoxEmptyOf`; stated on every gated
+  `text_mismatch`, emitted only when stated) rides with `maybeSubmitted` at
+  the same sites (`TestSocketReplyCarriesBoxEmpty`, `TestReplyCarriesBoxEmpty`).
 
 - **R6: an ungated send is byte-identical to before — bytes, reply and ack.**
   `sendReport.addTo` adds nothing when `Gated` is false, and a `noGate` send is

@@ -571,19 +571,40 @@ func submits(evs []event) []string {
 
 func countEnter(s string) int { return strings.Count(s, "\r") + strings.Count(s, "\n") }
 
-// wantClearBeforeRetype: a retype reached the child as the text, at least one
-// ctrl-u, then the text again. An empty box on screen does not prove an empty
-// input buffer, so nothing may be typed onto the first copy.
-func wantClearBeforeRetype(t *testing.T, evs []event, text string) {
+// wantTypedOnceNoClear: the child received the text exactly once and no
+// ctrl-u. An empty box on screen does not prove an empty input buffer, so
+// magmux never types a second copy, and a ctrl-u is no cancel for bytes the
+// child has not read.
+func wantTypedOnceNoClear(t *testing.T, evs []event, text string) {
 	t.Helper()
 	rcv := received(evs)
-	first, last := strings.Index(rcv, text), strings.LastIndex(rcv, text)
-	if first < 0 || last == first {
-		t.Errorf("child received %q: want the text twice", rcv)
-		return
+	if n := strings.Count(rcv, text); n != 1 {
+		t.Errorf("child received %q: want the text exactly once, got %d copies", rcv, n)
 	}
-	if !strings.Contains(rcv[first+len(text):last], "\x15") {
-		t.Errorf("child received %q: want a ctrl-u between the first copy and the retype", rcv)
+	if strings.Contains(rcv, "\x15") {
+		t.Errorf("child received %q: want no ctrl-u", rcv)
+	}
+}
+
+// wantNotRetyped: a gated send whose box stayed empty answers
+// not_accepted / text_mismatch with typed:true, an error carrying the words a
+// client keys on ("stayed empty", "not retyped") plus words, and no
+// retype keys anywhere in the reply.
+func wantNotRetyped(t *testing.T, r reply, words ...string) {
+	t.Helper()
+	if r.OK || r.Code != codeNotAccepted || r.Reason != "text_mismatch" {
+		t.Fatalf("want not_accepted/text_mismatch, got %s", r)
+	}
+	if !r.typedTrue() {
+		t.Errorf("text_mismatch after typing must carry typed:true; reply: %s", r)
+	}
+	for _, w := range append([]string{"stayed empty", "not retyped"}, words...) {
+		if !strings.Contains(r.Error, w) {
+			t.Errorf("error %q does not contain %q", r.Error, w)
+		}
+	}
+	if strings.Contains(r.raw, `"retyped":`) || strings.Contains(r.raw, `"retypeCause":`) {
+		t.Errorf("reply carries a retype key: %s", r)
 	}
 }
 

@@ -320,6 +320,9 @@ func (a *Adapter) writeResult(pushId string, result map[string]any, err error) {
 		if protocol.MaybeSubmittedOf(err) {
 			rec["maybeSubmitted"] = true
 		}
+		if empty, ok := protocol.BoxEmptyOf(err); ok {
+			rec["boxEmpty"] = empty
+		}
 	} else if result != nil {
 		rec["result"] = jsonString(result)
 	}

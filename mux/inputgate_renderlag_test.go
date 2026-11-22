@@ -2,10 +2,10 @@ package mux
 
 // The pre-Enter verify is a bounded SETTLE WAIT (V1, the real-Claude e2e):
 // Claude Code 2.1.301 can take 300–800 ms to draw typed text into its box, so
-// one read after the settle pause saw an empty box for text that was merely
-// not drawn yet, the auto-retype typed it again, and both renders landed. These
-// tests drive render-lag timelines through the delivery and assert, on the
-// child's side of the PTY, how many times the text was typed.
+// one read after the settle pause would see an empty box for text that is
+// merely not drawn yet. These tests drive render-lag timelines through the
+// delivery and assert, on the child's side of the PTY, that the text was
+// typed exactly once and what the send answered.
 
 import (
 	"fmt"
@@ -99,55 +99,9 @@ func TestRenderLagRealController(t *testing.T) {
 	noRetype(t, o)
 }
 
-// TestTrulyLostTextIsRetypedOnceThenOK: the box stays empty for the whole
-// settle interval (the startup reset ate the text); after the retype it is
-// drawn. Exactly one retype, then ok.
-func TestTrulyLostTextIsRetypedOnceThenOK(t *testing.T) {
-	g := &fakeGate{}
-	g.checkFn = func(BoxExpect, int) BoxCheck {
-		if strings.Count(g.log.String(), "hello") < 2 {
-			return lostBoxCheck() // lost: it never draws
-		}
-		return verifiedBox(verifiedExact)
-	}
-	m, _, log := gatedMux(t, g)
-	o := runSend(t, m, sendRequest{text: "hello", enter: true})
-	if o.err != nil {
-		t.Fatalf("send: %v", o.err)
-	}
-	if got := log.settle(); got != retypeBytes("hello")+"\r" {
-		t.Errorf("bytes %q, want the text, a clear and the text again (one retype) and one Enter", got)
-	}
-	if !o.rep.retyped {
-		t.Errorf("report %+v: want retyped", o.rep)
-	}
-}
-
-// TestDoubleTextAfterRetypeIsMismatchNoSecondRetype: the first attempt's box
-// stays empty long enough to retype, then BOTH renders land. The box holds
-// more than was typed: text_mismatch, saying so, and never a second retype.
-func TestDoubleTextAfterRetypeIsMismatchNoSecondRetype(t *testing.T) {
-	g := &fakeGate{}
-	g.checkFn = func(BoxExpect, int) BoxCheck {
-		if strings.Count(g.log.String(), "hello") < 2 {
-			return lostBoxCheck()
-		}
-		return boxMismatchCheck("hellohello", "the box holds more than was typed: 10 non-space runes where 5 were typed", true)
-	}
-	m, _, log := gatedMux(t, g)
-	o := runSend(t, m, sendRequest{text: "hello", enter: true})
-	wantErr(t, o, protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true)
-	if !strings.Contains(o.err.Error(), "more than was typed") {
-		t.Errorf("error %q does not say the box holds more than was typed", o.err)
-	}
-	if got := log.settle(); got != retypeBytes("hello") {
-		t.Errorf("bytes %q, want the text, a clear and the text again (exactly one retype) and no Enter", got)
-	}
-}
-
-// TestDoubleTextFirstAttemptIsNeverRetyped: the box holds MORE than typed on
-// the first attempt: no retype, no Enter.
-func TestDoubleTextFirstAttemptIsNeverRetyped(t *testing.T) {
+// TestDoubleTextIsMismatchNoEnter: the box holds MORE than typed: no second
+// copy, no Enter.
+func TestDoubleTextIsMismatchNoEnter(t *testing.T) {
 	g := &fakeGate{checkFn: func(BoxExpect, int) BoxCheck {
 		return boxMismatchCheck("hellohello", "the box holds more than was typed: 10 non-space runes where 5 were typed", true)
 	}}
@@ -160,10 +114,10 @@ func TestDoubleTextFirstAttemptIsNeverRetyped(t *testing.T) {
 	noRetype(t, o)
 }
 
-// TestExcessSeenOnceForbidsRetype: one read shows MORE than typed, then the
-// box goes (and stays) empty. An emptied box would be retyped, but a box that
-// ever held more than typed never is.
-func TestExcessSeenOnceForbidsRetype(t *testing.T) {
+// TestExcessSeenOnceThenEmptyKeepsTheExcessDetail: one read shows MORE than
+// typed, then the box goes (and stays) empty after a reset. The answer carries
+// the excess detail, and the text is typed once.
+func TestExcessSeenOnceThenEmptyKeepsTheExcessDetail(t *testing.T) {
 	g := &fakeGate{checkFn: func(_ BoxExpect, n int) BoxCheck {
 		if n == 0 {
 			return boxMismatchCheck("hellohello", "the box holds more than was typed: 10 non-space runes where 5 were typed", true)
@@ -231,37 +185,33 @@ func TestEmptyShorterThanSettleIsNotRetyped(t *testing.T) {
 
 // TestNotReadyReadRestartsTheSettleClock: an empty box interrupted by a
 // not-ready read is not "empty for the whole settle interval" until it has
-// been empty, and ready, for a full interval after the interruption.
+// been empty, and ready, for a full interval after the interruption: the
+// answer comes no sooner than that, and still types the text only once.
 func TestNotReadyReadRestartsTheSettleClock(t *testing.T) {
 	var clk lagClock
 	var mu sync.Mutex
-	var retypeAt time.Duration
-	g := &fakeGate{}
-	g.checkFn = func(BoxExpect, int) BoxCheck {
+	var lastCheck time.Duration
+	g := &fakeGate{checkFn: func(BoxExpect, int) BoxCheck {
 		el := clk.since()
-		if strings.Count(g.log.String(), "hello") >= 2 {
-			mu.Lock()
-			if retypeAt == 0 {
-				retypeAt = el
-			}
-			mu.Unlock()
-			return verifiedBox(verifiedExact)
-		}
+		mu.Lock()
+		lastCheck = el
+		mu.Unlock()
 		if el >= 600*time.Millisecond && el < 700*time.Millisecond {
 			return checkNotReady(notReady(protocol.ReasonTerminalNotReady))
 		}
 		return lostBoxCheck()
-	}
-	m, _, _ := gatedMux(t, g)
+	}}
+	m, _, log := gatedMux(t, g)
 	o := runSend(t, m, sendRequest{text: "hello", enter: true})
-	if o.err != nil || !o.rep.retyped {
-		t.Fatalf("send: %+v %v, want ok after one retype", o.rep, o.err)
+	wantNotRetyped(t, o, "reset")
+	if got := log.settle(); got != "hello" {
+		t.Errorf("bytes %q, want the text once and no Enter", got)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if retypeAt < 700*time.Millisecond+verifySettle {
-		t.Errorf("retyped %v after the first check, want no sooner than %v (the clock restarts after the interruption)",
-			retypeAt, 700*time.Millisecond+verifySettle)
+	if lastCheck < 700*time.Millisecond+verifySettle {
+		t.Errorf("concluded %v after the first check, want no sooner than %v (the clock restarts after the interruption)",
+			lastCheck, 700*time.Millisecond+verifySettle)
 	}
 }
 

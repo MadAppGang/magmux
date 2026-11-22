@@ -145,6 +145,9 @@ func (m *Magmux) replyBytes(id json.RawMessage, result map[string]any, err error
 			if se.MaybeSubmitted {
 				reply["maybeSubmitted"] = true
 			}
+			if se.BoxEmpty != nil {
+				reply["boxEmpty"] = *se.BoxEmpty
+			}
 		}
 		reply["code"] = code
 		reply["error"] = err.Error()

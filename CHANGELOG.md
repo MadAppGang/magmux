@@ -11,6 +11,38 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-11-22
+
+### Fixed
+
+- **A gated send no longer types a second copy of its text.** When Claude
+  Code's input box stayed empty after typing, magmux cleared it with ctrl-u
+  keys and typed the text again (`never_drawn`, `terminal_reset`). An empty
+  box does not prove Claude Code read the text: a Claude Code that has drawn
+  its box and stopped reading its input leaves the first copy unread in the
+  terminal, and a ctrl-u is no cancel for unread bytes — Claude Code ignores
+  it inside a read of about 64 bytes or more, and drops it during early-input
+  capture while keeping the printable bytes. So the clear did nothing and the
+  two copies landed joined when Claude resumed. Neither signal proves a loss:
+  a terminal reset does not flush the input queue, and a 3 s blank is not a
+  drop. A send whose box stays empty now types the text once, writes no
+  ctrl-u and presses no Enter, and answers `not_accepted` `text_mismatch`
+  with a detail saying the box stayed empty — never drawn, or after a
+  terminal reset — and that the text was not retyped. Whether to send again
+  is the caller's decision. The optional reply keys `retyped` and
+  `retypeCause` no longer appear. `protocol.SendRetypeClearMax` is
+  deprecated (nothing writes a clear); `protocol.SendBudget` is unchanged,
+  its retype terms kept as headroom.
+
+### Added
+
+- **`boxEmpty` on every gated `text_mismatch`.** The reply states
+  `"boxEmpty":true` when the final verify read the input box empty after the
+  send typed, and `false` when the box held text, beside `maybeSubmitted` on
+  the socket, HTTP, the WebSocket, SSE error events, Firebase command results
+  and plugin replies. `protocol.Error.BoxEmpty` and `protocol.BoxEmptyOf`
+  read it; the Go client carries it through.
+
 ## [0.20.1] - 2026-11-21
 
 ### Fixed

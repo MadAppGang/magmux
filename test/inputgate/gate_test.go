@@ -276,65 +276,51 @@ func TestREQ4_NoHistoryEntryIsUnconfirmedWithEveryContractField(t *testing.T) {
 	}
 }
 
-// TEST-15 (REQ-4, amended by review r3 item 5): the child resets stdin as the
-// text arrives and the text is LOST, leaving the box completely empty. Nothing
-// was submitted and nothing partial is left, so magmux retypes it ONCE; the
-// reply is ok only with retyped:true, the text reached the child undropped
-// exactly once, one Enter was pressed, and the child submitted exactly the
-// text. (Lost twice is text_mismatch — the fake loses only the first chunk,
-// so that half is pinned in package mux, TestEmptiedBoxTwiceIsTextMismatch.)
-func TestREQ4_LostTextIsRetypedOnceThenConfirmed(t *testing.T) {
+// TEST-15 (REQ-4, amended): the child resets stdin as the text arrives and
+// the text is LOST, leaving the box completely empty. A reset does not prove
+// the text was lost — a raw-mode switch does not flush the input queue — so
+// magmux does NOT retype it: not_accepted / text_mismatch, typed:true, the
+// error says the box stayed empty after a reset and the text was not
+// retyped, the text reached the child exactly once, with no ctrl-u and no
+// Enter, and nothing was submitted.
+func TestREQ4_LostTextIsTypedOnceAndNotRetyped(t *testing.T) {
 	t.Parallel()
 	m, cn, pane := declared(t, fake{"FAKE_LOSE_ON_INPUT": "1", "FAKE_LOSE_LEN_MS": "400", "FAKE_CTRLU_ROW": "1"})
 	text := "lost " + shortID(t)
 
 	r := cn.send(pane, map[string]any{"text": text})
 
-	res := wantGatedOK(t, r)
-	wantField(t, res, "retyped", true, r)
-	wantField(t, res, "retypeCause", "terminal_reset", r)
+	wantNotRetyped(t, r, "reset")
 	evs := m.events(t)
-	var kept []string
-	for _, e := range ofKind(evs, "in") {
-		// The retype follows the clear's last ctrl-u with no pause, so the
-		// pty may deliver the two as one chunk.
-		if !e.Dropped && strings.TrimLeft(e.Data, "\x15") == text {
-			kept = append(kept, e.Data)
-		}
+	wantTypedOnceNoClear(t, evs, text)
+	if n := countEnter(received(evs)); n != 0 {
+		t.Errorf("child received %d Enters, want 0", n)
 	}
-	if len(kept) != 1 {
-		t.Errorf("the text reached the child undropped %d times, want exactly 1 (the retype)", len(kept))
-	}
-	wantClearBeforeRetype(t, evs, text)
-	if n := countEnter(received(evs)); n != 1 {
-		t.Errorf("child received %d Enters, want 1", n)
-	}
-	if got := submits(evs); len(got) != 1 || got[0] != text {
-		t.Errorf("child submitted %q, want exactly [%q]", got, text)
+	if got := submits(evs); len(got) != 0 {
+		t.Errorf("child submitted %q, want nothing", got)
 	}
 }
 
 // TEST-15c (REQ-4, the V1 rerun's silent drop): the child discards the FIRST
 // text it receives once the box is up, with NO termios change and NO redraw —
 // the box never shows a rune of it. A box blank on every read for the whole
-// 3 s verify window is a silent drop, not a slow draw (render lag tops out
-// well under a second), so magmux retypes it ONCE: ok with retyped:true and
-// retypeCause:"never_drawn", the text dropped silently once and kept once,
-// one Enter, and the child submitted exactly the text.
-func TestREQ4_SilentlyDroppedTextIsRetypedOnce(t *testing.T) {
+// 3 s verify window still does not prove the text was lost (a reader that
+// stopped reading leaves it unread in the pty), so magmux does NOT retype it:
+// not_accepted / text_mismatch, typed:true, the error says the box stayed
+// empty, was never drawn and was not retyped; the text was silently dropped
+// once and never sent again, with no ctrl-u and no Enter.
+func TestREQ4_SilentlyDroppedTextIsTypedOnceAndNotRetyped(t *testing.T) {
 	t.Parallel()
 	m, cn, pane := declared(t, fake{"FAKE_DROP_SILENT_ONCE": "1", "FAKE_CTRLU_ROW": "1"})
 	text := "silent " + shortID(t)
 
 	r := cn.send(pane, map[string]any{"text": text})
 
-	res := wantGatedOK(t, r)
-	wantField(t, res, "retyped", true, r)
-	wantField(t, res, "retypeCause", "never_drawn", r)
+	wantNotRetyped(t, r, "never drawn")
 	evs := m.events(t)
 	var kept, silent int
 	for _, e := range ofKind(evs, "in") {
-		if strings.TrimLeft(e.Data, "\x15") != text { // the clear's last ctrl-u may share the retype's chunk
+		if e.Data != text {
 			continue
 		}
 		switch {
@@ -344,18 +330,18 @@ func TestREQ4_SilentlyDroppedTextIsRetypedOnce(t *testing.T) {
 			kept++
 		}
 	}
-	if silent != 1 || kept != 1 {
-		t.Errorf("the text was silently dropped %d times and kept %d times, want 1 and 1", silent, kept)
+	if silent != 1 || kept != 0 {
+		t.Errorf("the text was silently dropped %d times and kept %d times, want 1 and 0", silent, kept)
 	}
-	wantClearBeforeRetype(t, evs, text)
+	wantTypedOnceNoClear(t, evs, text)
 	if n := len(ofKind(evs, "reset-start")); n > 1 {
 		t.Errorf("%d resets, want only the boot reset: the drop must not be a termios event", n)
 	}
-	if n := countEnter(received(evs)); n != 1 {
-		t.Errorf("child received %d Enters, want 1", n)
+	if n := countEnter(received(evs)); n != 0 {
+		t.Errorf("child received %d Enters, want 0", n)
 	}
-	if got := submits(evs); len(got) != 1 || got[0] != text {
-		t.Errorf("child submitted %q, want exactly [%q]", got, text)
+	if got := submits(evs); len(got) != 0 {
+		t.Errorf("child submitted %q, want nothing", got)
 	}
 }
 

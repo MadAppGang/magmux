@@ -40,7 +40,8 @@ const (
 	// ── not_accepted ──
 
 	// ReasonTextMismatch: the box did not hold what was typed. No Enter was
-	// pressed; the box may hold partial text.
+	// pressed; the box may hold partial text. magmux never types the text a
+	// second time on its own, including when the box stayed empty.
 	ReasonTextMismatch = "text_mismatch"
 	// ReasonEmptyBox: a submit found the box empty. No Enter was pressed.
 	ReasonEmptyBox = "empty_box"

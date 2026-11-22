@@ -32,8 +32,9 @@ func TestSendBudgetWorkedValues(t *testing.T) {
 		s    SendShape
 		want int64
 	}{
-		// one attempt = typing + SendSettle (150) + SendVerifyMin (1200) + SendVerifyStep (40); two attempts;
-		// the clear before the retype, once: SendRetypeClearMax (104) * (SendKeyGap 20 + SendGateCheckCost 2) = 2288.
+		// one attempt = typing + SendSettle (150) + SendVerifyMin (1200) + SendVerifyStep (40), counted twice;
+		// plus SendRetypeClearMax (104) * (SendKeyGap 20 + SendGateCheckCost 2) = 2288 — the second attempt
+		// and the 2288 are headroom (nothing retypes or clears), kept so the bound does not change.
 		{"short submit", SendShape{Submit: true}, 10000 + 2*1390 + 2288 + 6000 + 2000},
 		{"500 keys and a submit", SendShape{Keys: 500, Submit: true}, 10000 + 2*(500*22+1390) + 2288 + 6000 + 2000},
 		{"readyTimeoutMs 60000", SendShape{ReadyTimeoutMs: 60000, Submit: true}, 60000 + 2*1390 + 2288 + 6000 + 2000},

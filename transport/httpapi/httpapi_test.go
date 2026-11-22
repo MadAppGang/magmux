@@ -64,6 +64,7 @@ func newFixture(t *testing.T, opts ...func(*Config)) *fixture {
 				Reason string `json:"reason"`
 				Typed  bool   `json:"typed"`
 				Maybe  bool   `json:"maybeSubmitted"`
+				Empty  *bool  `json:"boxEmpty"`
 			}
 			_ = json.Unmarshal(args, &a)
 			if a.Code == "" {
@@ -72,6 +73,7 @@ func newFixture(t *testing.T, opts ...func(*Config)) *fixture {
 			e := protocol.Errr(a.Code, a.Reason, "deliberate %s", a.Code)
 			e.Typed = a.Typed
 			e.MaybeSubmitted = a.Maybe
+			e.BoxEmpty = a.Empty
 			return nil, e
 		}},
 	}
