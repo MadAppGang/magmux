@@ -769,7 +769,8 @@ func TestCommandResultCarriesReasonAndTyped(t *testing.T) {
 				return nil, protocol.Errf(protocol.CodePaneDead, "plain")
 			}
 			return nil, &protocol.Error{Code: protocol.CodeNotAccepted, Msg: "lost",
-				Reason: a.Reason, Typed: true}
+				Reason: a.Reason, Typed: true,
+				Typing: &protocol.Typing{Writes: 2, WritesTotal: 4, Stopped: protocol.TypingStoppedDeadline}}
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -780,10 +781,13 @@ func TestCommandResultCarriesReasonAndTyped(t *testing.T) {
 	if res["code"] != protocol.CodeNotAccepted || res["reason"] != protocol.ReasonUnconfirmed || res["typed"] != true {
 		t.Errorf("result = %v, want code, reason and typed", res)
 	}
+	if res["writes"] != 2.0 || res["writesTotal"] != 4.0 || res["typingStopped"] != protocol.TypingStoppedDeadline {
+		t.Errorf("result = %v, want writes 2 of 4, typingStopped deadline", res)
+	}
 
 	c.deliver("-Nreason02", c.signed("ticket.fail", `{}`))
 	res = c.waitForResult("-Nreason02")
-	for _, k := range []string{"reason", "typed"} {
+	for _, k := range []string{"reason", "typed", "writes", "writesTotal", "typingStopped"} {
 		if _, ok := res[k]; ok {
 			t.Errorf("a result with no %s carries the key: %v", k, res)
 		}

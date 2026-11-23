@@ -517,8 +517,10 @@ which says bytes of this request reached the pane before it failed, and
 conversation through an Enter that was not magmux's — never answer that one by
 sending again — and `"boxEmpty":true|false`, present on every `text_mismatch`
 from a gated send, which says whether the input box was empty or held text at
-the final verify. All four are omitted when they do not apply, so a failure without them is the line it
-always was.
+the final verify. A gated send that typed also states how far its typing got:
+`writes` and `writesTotal`, and `typingStopped` when it stopped short (see
+[the input gate](#claude-code-panes-the-input-gate)). All of them are omitted
+when they do not apply, so a failure without them is the line it always was.
 
 | `code` | Meaning |
 |---|---|
@@ -892,6 +894,33 @@ is `confirmed`,
 `submitted_by_other`: the text left the box through somebody else's Enter and
 evidence for it appeared, so magmux pressed none, and `enter` is then false.
 On a gated reply `enter` says whether MAGMUX pressed Enter.
+
+**How far the typing got.** Every reply of a gated send that wrote anything,
+ok or not, carries `writes` (the text chunks and keys that reached the pane)
+and `writesTotal` (how many the send would make: a typed text's 32-rune chunks
+and its newlines, or one write for a paste or an auto text, plus one per key;
+the Enter and any Escape are not counted). An ok reply always has
+`writes == writesTotal`. A typed text is written chunk by chunk, with a
+readiness check before every chunk after the first. A dialog there stops the
+typing. Any other not-ready answer — a frame with no box, say — does not:
+magmux keeps the pane's typing token and waits, to the same `readyTimeoutMs`
+deadline, until the box holds exactly what was written so far, then types the
+rest. Nothing is retyped and nothing is cleared. When it cannot go on, the
+reply is a failure that carries `typingStopped`, Enter is not pressed (even
+when the unwritten rest is only blanks), and the error says "typing stopped
+after W of T writes (reason)":
+
+| `typingStopped` | Why typing stopped |
+|---|---|
+| `dialog` | a dialog appeared between two writes (`busy` `dialog:<kind>`, `typed:true`) |
+| `terminal_reset` | the terminal's termios changed after the first byte, so going on could join two copies |
+| `box_changed` | the box held something other than what was written, unchanged for 1 s |
+| `deadline` | the pane was still not ready for the next write, or its box was still changing, at the deadline |
+| `cancelled` | magmux shut the delivery down |
+| `pane_dead` | the child exited or the pane was closed (the `code` says which) |
+| `not_ready` | the pane was not ready for the next key, and an editing key (`left`, `backspace`, ...) or a collapsed paste made the box's content unknowable, so there was nothing to wait for |
+
+`waitedMs` counts the time spent waiting between writes too.
 
 **`dismissDialogs:true`** presses Escape on a permission, question or plan
 dialog, before typing and again before the Enter. Escape declines, and it is

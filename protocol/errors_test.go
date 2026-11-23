@@ -86,3 +86,31 @@ func TestNewCodesAndReasonsAreTheWireSpelling(t *testing.T) {
 		}
 	}
 }
+
+// TestTypingOfWorksThroughWrappingAndAddsItsKeys: TypingOf reads a gated
+// send's typing through wrapping, states nothing for an error without it, and
+// AddTo writes typingStopped only when typing stopped short.
+func TestTypingOfWorksThroughWrappingAndAddsItsKeys(t *testing.T) {
+	e := Errr(CodeNotAccepted, ReasonTextMismatch, "stopped")
+	e.Typing = &Typing{Writes: 2, WritesTotal: 4, Stopped: TypingStoppedDeadline}
+	got, ok := TypingOf(fmt.Errorf("wrapped: %w", e))
+	if !ok || got != *e.Typing {
+		t.Fatalf("TypingOf(wrapped) = %+v, %v; want %+v", got, ok, *e.Typing)
+	}
+	if _, ok := TypingOf(Errf(CodePaneDead, "x")); ok {
+		t.Error("an error with no typing states some")
+	}
+	if _, ok := TypingOf(errors.New("plain")); ok {
+		t.Error("a plain error states typing")
+	}
+	m := map[string]any{}
+	got.AddTo(m)
+	if m["writes"] != 2 || m["writesTotal"] != 4 || m["typingStopped"] != TypingStoppedDeadline {
+		t.Errorf("AddTo = %v", m)
+	}
+	m = map[string]any{}
+	Typing{Writes: 3, WritesTotal: 3}.AddTo(m)
+	if _, ok := m["typingStopped"]; ok || m["writes"] != 3 {
+		t.Errorf("AddTo of a complete typing = %v, want writes and no typingStopped", m)
+	}
+}

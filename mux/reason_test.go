@@ -19,19 +19,23 @@ func TestReplyCarriesReasonAndTyped(t *testing.T) {
 	t.Run("a verb reply", func(t *testing.T) {
 		m := &Magmux{}
 		var got map[string]any
-		err := &sockErr{Code: protocol.CodeNotAccepted, Msg: "lost", Reason: protocol.ReasonUnconfirmed, Typed: true}
+		err := &sockErr{Code: protocol.CodeNotAccepted, Msg: "lost", Reason: protocol.ReasonUnconfirmed, Typed: true,
+			Typing: &protocol.Typing{Writes: 2, WritesTotal: 4, Stopped: protocol.TypingStoppedDeadline}}
 		if e := json.Unmarshal(m.replyBytes(json.RawMessage(`1`), nil, err), &got); e != nil {
 			t.Fatal(e)
 		}
 		if got["code"] != protocol.CodeNotAccepted || got["reason"] != protocol.ReasonUnconfirmed || got["typed"] != true {
 			t.Errorf("reply = %v, want code, reason and typed", got)
 		}
+		if got["writes"] != 2.0 || got["writesTotal"] != 4.0 || got["typingStopped"] != protocol.TypingStoppedDeadline {
+			t.Errorf("reply = %v, want writes 2, writesTotal 4, typingStopped deadline", got)
+		}
 
 		got = nil
 		if e := json.Unmarshal(m.replyBytes(json.RawMessage(`2`), nil, sockErrf(sockCodePaneDead, "gone")), &got); e != nil {
 			t.Fatal(e)
 		}
-		for _, k := range []string{"reason", "typed"} {
+		for _, k := range []string{"reason", "typed", "writes", "writesTotal", "typingStopped"} {
 			if _, ok := got[k]; ok {
 				t.Errorf("a reply with no %s carries the key: %v", k, got)
 			}
@@ -44,7 +48,8 @@ func TestReplyCarriesReasonAndTyped(t *testing.T) {
 			Spec: protocol.OpSpec{Name: "reasoned", Class: protocol.ClassRead},
 			Fn: func(context.Context, hub.Caller, json.RawMessage) (map[string]any, error) {
 				return nil, &protocol.Error{Code: protocol.CodeBusy, Msg: "held",
-					Reason: protocol.ReasonTypingInProgress, Typed: true}
+					Reason: protocol.ReasonTypingInProgress, Typed: true,
+					Typing: &protocol.Typing{Writes: 3, WritesTotal: 3}}
 			},
 		}); err != nil {
 			t.Fatal(err)
@@ -61,6 +66,9 @@ func TestReplyCarriesReasonAndTyped(t *testing.T) {
 			}
 			if ev["code"] != protocol.CodeBusy || ev["reason"] != protocol.ReasonTypingInProgress || ev["typed"] != true {
 				t.Errorf("call reply = %v, want code, reason and typed", ev)
+			}
+			if _, stopped := ev["typingStopped"]; ev["writes"] != 3.0 || ev["writesTotal"] != 3.0 || stopped {
+				t.Errorf("call reply = %v, want writes 3 of 3 and no typingStopped", ev)
 			}
 			return
 		}

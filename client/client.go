@@ -186,6 +186,18 @@ type mcpReply struct {
 	Typed          bool            `json:"typed,omitempty"`
 	MaybeSubmitted bool            `json:"maybeSubmitted,omitempty"`
 	BoxEmpty       *bool           `json:"boxEmpty,omitempty"`
+	Writes         int             `json:"writes,omitempty"`
+	WritesTotal    int             `json:"writesTotal,omitempty"`
+	TypingStopped  string          `json:"typingStopped,omitempty"`
+}
+
+// typing is the reply's typing keys as a protocol.Typing, or nil when the
+// reply states none (writesTotal is never 0 on a reply that states them).
+func (r mcpReply) typing() *protocol.Typing {
+	if r.WritesTotal == 0 {
+		return nil
+	}
+	return &protocol.Typing{Writes: r.Writes, WritesTotal: r.WritesTotal, Stopped: r.TypingStopped}
 }
 
 // sockRequestError is a structured failure reported by magmux itself. The code
@@ -195,13 +207,14 @@ type mcpReply struct {
 type sockRequestError struct {
 	Code string
 	Msg  string
-	// Reason, Typed, MaybeSubmitted and BoxEmpty are carried for
-	// protocol.ReasonOf, TypedOf, MaybeSubmittedOf and BoxEmptyOf, and are
-	// deliberately not in Error's wording, which is unchanged.
+	// Reason, Typed, MaybeSubmitted, BoxEmpty and Typing are carried for
+	// protocol.ReasonOf, TypedOf, MaybeSubmittedOf, BoxEmptyOf and TypingOf,
+	// and are deliberately not in Error's wording, which is unchanged.
 	Reason         string
 	Typed          bool
 	MaybeSubmitted bool
 	BoxEmpty       *bool
+	Typing         *protocol.Typing
 }
 
 func (e *sockRequestError) Error() string {
@@ -218,7 +231,7 @@ func (e *sockRequestError) Error() string {
 // protocol.CodeOf reads its code. Error keeps its own wording, with the code
 // beside the message, because that is what the model is shown.
 func (e *sockRequestError) Unwrap() error {
-	return &protocol.Error{Code: e.Code, Msg: e.Msg, Reason: e.Reason, Typed: e.Typed, MaybeSubmitted: e.MaybeSubmitted, BoxEmpty: e.BoxEmpty}
+	return &protocol.Error{Code: e.Code, Msg: e.Msg, Reason: e.Reason, Typed: e.Typed, MaybeSubmitted: e.MaybeSubmitted, BoxEmpty: e.BoxEmpty, Typing: e.Typing}
 }
 
 // sockTimeoutError is "our own timer fired and magmux said nothing". It is a
@@ -976,7 +989,7 @@ func (s *Session) requestRaw(ctx context.Context, msg map[string]any, timeout ti
 	select {
 	case r := <-ch:
 		if !r.OK {
-			return r.Result, &sockRequestError{Code: r.Code, Msg: r.Error, Reason: r.Reason, Typed: r.Typed, MaybeSubmitted: r.MaybeSubmitted, BoxEmpty: r.BoxEmpty}
+			return r.Result, &sockRequestError{Code: r.Code, Msg: r.Error, Reason: r.Reason, Typed: r.Typed, MaybeSubmitted: r.MaybeSubmitted, BoxEmpty: r.BoxEmpty, Typing: r.typing()}
 		}
 		return r.Result, nil
 	case <-ctx.Done():

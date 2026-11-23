@@ -331,6 +331,9 @@ func TestClientUnwrapKeepsReasonAndTyped(t *testing.T) {
 		{"maybe submitted",
 			`{"type":"reply","id":%q,"ok":false,"code":"not_accepted","reason":"text_mismatch","typed":true,"maybeSubmitted":true,"error":"unknown"}`,
 			"not_accepted", "text_mismatch", true, "unknown (not_accepted)"},
+		{"typing stopped",
+			`{"type":"reply","id":%q,"ok":false,"code":"not_accepted","reason":"text_mismatch","typed":true,"boxEmpty":false,"writes":2,"writesTotal":4,"typingStopped":"deadline","error":"stopped"}`,
+			"not_accepted", "text_mismatch", true, "stopped (not_accepted)"},
 		{"reason only",
 			`{"type":"reply","id":%q,"ok":false,"code":"busy","reason":"vim_mode","error":"vim"}`,
 			"busy", "vim_mode", false, "vim (busy)"},
@@ -368,6 +371,15 @@ func TestClientUnwrapKeepsReasonAndTyped(t *testing.T) {
 			}
 			if err.Error() != c.text {
 				t.Errorf("Error() = %q, want %q (the wording is unchanged)", err.Error(), c.text)
+			}
+			ty, stated := protocol.TypingOf(err)
+			if want := c.name == "typing stopped"; stated != want {
+				t.Errorf("err %v: TypingOf stated %v, want %v", err, stated, want)
+			} else if want && (ty != protocol.Typing{Writes: 2, WritesTotal: 4, Stopped: protocol.TypingStoppedDeadline}) {
+				t.Errorf("TypingOf = %+v, want 2 of 4 stopped at the deadline", ty)
+			}
+			if empty, stated := protocol.BoxEmptyOf(err); c.name == "typing stopped" && (!stated || empty) {
+				t.Errorf("BoxEmptyOf = %v, %v; want false, stated", empty, stated)
 			}
 		})
 	}
