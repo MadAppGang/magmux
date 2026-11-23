@@ -210,6 +210,9 @@ func errorEvent(pane int, err error) []byte {
 	if empty, ok := protocol.BoxEmptyOf(err); ok {
 		ev["boxEmpty"] = empty
 	}
+	if t, ok := protocol.TypingOf(err); ok {
+		t.AddTo(ev)
+	}
 	if pane > 0 {
 		ev["pane"] = pane
 	}

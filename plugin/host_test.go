@@ -485,18 +485,22 @@ func TestPluginRoutedErrorKeepsItsReason(t *testing.T) {
 
 	var reply map[string]any
 	line := replyBytes([]byte(`7`), nil, &protocol.Error{Code: protocol.CodeNotAccepted, Msg: "m",
-		Reason: protocol.ReasonEmptyBox, Typed: true})
+		Reason: protocol.ReasonEmptyBox, Typed: true,
+		Typing: &protocol.Typing{Writes: 1, WritesTotal: 2, Stopped: protocol.TypingStoppedNotReady}})
 	if err := json.Unmarshal(line, &reply); err != nil {
 		t.Fatal(err)
 	}
 	if reply["reason"] != protocol.ReasonEmptyBox || reply["typed"] != true {
 		t.Errorf("host reply = %v, want reason and typed", reply)
 	}
+	if reply["writes"] != 1.0 || reply["writesTotal"] != 2.0 || reply["typingStopped"] != protocol.TypingStoppedNotReady {
+		t.Errorf("host reply = %v, want writes 1 of 2, typingStopped not_ready", reply)
+	}
 	reply = nil
 	if err := json.Unmarshal(replyBytes([]byte(`8`), nil, protocol.Errf(protocol.CodePaneDead, "x")), &reply); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"reason", "typed"} {
+	for _, k := range []string{"reason", "typed", "writes", "writesTotal", "typingStopped"} {
 		if _, ok := reply[k]; ok {
 			t.Errorf("a host reply with no %s carries the key: %v", k, reply)
 		}

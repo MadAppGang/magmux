@@ -65,6 +65,9 @@ func newFixture(t *testing.T, opts ...func(*Config)) *fixture {
 				Typed  bool   `json:"typed"`
 				Maybe  bool   `json:"maybeSubmitted"`
 				Empty  *bool  `json:"boxEmpty"`
+				Writes int    `json:"writes"`
+				Total  int    `json:"writesTotal"`
+				Stop   string `json:"typingStopped"`
 			}
 			_ = json.Unmarshal(args, &a)
 			if a.Code == "" {
@@ -74,6 +77,9 @@ func newFixture(t *testing.T, opts ...func(*Config)) *fixture {
 			e.Typed = a.Typed
 			e.MaybeSubmitted = a.Maybe
 			e.BoxEmpty = a.Empty
+			if a.Total > 0 {
+				e.Typing = &protocol.Typing{Writes: a.Writes, WritesTotal: a.Total, Stopped: a.Stop}
+			}
 			return nil, e
 		}},
 	}

@@ -323,6 +323,9 @@ func (a *Adapter) writeResult(pushId string, result map[string]any, err error) {
 		if empty, ok := protocol.BoxEmptyOf(err); ok {
 			rec["boxEmpty"] = empty
 		}
+		if t, ok := protocol.TypingOf(err); ok {
+			t.AddTo(rec)
+		}
 	} else if result != nil {
 		rec["result"] = jsonString(result)
 	}

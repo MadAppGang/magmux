@@ -116,5 +116,8 @@ func errBody(code string, err error) map[string]any {
 	if empty, ok := protocol.BoxEmptyOf(err); ok {
 		body["boxEmpty"] = empty
 	}
+	if t, ok := protocol.TypingOf(err); ok {
+		t.AddTo(body)
+	}
 	return body
 }

@@ -26,6 +26,7 @@ package mux
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -192,6 +193,33 @@ type sendReport struct {
 	evidence    string
 	resentEnter bool
 	lastEsc     time.Time
+	// writes counts the text chunks and keys that reached the PTY, of
+	// writesTotal the delivery would make (the Enter and any Escape are not
+	// counted). stopped says why typing ended before the last of them
+	// (protocol.TypingStopped*), and is "" when it did not.
+	writes, writesTotal int
+	stopped             string
+}
+
+// typing is how far the typing got, as the wire states it; nil when nothing
+// was written, so a send that typed nothing states no typing keys.
+func (r sendReport) typing() *protocol.Typing {
+	if r.writes == 0 {
+		return nil
+	}
+	t := protocol.Typing{Writes: r.writes, WritesTotal: r.writesTotal}
+	if r.writes < r.writesTotal {
+		t.Stopped = r.stopped
+	}
+	return &t
+}
+
+// typingStopped reports whether typing ended before the last write.
+func (r sendReport) typingStopped() bool { return r.stopped != "" && r.writes < r.writesTotal }
+
+// stopClause names a typing stop in a reply's words.
+func (r sendReport) stopClause() string {
+	return fmt.Sprintf("typing stopped after %d of %d writes (%s)", r.writes, r.writesTotal, r.stopped)
 }
 
 // addTo puts the gated reply keys on a send's result (§5.4). An ungated
@@ -215,6 +243,11 @@ func (r sendReport) addTo(result map[string]any) {
 	if r.evidence != "" {
 		result["evidence"] = r.evidence
 	}
+	// An ok reply has made every write, so it never carries typingStopped.
+	if t := r.typing(); t != nil {
+		result["writes"] = t.Writes
+		result["writesTotal"] = t.WritesTotal
+	}
 }
 
 // gatedAckText is the ⇦ continuation for a gated send:
@@ -226,6 +259,9 @@ func gatedAckText(bytes int, r sendReport, err error) string {
 		parts = append(parts, "dismissed "+protocol.ReasonDialogPrefix+k)
 	}
 	parts = append(parts, deliveryParts(bytes, r.keys, r.enter))
+	if r.typingStopped() {
+		parts = append(parts, fmt.Sprintf("typing stopped %d/%d (%s)", r.writes, r.writesTotal, r.stopped))
+	}
 	if r.verified != "" {
 		parts = append(parts, "verified "+strings.ReplaceAll(r.verified, "_", " "))
 	}
@@ -455,15 +491,27 @@ func (d *sendDelivery) acquireToken(ctx context.Context, tok chan struct{}, star
 
 // deliverGated is the gated delivery, steps 1–9 of §3.3.
 func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, error)) {
-	rep := &sendReport{Gated: true, keys: len(d.keys), enter: d.enter}
+	var chunks [][]byte // the typed text's writes, for a typed send
+	textWrites := 0
+	switch {
+	case d.mode == sendTyped:
+		chunks = typedWrites(d.text)
+		textWrites = len(chunks)
+	case d.mode == sendPaste, d.text != "":
+		textWrites = 1 // the paste markers are written even around no text
+	}
+	rep := &sendReport{Gated: true, keys: len(d.keys), enter: d.enter, writesTotal: textWrites + len(d.keys)}
 	start := time.Now()
 	deadline := start.Add(d.readyWait)
 	tok := d.m.typingToken(d.p)
 	held := false
 	gateWaited := time.Duration(-1) // the gate and the token
 	var waitedPre time.Duration     // the pre-Enter re-wait
+	var waitedType time.Duration    // resuming typing between writes
 
-	// Step 9, on every path: release the token, record the ack, answer.
+	// Step 9, on every path: release the token, record the ack, answer. An
+	// error of a send that wrote states how far the typing got: ONE site, so
+	// no gated error path can miss it.
 	finish := func(err error) {
 		if held {
 			<-tok
@@ -472,7 +520,14 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		if gateWaited < 0 {
 			gateWaited = time.Since(start)
 		}
-		rep.waited = gateWaited + waitedPre
+		rep.waited = gateWaited + waitedPre + waitedType
+		if rep.writes >= rep.writesTotal {
+			rep.stopped = ""
+		}
+		var pe *protocol.Error
+		if err != nil && errors.As(err, &pe) {
+			pe.Typing = rep.typing()
+		}
 		d.m.control.recordAck(d.seq, err == nil, verbErrCode(err), ackText(d.text, d.keys, d.enter, rep, err))
 		if done != nil {
 			done(*rep, err)
@@ -555,10 +610,16 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 
 	// Step 4: typing, once. Before every write after the first, a
 	// screen-and-termios check: a dialog stops the typing (busy, typed);
-	// anything else not ready stops it and goes to the box check, which
-	// re-waits and then verifies. wrote is the typed flag.
+	// anything else not ready is waited out by resumeTyping, which lets the
+	// next write go only once the box holds exactly what was written. wrote
+	// is the typed flag.
 	wrote := false
-	between := func() (stop bool, err *protocol.Error) {
+	dialogErr := func(reason string) *protocol.Error {
+		return gateErr(protocol.CodeBusy, reason, true,
+			"pane %d: a %s dialog appeared while the text was being typed, after %d of %d writes; typing stopped and Enter was not pressed",
+			d.idx, strings.TrimPrefix(reason, protocol.ReasonDialogPrefix), rep.writes, rep.writesTotal)
+	}
+	between := func() (notReady bool, err *protocol.Error) {
 		if !wrote {
 			return false, nil
 		}
@@ -567,9 +628,8 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 			return false, nil
 		}
 		if strings.HasPrefix(c.Reason, protocol.ReasonDialogPrefix) {
-			return true, gateErr(protocol.CodeBusy, c.Reason, true,
-				"pane %d: a %s dialog appeared while the text was being typed; typing stopped and Enter was not pressed",
-				d.idx, strings.TrimPrefix(c.Reason, protocol.ReasonDialogPrefix))
+			rep.stopped = protocol.TypingStoppedDialog
+			return true, dialogErr(c.Reason)
 		}
 		return true, nil
 	}
@@ -581,16 +641,21 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 			typedAt = time.Now()
 		}
 		if !d.p.injectPTY(b) {
+			rep.stopped = protocol.TypingStoppedPaneDead
 			return gateErr(protocol.CodePaneDead, "", wrote,
 				"pane %d rejected the %s: its child has exited or its PTY is closed", d.idx, what)
 		}
 		wrote = true
+		rep.writes++
 		return nil
 	}
 	cancelledTyped := func(before string) error {
 		err := d.cancelled(before)
 		if e, ok := err.(*protocol.Error); ok {
 			e.Typed = wrote
+		}
+		if rep.stopped == "" {
+			rep.stopped = protocol.TypingStoppedCancelled
 		}
 		return err
 	}
@@ -599,16 +664,107 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 	pre := r.Pre // the pre-typing acceptance baseline, from the read that authorised the first byte
 	typedText, pasted, stopped := false, false, false
 
+	// resumeTyping waits out a not-ready answer between two writes. The
+	// typing token stays HELD: releasing it would let another delivery type
+	// into a box that holds half of this one. It does not go back through the
+	// gate either, whose first-byte query would refuse this send's own
+	// half-written text as a box that is not empty.
+	//
+	// Every step reads the box with one CheckBox — a synchronous termios
+	// sample and a fresh screen, the authority for the next byte [D] —
+	// expecting exactly what was written. It returns "" the moment the box
+	// holds it, and the caller writes the next chunk at once. Otherwise it
+	// returns why typing stopped for good: a termios change since the first
+	// byte (the reader may have reset, and typing on could join copies), a box
+	// holding something else unchanged for the settle interval, the send's
+	// own deadline, or content that is not knowable, so there is nothing to
+	// wait for. A non-nil error answers the send: a dialog, a dead pane, or
+	// Quiesce. Nothing is retyped and nothing is cleared, ever.
+	resumeTyping := func(written string, knowable bool) (string, error) {
+		if !knowable {
+			return protocol.TypingStoppedNotReady, nil
+		}
+		want := BoxExpect{Class: d.class, Exact: written, TypedText: true, Pasted: pasted, PasteAbove: pasteAbove, TypedAt: typedAt, Pre: pre}
+		// A prefix with no visible rune (blanks, or the lone `!` that switched
+		// to bash mode) is held by a box that reads empty: judgeBox would
+		// call it empty, not a mismatch.
+		invisible := inputKey(strings.TrimPrefix(written, "!")) == ""
+		t0 := time.Now()
+		defer func() { waitedType += time.Since(t0) }()
+		var (
+			last       BoxCheck
+			have       bool // last is the previous read, and it was ready
+			stableFrom time.Time
+		)
+		for {
+			if err := d.liveness(true); err != nil {
+				return protocol.TypingStoppedPaneDead, err
+			}
+			chk := d.g.CheckBox(want)
+			now := time.Now()
+			if chk.TermiosChanged {
+				return protocol.TypingStoppedTerminalReset, nil
+			}
+			switch cr := chk.Readiness; {
+			case !cr.Ready && strings.HasPrefix(cr.Reason, protocol.ReasonDialogPrefix):
+				return protocol.TypingStoppedDialog, dialogErr(cr.Reason)
+			case !cr.Ready:
+				have = false // not the box: the stability clock restarts
+			case chk.Verdict == BoxVerified, invisible && chk.Verdict == BoxEmpty:
+				return "", nil
+			default:
+				// The box may still be drawing after the blink, so a
+				// mismatch is concluded only once it has held unchanged for
+				// the settle interval.
+				if !have || !sameBox(last, chk) {
+					last, have, stableFrom = chk, true, now
+				}
+				if now.Sub(stableFrom) >= verifySettle {
+					return protocol.TypingStoppedBoxChanged, nil
+				}
+			}
+			if !now.Before(deadline) {
+				return protocol.TypingStoppedDeadline, nil
+			}
+			if !pause(ctx, gateStep) {
+				return protocol.TypingStoppedCancelled, cancelledTyped("rest of the text")
+			}
+		}
+	}
+	// keepTyping runs between() and, on a not-ready answer, resumeTyping.
+	// answered: the send has been answered. stop: typing stopped for good.
+	// written is called only on a not-ready answer, so the prefix is built
+	// only when there is something to wait for.
+	keepTyping := func(written func() string, knowable bool) (stop, answered bool) {
+		notReady, err := between()
+		if err != nil {
+			fail(err)
+			return true, true
+		}
+		if !notReady {
+			return false, false
+		}
+		why, rerr := resumeTyping(written(), knowable)
+		if why != "" {
+			rep.stopped = why
+		}
+		if rerr != nil {
+			finish(rerr)
+			return true, true
+		}
+		return why != "", false
+	}
+
 	switch d.mode {
 	case sendTyped:
-		for i, w := range typedWrites(d.text) {
+		var typedSoFar strings.Builder
+		for i, w := range chunks {
 			if i > 0 && !pause(ctx, typedChunkGap) {
 				finish(cancelledTyped("rest of the typed text"))
 				return
 			}
-			stop, err := between()
-			if err != nil {
-				fail(err)
+			stop, answered := keepTyping(typedSoFar.String, boxWasEmpty)
+			if answered {
 				return
 			}
 			if stop {
@@ -619,6 +775,7 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 				fail(err)
 				return
 			}
+			typedSoFar.Write(w)
 			typedText = true
 		}
 	case sendPaste:
@@ -641,6 +798,10 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 	}
 	var exactKeys []rune
 	allPrintable := true
+	// What the keys loop has put in the box so far, while it is knowable:
+	// the text, unless it collapsed into a paste token, plus every key
+	// written, while each was printable.
+	keysWritten, editedBox := []rune(nil), false
 	for _, k := range d.keys {
 		kr, printable := printableKey(k)
 		if printable {
@@ -670,9 +831,8 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 			}
 			boxWasEmpty, pasteAbove, pre = !rr.BoxHasText, rr.MaxPaste, rr.Pre
 		}
-		stop, err := between()
-		if err != nil {
-			fail(err)
+		stop, answered := keepTyping(func() string { return d.text + string(keysWritten) }, boxWasEmpty && !pasted && !editedBox)
+		if answered {
 			return
 		}
 		if stop {
@@ -686,6 +846,9 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		}
 		if printable {
 			typedText = true
+			keysWritten = append(keysWritten, kr)
+		} else {
+			editedBox = true
 		}
 	}
 
@@ -722,7 +885,9 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 	// it (r4 M3): accept:"submitted_by_other", and `enter` false, because
 	// magmux pressed no Enter — for a TYPE send as much as for a SUBMIT,
 	// since the text is no longer in the box.
-	if chk.Verdict == BoxEmpty && typedText && expect.Exact != "" && !pre.At.IsZero() {
+	// A send whose typing stopped never answers ok: part of its text was
+	// never written, so evidence for the whole of it cannot be this send's.
+	if chk.Verdict == BoxEmpty && typedText && expect.Exact != "" && !pre.At.IsZero() && !stopped {
 		if v := d.g.InputAccepted(pre); v.State == AcceptTaken {
 			rep.accept, rep.evidence, rep.enter = acceptSubmittedByOther, v.Evidence, false
 			finish(nil)
@@ -805,6 +970,9 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 			detail += fmt.Sprintf("; it was still changing when the verify window closed after %s",
 				settle.unsettled.Round(10*time.Millisecond))
 		}
+		if stopped && (leftBox || convMoved != "") {
+			detail += "; " + strings.Replace(rep.stopClause(), "typing stopped", "typing had stopped", 1)
+		}
 		if leftBox {
 			// The text was seen in the box and is gone, and magmux pressed no
 			// Enter: another writer may have submitted it with no evidence on
@@ -824,9 +992,25 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 				d.idx, detail)), boxEmpty))
 			return
 		}
+		if stopped {
+			fail(withBoxEmpty(gateErr(protocol.CodeNotAccepted, reason, true,
+				"pane %d: %s, so the rest of the text was never written; the input box does not hold the whole text (%s); Enter was not pressed and nothing was submitted",
+				d.idx, rep.stopClause(), detail), boxEmpty))
+			return
+		}
 		fail(withBoxEmpty(gateErr(protocol.CodeNotAccepted, reason, true,
 			"pane %d: the input box does not hold what was typed (%s); Enter was not pressed, nothing was submitted, and the box may hold partial text",
 			d.idx, detail), boxEmpty))
+		return
+	}
+	if stopped {
+		// The box verifies only because the unwritten rest has no visible
+		// rune (a blank or newline tail), or because its content was not
+		// knowable. Either way it is not the whole send: no Enter, never
+		// in_box.
+		fail(withBoxEmpty(gateErr(protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true,
+			"pane %d: %s; the box holds what was written, but the rest was never written; Enter was not pressed and nothing was submitted",
+			d.idx, rep.stopClause()), false))
 		return
 	}
 	rep.verified = chk.Verified

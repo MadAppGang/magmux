@@ -1643,6 +1643,46 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   `TestFirstKeyRechecksReadinessAfterItsGap`, `TestFirstKeyNotReadyToDeadlineIsBusy`,
   `TestResumedFirstKeyNotifiesOnce`, `TestWaitedCountsTheReenteredGate`.
 
+- **A not-ready answer BETWEEN writes is waited out, not obeyed, and the
+  reply says how far typing got.** A typed text goes in 32-rune chunks with a
+  readiness check before every chunk after the first; one box-less frame there
+  (rules e/g, correct for a FIRST byte) used to end the typing for good,
+  silently: the rest was never written and the reply was a bare
+  `text_mismatch`. Now a dialog still stops it (busy, typed), and anything
+  else goes to `resumeTyping` in `deliverGated`: the typing token stays HELD
+  (releasing it would let another delivery type into a half-written box, and
+  `regate` would refuse this send's own prefix as `box_not_empty`), and it
+  polls `CheckBox` every `gateStep`, to the SAME deadline, expecting EXACTLY the
+  text written so far (`TypedAt`, `Pre`, `Pasted`/`PasteAbove` as the final
+  expect). That read is the authority for the next byte; a verified box (or an
+  empty one for a prefix with no visible rune) lets the next write go at once.
+  It stops for good on a dialog, `TermiosChanged` since the first byte
+  (`terminal_reset`: typing on could join copies), a box holding something
+  else unchanged for `verifySettle` (`box_changed`), the deadline (still not
+  ready, or a box still changing: `deadline`), Quiesce, a
+  dead pane, and — in the keys loop, where the box's content is unknowable
+  after an editing key or a collapsed paste — at once (`not_ready`). The typed
+  loop always resumes. Nothing is retyped and nothing is cleared. A stopped
+  send never presses Enter and never answers ok or `in_box`, even when its
+  unwritten tail is blank and the full box verifies, and never takes the
+  `submitted_by_other` path. Every reply of a gated send that wrote carries
+  `writes` / `writesTotal` (text chunks plus keys; the Enter and Escapes are
+  not counted; an ok reply has them equal), and an error whose typing stopped
+  short carries `typingStopped` (`protocol.TypingStopped*`). They are set in
+  ONE place: `finish` puts `rep.typing()` on any `*protocol.Error`, and
+  `addTo` on an ok result. `NotifyInput` still fires once, and the resume's
+  time counts in `waitedMs`. Known limitation: the resume shares the send's
+  own readiness deadline and has no floor of its own (unlike `SendVerifyMin`
+  for the final verify), so a long typed prompt that spent most of the
+  deadline in the gate can stop with `typingStopped` `deadline` on a late
+  blink; it is reported, never silent. `TestOneNotReadyBetweenWritesKeepsTyping`,
+  `TestTypingStoppedAtTheDeadlineIsReported`,
+  `TestResumeStopsAtTheDeadlineOnABoxStillChanging`,
+  `TestResumeStopsOnATerminalReset`, `TestResumeStopsOnASettledDifferentBox`,
+  `TestResumeWaitsForAPrefixDrawnLate`, `TestKeysLoopStopsWhenTheBoxIsUnknowable`,
+  `TestATokenHeldThroughTheResume`, `TestAStoppedSendWithABlankTailPressesNoEnter`,
+  `TestDialogBetweenChunksStopsTyping`.
+
 - **`ttyWatch.mu` is a LEAF.** Never held across `read()` (the ioctl), never
   while taking another lock; `heat` may start the goroutine under it because a
   `go` statement is not blocking I/O. History never steps backwards: a sample
@@ -1728,6 +1768,12 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   (`protocol.Error.BoxEmpty`, `BoxEmptyOf`; stated on every gated
   `text_mismatch`, emitted only when stated) rides with `maybeSubmitted` at
   the same sites (`TestSocketReplyCarriesBoxEmpty`, `TestReplyCarriesBoxEmpty`).
+  So do `writes`, `writesTotal` and `typingStopped` (`protocol.Error.Typing`,
+  `TypingOf`, written by `Typing.AddTo` so the keys are spelled once; stated on
+  every error of a gated send that wrote, emitted only when stated, and
+  `typingStopped` only when writes < writesTotal). The client decodes all
+  three onto its error. The same tests cover them, plus the plugin host's
+  `replyBytes` test and `TestClientUnwrapKeepsReasonAndTyped`.
 
 - **R6: an ungated send is byte-identical to before — bytes, reply and ack.**
   `sendReport.addTo` adds nothing when `Gated` is false, and a `noGate` send is

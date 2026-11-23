@@ -58,3 +58,30 @@ const (
 	// (--view-sock), which may only read and watch.
 	ReasonReadOnly = "read_only"
 )
+
+// TypingStopped values: why a gated send stopped typing before its last
+// write. Wire-visible as "typingStopped", beside "writes" and "writesTotal",
+// and present only when writes < writesTotal. A stopped send never presses
+// Enter, and magmux never writes the rest on its own.
+const (
+	// TypingStoppedDialog: a dialog appeared between two writes.
+	TypingStoppedDialog = "dialog"
+	// TypingStoppedTerminalReset: the terminal's termios changed after the
+	// first byte, so the reader may have reset and typing on could join copies.
+	TypingStoppedTerminalReset = "terminal_reset"
+	// TypingStoppedBoxChanged: the box held something other than what had been
+	// written so far, unchanged for the settle interval.
+	TypingStoppedBoxChanged = "box_changed"
+	// TypingStoppedDeadline: the pane was still not ready for the next write,
+	// or its box was still changing, at the send's readiness deadline.
+	TypingStoppedDeadline = "deadline"
+	// TypingStoppedCancelled: magmux shut the delivery down (Quiesce).
+	TypingStoppedCancelled = "cancelled"
+	// TypingStoppedPaneDead: the child exited, its PTY closed, or the pane was
+	// closed; the error's code says which.
+	TypingStoppedPaneDead = "pane_dead"
+	// TypingStoppedNotReady: the pane was not ready for the next write, and
+	// what the box should hold was unknowable (an editing key was written), so
+	// the delivery could not wait for it.
+	TypingStoppedNotReady = "not_ready"
+)

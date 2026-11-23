@@ -148,6 +148,9 @@ func (m *Magmux) replyBytes(id json.RawMessage, result map[string]any, err error
 			if se.BoxEmpty != nil {
 				reply["boxEmpty"] = *se.BoxEmpty
 			}
+			if se.Typing != nil {
+				se.Typing.AddTo(reply)
+			}
 		}
 		reply["code"] = code
 		reply["error"] = err.Error()

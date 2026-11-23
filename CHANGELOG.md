@@ -11,6 +11,35 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+### Fixed
+
+- **A gated typed send no longer stops typing partway on one not-ready
+  frame.** A typed text is written in 32-rune chunks with a readiness check
+  before every chunk after the first, and any not-ready answer there that was
+  not a dialog — one frame without an input box was enough — ended the typing
+  for good. The rest of the text was never written, and the reply was the
+  ordinary `text_mismatch` ("the box holds 64 of 100 non-space runes"), with
+  nothing saying that magmux itself had stopped. The delivery now keeps the
+  pane's typing token and waits, to the same readiness deadline, until the box
+  holds exactly what was written so far, then types the rest. It never
+  retypes and never clears. It stops for good only on a dialog, a terminal
+  reset since the first byte, a box that holds something else for 1 s, the
+  deadline, shutdown, a dead pane, or (between keys) a box whose content an
+  editing key made unknowable; a stopped send never presses Enter, even when
+  the unwritten rest is blank, and its error says "typing stopped after W of
+  T writes (reason)".
+
+### Added
+
+- **`writes`, `writesTotal` and `typingStopped` on gated send replies.** Every
+  reply of a gated send that wrote anything states how many text chunks and
+  keys reached the pane (`writes`) of how many it would make (`writesTotal`);
+  an ok reply always has the two equal. A failure whose typing stopped short
+  also carries `typingStopped`: `dialog`, `terminal_reset`, `box_changed`,
+  `deadline`, `cancelled`, `pane_dead` or `not_ready`. They ride on every
+  transport beside `boxEmpty` (socket, HTTP, SSE, WebSocket, Firebase, plugin
+  replies), and Go callers read them with `protocol.TypingOf`.
+
 ## [0.20.2] - 2026-11-22
 
 ### Fixed

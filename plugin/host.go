@@ -575,6 +575,9 @@ func replyBytes(id json.RawMessage, result map[string]any, err error) []byte {
 		if empty, ok := protocol.BoxEmptyOf(err); ok {
 			reply["boxEmpty"] = empty
 		}
+		if t, ok := protocol.TypingOf(err); ok {
+			t.AddTo(reply)
+		}
 	case result != nil:
 		reply["result"] = result
 	}

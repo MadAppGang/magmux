@@ -123,6 +123,31 @@ type Error struct {
 	// Wire-visible as "boxEmpty", present on every text_mismatch from a gated
 	// send, and only when stated.
 	BoxEmpty *bool
+	// Typing: how far a gated send's typing got. Nil means not stated. Set on
+	// every error of a gated send that wrote at least one chunk or key, and
+	// wire-visible as "writes", "writesTotal" and, when typing stopped short,
+	// "typingStopped".
+	Typing *Typing
+}
+
+// Typing is how far a gated send's typing got: Writes of WritesTotal text
+// chunks and keys reached the PTY (the Enter and any Escape are not counted).
+// Stopped is why typing ended early (TypingStopped*), and "" when every write
+// was made.
+type Typing struct {
+	Writes, WritesTotal int
+	Stopped             string
+}
+
+// AddTo writes the typing keys onto a wire object: "writes" and
+// "writesTotal", and "typingStopped" only when Stopped is set. Every
+// serializer goes through it, so the keys are spelled once.
+func (t Typing) AddTo(m map[string]any) {
+	m["writes"] = t.Writes
+	m["writesTotal"] = t.WritesTotal
+	if t.Stopped != "" {
+		m["typingStopped"] = t.Stopped
+	}
 }
 
 func (e *Error) Error() string { return e.Msg }
@@ -178,6 +203,16 @@ func BoxEmptyOf(err error) (empty, stated bool) {
 		return *se.BoxEmpty, true
 	}
 	return false, false
+}
+
+// TypingOf reports how far a failed gated send's typing got, and whether the
+// failure says so at all. It reads through wrapping, as BoxEmptyOf does.
+func TypingOf(err error) (Typing, bool) {
+	var se *Error
+	if errors.As(err, &se) && se.Typing != nil {
+		return *se.Typing, true
+	}
+	return Typing{}, false
 }
 
 // CodeOf extracts the machine-readable code from a verb failure, or "".
