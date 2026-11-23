@@ -11,6 +11,8 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-11-23
+
 ### Fixed
 
 - **A gated typed send no longer stops typing partway on one not-ready
