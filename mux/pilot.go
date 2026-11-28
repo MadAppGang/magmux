@@ -22,10 +22,12 @@ package mux
 // nobody to tell.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/MadAppGang/magmux/hub"
 	"github.com/MadAppGang/magmux/protocol"
@@ -130,8 +132,10 @@ const (
 	// newline and the pane asked for bracketed paste (pasteWrap).
 	sendAuto sendMode = ""
 	// sendTyped types the text as keystrokes, the way a person at the keyboard
-	// would: short runs of characters with a pause between them, and every
-	// newline as a ctrl-j of its own. It is never bracketed.
+	// would: short runs of characters with a pause between them, every
+	// newline a ctrl-j. It is never bracketed. On a gated pane blank runs and
+	// newlines join the next write that holds a visible rune
+	// (evidencedWrites), because the box check cannot see whitespace.
 	//
 	// It exists because a TUI cannot tell one large write from a paste, and
 	// treats it as one. Claude Code, measured on 2.1.286, takes any single read
@@ -163,7 +167,9 @@ func sendModeOf(typed, paste bool) (sendMode, error) {
 // typedChunkRunes is the most text one typed write carries, and typedChunkGap
 // the pause between two writes. Small and spaced so the far end reads them as
 // keystrokes: back-to-back writes can be read as one chunk, and even twenty
-// chunks read together stay under the pasteCollapseRunes threshold below.
+// chunks read together stay under the pasteCollapseRunes threshold below. A
+// gated send's re-cut write (evidencedWrites) can be longer, by the blank run
+// it carries, and is refused when it would pass that threshold on its own.
 //
 // Both values are protocol's: a gated send's budget counts every typed write,
 // and protocol.TypedWriteCount is pinned to agree with typedWrites.
@@ -217,6 +223,47 @@ func typedWrites(text string) [][]byte {
 		}
 	}
 	flush()
+	return out
+}
+
+// evidencedWrites re-cuts typedWrites' output for a gated send so that every
+// write but the last ENDS with a non-space rune: a write's trailing
+// whitespace moves to the start of the next write, so a whitespace-only write
+// (a blank run, a typed newline) joins the next write that holds a visible
+// rune. The bytes and their order are unchanged.
+//
+// A gated send writes the next chunk only once the box matches everything
+// written so far, compared by inputKey, which cannot see whitespace. A box
+// showing a write's last visible rune is evidence that every byte before it
+// was read, because a write is read in order; a write that ends in whitespace
+// would match before it was read, and the next write would go on no evidence.
+//
+// Whitespace at the very end of the text rides in the last write, and so is
+// not separately evidenced: only the final verify and the Enter follow it,
+// and the final verify proves the last visible rune of that same write was
+// read. A text with no visible rune at all is one write.
+func evidencedWrites(ws [][]byte) [][]byte {
+	var (
+		out   [][]byte
+		carry []byte
+	)
+	for _, w := range ws {
+		b := append(carry, w...)
+		end := len(bytes.TrimRightFunc(b, unicode.IsSpace))
+		if end == 0 {
+			carry = b
+			continue
+		}
+		out = append(out, b[:end:end])
+		carry = append([]byte(nil), b[end:]...)
+	}
+	if len(carry) > 0 {
+		if len(out) == 0 {
+			return [][]byte{carry}
+		}
+		last := len(out) - 1
+		out[last] = append(out[last], carry...)
+	}
 	return out
 }
 
