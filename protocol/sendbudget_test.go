@@ -38,7 +38,7 @@ func TestSendBudgetWorkedValues(t *testing.T) {
 		{"short submit", SendShape{Submit: true}, 10000 + 2*1390 + 2288 + 6000 + 2000},
 		{"500 keys and a submit", SendShape{Keys: 500, Submit: true}, 10000 + 2*(500*22+1390) + 2288 + 6000 + 2000},
 		{"readyTimeoutMs 60000", SendShape{ReadyTimeoutMs: 60000, Submit: true}, 60000 + 2*1390 + 2288 + 6000 + 2000},
-		{"a TYPE", SendShape{Typed: true, TypedWrites: 3}, 10000 + 2*(3*10+1390) + 2288 + 2000},
+		{"a TYPE", SendShape{Typed: true, TypedWrites: 3}, 10000 + 2*(3*(8+2+1200+10)+1390) + 2288 + 2000},
 	} {
 		if got := ms(SendBudget(c.s)); got != c.want {
 			t.Errorf("%s: %dms, want %dms", c.name, got, c.want)

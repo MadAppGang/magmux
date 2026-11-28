@@ -175,6 +175,10 @@ type ReadinessQuery struct {
 	Class SendClass
 	Types bool // the delivery puts characters into the box: rule h (box_not_empty) applies
 	Paste bool // the text goes out bracketed: rule i (bracketed paste on) applies
+	// ExpectBox, with Types: rule h requires the box to hold exactly this
+	// (by inputKey) instead of nothing, and refuses anything else, an empty
+	// box included.
+	ExpectBox string
 	// Baseline, when set, is the content this delivery will type into an
 	// empty box; the answer then carries Pre, an acceptance baseline for it
 	// taken from the SAME read. It is what lets a delivery whose box emptied

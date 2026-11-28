@@ -303,6 +303,9 @@ type sendRequest struct {
 	dismiss        bool // dismissDialogs: Escape a dismissable dialog (R5)
 	readyTimeoutMs int  // the readiness deadline; 0 = the default (validated by the transport)
 	noGate         bool // skip the gate, the verify and acceptance: today's path
+	// expectBox is what the box must already hold for a gated send to type
+	// into it; "" = an empty box. Refused on a send that is not gated.
+	expectBox string
 }
 
 // sendRequestVia is sendToPaneVia with the whole request, and a done that also
@@ -360,6 +363,9 @@ type sendDelivery struct {
 	class     SendClass
 	dismiss   bool
 	readyWait time.Duration
+	// expectBox: the box content the gate requires before the first byte,
+	// and the prefix of every box check after it.
+	expectBox string
 }
 
 // admitSend resolves the target and files the request, with no I/O and no
@@ -387,6 +393,10 @@ func (m *Magmux) admitSend(r sendRequest) (*sendDelivery, error) {
 		return nil, err
 	}
 	keys, enter = cls.keys, cls.enter
+	if r.expectBox != "" && !cls.gated {
+		// A precondition nothing on this path would check is not one.
+		return nil, sockErrf(sockCodeBadRequest, "pane %d: expectBox needs a gated send (a gated pane, without noGate)", idx)
+	}
 	if mode == sendPaste && !cls.gated {
 		// Without the mode the markers would arrive as literal keystrokes, and a
 		// paste the program cannot see as one is not a paste.
@@ -433,7 +443,7 @@ func (m *Magmux) admitSend(r sendRequest) (*sendDelivery, error) {
 	// delivery types the classified text (a gated send's CRs are newlines).
 	return &sendDelivery{m: m, p: p, idx: idx, seq: seq, mode: mode, text: cls.text, keys: keys, enter: enter,
 		gated: cls.gated, g: cls.g, class: cls.class, dismiss: r.dismiss,
-		readyWait: protocol.ReadyWait(r.readyTimeoutMs)}, nil
+		readyWait: protocol.ReadyWait(r.readyTimeoutMs), expectBox: r.expectBox}, nil
 }
 
 // notifyInput is the ONE way a send tells a pane's controller a turn is

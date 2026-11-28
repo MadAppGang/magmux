@@ -21,9 +21,19 @@ const (
 	SendReadyWaitDefault = 10 * time.Second
 	SendReadyWaitMax     = 60 * time.Second
 
-	// SendTypedChunkRunes / SendTypedChunkGap: a typed send's writes.
+	// SendTypedChunkRunes / SendTypedChunkGap: a typed send's writes. A gated
+	// typed send is not paced by the gap: it writes the next chunk only once
+	// the input box holds exactly what was written so far, reading the box
+	// every SendTypedVerifyStep. The gap stays in SendBudget as headroom, and
+	// it still paces an ungated typed send. Each of those waits shares the
+	// readiness deadline but is never cut below SendTypedChunkMin from its own
+	// start, so a reader that draws every chunk slowly (the render lag
+	// measured under load is up to ~800 ms) is not stopped partway through a
+	// long prompt by a deadline the earlier chunks spent.
 	SendTypedChunkRunes = 32
 	SendTypedChunkGap   = 8 * time.Millisecond
+	SendTypedVerifyStep = 10 * time.Millisecond
+	SendTypedChunkMin   = 1200 * time.Millisecond
 	// SendKeyGap is the pause before each named key.
 	SendKeyGap = 20 * time.Millisecond
 	// SendSettle is the pause before the box is first read.
@@ -99,11 +109,16 @@ func ReadyWait(ms int) time.Duration {
 // SendRetypeClearMax paced keys once, as headroom: those terms once paid for
 // an automatic retype and its clear, and they stay so that the bound every
 // client waits on does not change. The bound is only looser than the work.
+//
+// Each typed write after the first waits for the box to show what was written
+// before it. That wait shares the readiness deadline, but its own floor
+// (SendTypedChunkMin) is not cut by it, so each write adds that floor, one box
+// read and one SendTypedVerifyStep outside it.
 func SendBudget(s SendShape) time.Duration {
 	b := ReadyWait(s.ReadyTimeoutMs)
 	var attempt time.Duration
 	if s.Typed {
-		attempt += time.Duration(s.TypedWrites) * (SendTypedChunkGap + SendGateCheckCost)
+		attempt += time.Duration(s.TypedWrites) * (SendTypedChunkGap + SendGateCheckCost + SendTypedChunkMin + SendTypedVerifyStep)
 	}
 	attempt += time.Duration(s.Keys) * (SendKeyGap + SendGateCheckCost)
 	attempt += SendSettle + SendVerifyMin + SendVerifyStep // every gated send verifies the box after the settle

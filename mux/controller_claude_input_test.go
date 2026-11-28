@@ -126,6 +126,12 @@ func TestReadinessPrecedence(t *testing.T) {
 		}), false, protocol.ReasonStarting, false},
 		{"h: box holds text, TYPE", with(func(i *readinessInput) { i.sc = boxText }), false, protocol.ReasonBoxNotEmpty, false},
 		{"h: only with Types", with(func(i *readinessInput) { i.sc = boxText; i.q = submitQ }), true, "", false},
+		{"h: expectBox held exactly", with(func(i *readinessInput) { i.sc = boxText; i.q.ExpectBox = boxText.BoxText }), true, "", false},
+		{"h: expectBox, the box holds something else", with(func(i *readinessInput) {
+			i.sc = boxText
+			i.q.ExpectBox = boxText.BoxText + "x"
+		}), false, protocol.ReasonBoxNotEmpty, false},
+		{"h: expectBox, the box is empty", with(func(i *readinessInput) { i.q.ExpectBox = "[Image #1]" }), false, protocol.ReasonBoxNotEmpty, false},
 		{"i: paste before 2004", with(func(i *readinessInput) {
 			i.bracketPaste = false
 			i.q.Paste = true

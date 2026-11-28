@@ -41,13 +41,17 @@ type sockMsg struct {
 	Label string `json:"label,omitempty"` // short tag for the control log ("step 2/5")
 	// The input gate's three fields (inputgate_send.go). They mean something
 	// only on a gated pane; their zero values are today's send everywhere.
-	DismissDialogs bool   `json:"dismissDialogs,omitempty"` // Escape a dismissable dialog (R5); never approves
-	ReadyTimeoutMs int    `json:"readyTimeoutMs,omitempty"` // readiness deadline; 0 = 10s, > 60000 clamped, < 0 bad_request
-	NoGate         bool   `json:"noGate,omitempty"`         // today's behaviour, even into a dialog
-	Goal           string `json:"goal,omitempty"`           // the task the pilot is driving
-	Steps          int    `json:"steps,omitempty"`          // planned step count, 0 if open-ended
-	Model          string `json:"model,omitempty"`          // model the pilot itself is running
-	Summary        string `json:"summary,omitempty"`        // pilot's closing summary
+	DismissDialogs bool `json:"dismissDialogs,omitempty"` // Escape a dismissable dialog (R5); never approves
+	ReadyTimeoutMs int  `json:"readyTimeoutMs,omitempty"` // readiness deadline; 0 = 10s, > 60000 clamped, < 0 bad_request
+	NoGate         bool `json:"noGate,omitempty"`         // today's behaviour, even into a dialog
+	// ExpectBox (gated sends only): what the input box holds before this
+	// send types, e.g. "[Image #1]". The send types only into a box holding
+	// exactly it, and every check after that expects it plus what was written.
+	ExpectBox string `json:"expectBox,omitempty"`
+	Goal      string `json:"goal,omitempty"`    // the task the pilot is driving
+	Steps     int    `json:"steps,omitempty"`   // planned step count, 0 if open-ended
+	Model     string `json:"model,omitempty"`   // model the pilot itself is running
+	Summary   string `json:"summary,omitempty"` // pilot's closing summary
 	// Client is the controller's identity for the panel header
 	// ("claude-code/2.1"). The ONE field MCP adds to the pilot protocol —
 	// everything else an MCP client does arrives as an ordinary socket verb.
@@ -469,7 +473,7 @@ func (m *Magmux) dispatchSocketVerb(msg sockMsg, done func(map[string]any, error
 			return nil, sockErrf(sockCodeBadRequest, "send: readyTimeoutMs must not be negative (0 is the default, %d)", protocol.SendReadyWaitDefault.Milliseconds())
 		}
 		req := sendRequest{idx: paneIdx, mode: mode, text: msg.Text, keys: msg.Keys, enter: enter, label: msg.Label,
-			dismiss: msg.DismissDialogs, readyTimeoutMs: msg.ReadyTimeoutMs, noGate: msg.NoGate}
+			dismiss: msg.DismissDialogs, readyTimeoutMs: msg.ReadyTimeoutMs, noGate: msg.NoGate, expectBox: msg.ExpectBox}
 		// Admitted here, on the reader; DELIVERED on this connection's lane for
 		// this pane (msg.sub), so two instructions to one pane cannot be typed
 		// into each other. A message with no connection behind it — an op

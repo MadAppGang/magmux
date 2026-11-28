@@ -126,7 +126,7 @@ func TestTypingStoppedAtTheDeadlineIsReported(t *testing.T) {
 			// A check of a PREFIX (a resume) sees the same box-less screen
 			// the readiness check saw. The final verify of the whole text
 			// reads the box as the child has it.
-			if want.Exact != text {
+			if fromWrite3(text, want) {
 				return checkNotReady(notReady(protocol.ReasonNoInputBox))
 			}
 			return childBox(&log, want)

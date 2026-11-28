@@ -307,6 +307,7 @@ type readinessInput struct {
 //	f  never ready, boot not over         starting
 //	g  box or termios changed < 1 s ago   starting | terminal_not_ready
 //	h  Types, and the box holds text      box_not_empty
+//	   (with ExpectBox: the box does not hold exactly it)
 //	i  Paste, and bracketed paste is off  starting | terminal_not_ready
 //
 // "starting" is the answer while the pane has never been ready; afterwards the
@@ -360,7 +361,12 @@ func decideReadiness(in readinessInput) InputReadiness {
 		}
 		return refuse(notReady, fmt.Sprintf("%s %s ago", what, d.Round(10*time.Millisecond)))
 	}
-	if in.q.Types && sc.BoxText != "" {
+	switch {
+	case in.q.Types && in.q.ExpectBox != "":
+		if sc.BoxShell || sc.BoxKey != inputKey(in.q.ExpectBox) {
+			return refuse(protocol.ReasonBoxNotEmpty, "the input box does not hold exactly the expected content (expectBox)")
+		}
+	case in.q.Types && sc.BoxText != "":
 		return refuse(protocol.ReasonBoxNotEmpty, "the input box already holds text")
 	}
 	if in.q.Paste && !in.bracketPaste {

@@ -1643,6 +1643,41 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   `TestFirstKeyRechecksReadinessAfterItsGap`, `TestFirstKeyNotReadyToDeadlineIsBusy`,
   `TestResumedFirstKeyNotifiesOnce`, `TestWaitedCountsTheReenteredGate`.
 
+- **A typed chunk is written only after the box shows the chunks before it.
+  Readiness is not that evidence, and neither is a pause.** `decideReadiness`
+  never compares the box with the text (rule h needs `Types`), and a Claude
+  Code that reads its input late still shows the earlier box, raw, with
+  nothing changing. So it answers ready while nothing is read, magmux kept
+  writing every 8 ms, and Claude took more than 800 characters in one read and
+  recorded them as `<pasted_content>` (claudish bench: 7 of 32 under load). So
+  `typedNext` runs `resumeTyping` (the same wait as the bullet below, every
+  `typedVerifyStep` = 10 ms) before EVERY typed write after the first, on a
+  box that was empty, or held exactly `expectBox`, at the first byte; a box
+  whose content is not knowable still gets only the readiness check, paced by
+  `typedChunkGap` as before. The verified loop has no gap. Each per-chunk wait
+  has its own floor, `typedChunkMin` (1.2 s, above the ~800 ms render lag),
+  which the readiness deadline never cuts — the same idea as `SendVerifyMin` —
+  because otherwise the ONE deadline covers the whole typing phase and a
+  reader slow on every chunk is stopped partway through a long prompt
+  (`TestASlowReaderIsNotCutOffByTheSharedDeadline`); `SendBudget` counts the
+  floor per typed write. A box that holds a strict PREFIX of the written text
+  while still holding what it held at the first byte (`boxBehind`, empty
+  included when nothing was held) is a reader that has not caught up: it
+  waits to the deadline and is never concluded `box_changed`. A box that LOST
+  its `expectBox` content is not behind. Consequence: a typed send whose box never
+  shows its first chunk stops after ONE write, which is the rule, and
+  `TestNoEmptiedBoxSendWritesAClearOrASecondCopy`'s typed rows say so.
+  `TestTypedChunkWaitsForTheBoxToShowThePreviousChunk` (a late reader whose
+  box lags its input by 200 ms) fails with the old loop: 3 of 4 writes landed
+  on a box that showed none of the earlier ones.
+- **`expectBox` turns rule h from "empty" into "exactly this".** With it set
+  and `Types`, the box must hold exactly `expectBox` (by `inputKey`, never in
+  bash mode), otherwise `box_not_empty`, an empty box included, and every box
+  check after that expects `expectBox` + what was written (`prefix` in
+  `deliverGated`), `Pre`'s baseline too. It is `bad_request` on a send that is
+  not gated (`admitSend`), because a precondition nothing checks is not one.
+  `magmux --help` advertises both rules as `capabilities: typed-verify
+  expect-box`, which drivers probe; keep that line when either changes.
 - **A not-ready answer BETWEEN writes is waited out, not obeyed, and the
   reply says how far typing got.** A typed text goes in 32-rune chunks with a
   readiness check before every chunk after the first; one box-less frame there
