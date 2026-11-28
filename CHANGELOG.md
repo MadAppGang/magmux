@@ -11,6 +11,25 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+## [0.20.5] - 2026-11-28
+
+### Fixed
+
+- **A blank stretch of a gated typed send no longer goes out on no
+  evidence.** The box check before each chunk compares without whitespace,
+  so a chunk that was only spaces, or a typed newline, already "matched"
+  before Claude Code had read it, and the next chunk followed at once. A long
+  run of blank lines or a deep indent could again queue more than 800
+  unread characters, which Claude Code takes as a paste. A gated typed send
+  now cuts its writes so each one ends with a visible character: whitespace
+  travels with the next write that holds one, and whitespace at the end of
+  the text goes in the last write. A box showing that character is evidence
+  that the whole write was read. A typed text whose blank run would make one
+  write longer than 800 characters is refused `bad_request` before anything
+  is written (send it as paste or auto instead). Ungated typed sends write
+  exactly as before. A gated typed send with blank runs reports fewer
+  `writesTotal` than before.
+
 ## [0.20.4] - 2026-11-28
 
 ### Fixed
