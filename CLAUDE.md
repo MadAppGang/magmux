@@ -1670,6 +1670,16 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   `TestTypedChunkWaitsForTheBoxToShowThePreviousChunk` (a late reader whose
   box lags its input by 200 ms) fails with the old loop: 3 of 4 writes landed
   on a box that showed none of the earlier ones.
+  `inputKey` cannot see whitespace, so a write of blanks or a typed newline
+  "matches" before it is read: the gated path therefore re-cuts the writes
+  (`evidencedWrites` over `typedWrites`) so every write but the last ENDS with
+  a visible rune, carrying a write's trailing whitespace into the next one;
+  whitespace at the end of the text rides in the last write, which the final
+  verify evidences. A re-cut write past `pasteCollapseRunes` (runes or bytes)
+  would be taken as a paste, so that send is `bad_request` before any byte.
+  The ungated path and `TypedWriteCount` keep `typedWrites` as it is.
+  `TestEvidencedWrites`, `TestABlankRunPastThePasteThresholdIsBadRequest`,
+  `TestABlankRunIsNotTypedAheadOfTheBox`.
 - **`expectBox` turns rule h from "empty" into "exactly this".** With it set
   and `Types`, the box must hold exactly `expectBox` (by `inputKey`, never in
   bash mode), otherwise `box_not_empty`, an empty box included, and every box
@@ -1699,7 +1709,8 @@ in normal mode does nothing there. claudish lost 4 of 6 slot launches to it.
   after an editing key or a collapsed paste — at once (`not_ready`). The typed
   loop always resumes. Nothing is retyped and nothing is cleared. A stopped
   send never presses Enter and never answers ok or `in_box`, even when its
-  unwritten tail is blank and the full box verifies, and never takes the
+  unwritten tail is blank and the full box verifies (a typed send can no
+  longer leave a blank tail unwritten: it rides in the last write), and never takes the
   `submitted_by_other` path. Every reply of a gated send that wrote carries
   `writes` / `writesTotal` (text chunks plus keys; the Enter and Escapes are
   not counted; an ok reply has them equal), and an error whose typing stopped

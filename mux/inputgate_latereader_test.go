@@ -128,6 +128,86 @@ func TestTypedChunkWaitsForTheBoxToShowThePreviousChunk(t *testing.T) {
 	}
 }
 
+// checkByKey answers as the Claude controller's CheckBox does: the box is
+// compared with what was typed by inputKey, and a mismatch reports the box's
+// inputKey.
+func (r *lateReader) checkByKey(want BoxExpect) BoxCheck {
+	r.mu.Lock()
+	box := r.boxLocked(time.Now())
+	r.mu.Unlock()
+	switch key := inputKey(box); {
+	case key == "":
+		return BoxCheck{Readiness: readyNow(), Verdict: BoxEmpty, Detail: "the input box is empty"}
+	case key == inputKey(want.Exact):
+		return verifiedBox(verifiedExact)
+	default:
+		return boxMismatchCheck(key, "the box holds a prefix of what was typed", false)
+	}
+}
+
+func TestABlankRunIsNotTypedAheadOfTheBox(t *testing.T) {
+	// REGRESSION: a whitespace-only typed chunk passed the box check with no evidence it was read.
+	text := "fix the parser" + strings.Repeat(" ", 200) + "\n\n\n    then run the tests"
+	blank := 0
+	for _, w := range typedWrites(text) {
+		if strings.TrimSpace(string(w)) == "" {
+			blank++
+		}
+	}
+	if blank < 4 {
+		t.Fatalf("typedWrites makes %d whitespace-only writes, the test assumes at least 4", blank)
+	}
+	// A box check that passes by key while the box the reader actually drew
+	// is not what was written passed on no evidence: the bytes it "verified"
+	// are whitespace the key cannot see, still unread.
+	var (
+		rd          *lateReader
+		mu          sync.Mutex
+		unevidenced []string
+	)
+	g := &fakeGate{checkFn: func(want BoxExpect, _ int) BoxCheck {
+		chk := rd.checkByKey(want)
+		if chk.Verdict == BoxVerified {
+			rd.mu.Lock()
+			drawn := rd.boxLocked(time.Now())
+			rd.mu.Unlock()
+			if drawn != want.Exact {
+				mu.Lock()
+				unevidenced = append(unevidenced, strings.TrimPrefix(want.Exact, drawn))
+				mu.Unlock()
+			}
+		}
+		return chk
+	}}
+	m, _, log := gatedMux(t, g)
+	rd = newLateReader(t, log, 200*time.Millisecond)
+
+	o := runSend(t, m, sendRequest{mode: sendTyped, text: text, enter: true})
+	mu.Lock()
+	for _, tail := range unevidenced {
+		t.Errorf("the box check passed while the reader had not drawn the last %d bytes written (%q)", len(tail), tail)
+	}
+	mu.Unlock()
+
+	if o.err != nil {
+		t.Fatalf("send: %v; a late reader must be waited for, blank chunks included", o.err)
+	}
+	if got := log.settle(); got != text+"\r" {
+		t.Errorf("the child received %q; want the text once and one Enter", got)
+	}
+	ahead := 0
+	for _, l := range rd.landings() {
+		if l.box != l.before {
+			ahead++
+			t.Errorf("a write reached the child while the box showed %d of the %d bytes already written",
+				len(l.box), len(l.before))
+		}
+	}
+	if ahead > 0 {
+		t.Errorf("%d writes ran ahead of the box; a blank chunk is no evidence the box has caught up", ahead)
+	}
+}
+
 func TestASlowReaderIsNotCutOffByTheSharedDeadline(t *testing.T) {
 	// Every chunk is drawn 700 ms after it reached the child. Five writes
 	// take ~2.8 s of waiting, past the 1 s readiness deadline; each chunk's

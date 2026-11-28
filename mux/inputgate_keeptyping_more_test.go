@@ -278,33 +278,56 @@ func TestATokenHeldThroughTheResume(t *testing.T) {
 }
 
 func TestAStoppedSendWithABlankTailPressesNoEnter(t *testing.T) {
-	text := strings.Repeat("x", 64) + "\n" // writes: 32, 32, newline
-	var log *byteLog
-	g := &fakeGate{
-		checkFn: func(want BoxExpect, _ int) BoxCheck {
+	// The box verifies the written prefix; a resume from the third write on
+	// sees a terminal reset.
+	check := func(text string, log **byteLog) func(BoxExpect, int) BoxCheck {
+		return func(want BoxExpect, _ int) BoxCheck {
 			c := BoxCheck{Readiness: readyNow(), Verdict: BoxMismatch, Detail: "short"}
-			if inputKey(log.String()) == inputKey(want.Exact) {
+			if inputKey((*log).String()) == inputKey(want.Exact) {
 				c = verifiedBox(verifiedExact)
 			}
 			if fromWrite3(text, want) {
 				c.TermiosChanged = true
 			}
 			return c
-		},
+		}
 	}
-	m, _, l := gatedMux(t, g)
-	log = l
-	o := runSend(t, m, sendRequest{mode: sendTyped, text: text, enter: true})
-	wantErr(t, o, protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true)
-	got := log.settle()
-	noEnter(t, got)
-	if got != text[:64] {
-		t.Errorf("the child received %q, want the two chunks only", got)
-	}
-	wantTyping(t, m, o, 2, 3, protocol.TypingStoppedTerminalReset)
-	if empty, stated := protocol.BoxEmptyOf(o.err); !stated || empty {
-		t.Errorf("BoxEmptyOf = %v, %v; want false, stated", empty, stated)
-	}
+	t.Run("a blank tail rides in the last write", func(t *testing.T) {
+		// typedWrites makes 32, 32, newline; the gated path never leaves the
+		// newline as a write of its own, so there is no third write to stop
+		// before, and no blank tail can be left unwritten.
+		text := strings.Repeat("x", 64) + "\n"
+		var log *byteLog
+		m, _, l := gatedMux(t, &fakeGate{checkFn: check(text, &log)})
+		log = l
+		o := runSend(t, m, sendRequest{mode: sendTyped, text: text, enter: true})
+		if o.err != nil {
+			t.Fatalf("send: %v", o.err)
+		}
+		if got := log.settle(); got != text+"\r" {
+			t.Errorf("the child received %q, want the text and one Enter", got)
+		}
+		if o.rep.writes != 2 || o.rep.writesTotal != 2 {
+			t.Errorf("writes %d/%d, want 2/2", o.rep.writes, o.rep.writesTotal)
+		}
+	})
+	t.Run("a stop before the last write presses no Enter", func(t *testing.T) {
+		text := strings.Repeat("x", 64) + "\n." // writes: 32, 32, "\n."
+		var log *byteLog
+		m, _, l := gatedMux(t, &fakeGate{checkFn: check(text, &log)})
+		log = l
+		o := runSend(t, m, sendRequest{mode: sendTyped, text: text, enter: true})
+		wantErr(t, o, protocol.CodeNotAccepted, protocol.ReasonTextMismatch, true)
+		got := log.settle()
+		noEnter(t, got)
+		if got != text[:64] {
+			t.Errorf("the child received %q, want the two chunks only", got)
+		}
+		wantTyping(t, m, o, 2, 3, protocol.TypingStoppedTerminalReset)
+		if empty, stated := protocol.BoxEmptyOf(o.err); !stated || empty {
+			t.Errorf("BoxEmptyOf = %v, %v; want false, stated", empty, stated)
+		}
+	})
 }
 
 func TestADialogDuringTheResumeStopsTyping(t *testing.T) {

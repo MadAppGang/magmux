@@ -183,6 +183,17 @@ func classifySend(p *Pane, r sendRequest) (sendClassification, error) {
 	if cls == ClassKeys {
 		return out, nil
 	}
+	if r.mode == sendTyped {
+		// One write past the paste threshold is taken as a paste, and a blank
+		// run must go in one write with the visible rune after it.
+		for _, w := range evidencedWrites(typedWrites(text)) {
+			if n := max(utf8.RuneCount(w), len(w)); n > pasteCollapseRunes {
+				return out, sockErrf(sockCodeBadRequest,
+					"pane %d is gated: typed text holds a run of %d blank runes that must go in one write with the text after it, %d long, past the %d-rune paste threshold; nothing was sent (send it as paste or auto)",
+					r.idx, utf8.RuneCount(w)-utf8.RuneCountInString(strings.TrimLeftFunc(string(w), unicode.IsSpace)), n, pasteCollapseRunes)
+			}
+		}
+	}
 	return sendClassification{g: g, gated: true, class: cls, keys: keys, enter: submit, text: text}, nil
 }
 
@@ -542,7 +553,7 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 	textWrites := 0
 	switch {
 	case d.mode == sendTyped:
-		chunks = typedWrites(d.text)
+		chunks = evidencedWrites(typedWrites(d.text))
 		textWrites = len(chunks)
 	case d.mode == sendPaste, d.text != "":
 		textWrites = 1 // the paste markers are written even around no text
