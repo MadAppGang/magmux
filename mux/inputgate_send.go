@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -39,11 +40,16 @@ import (
 // Gate timing. The acceptance window is protocol's, because a client's
 // default wait (protocol.SendBudget) counts it.
 const (
-	gateStep     = 50 * time.Millisecond
-	dismissMax   = 3 // per send, gate and pre-Enter together
-	dismissGap   = 400 * time.Millisecond
-	acceptWindow = protocol.SendAcceptWindow // per window; at most three
-	acceptStep   = 50 * time.Millisecond
+	gateStep = 50 * time.Millisecond
+	// typedVerifyStep paces the box reads of a typed send waiting for the
+	// box to show the chunks written so far; protocol's, because SendBudget
+	// counts it.
+	typedVerifyStep = protocol.SendTypedVerifyStep
+	typedChunkMin   = protocol.SendTypedChunkMin
+	dismissMax      = 3 // per send, gate and pre-Enter together
+	dismissGap      = 400 * time.Millisecond
+	acceptWindow    = protocol.SendAcceptWindow // per window; at most three
+	acceptStep      = 50 * time.Millisecond
 
 	// The pre-Enter verify's settle wait (settleBox); protocol's, because
 	// SendBudget counts them.
@@ -321,6 +327,42 @@ func maybeSubmitted(e *protocol.Error) *protocol.Error {
 	return e
 }
 
+// boxBehind reports whether box (a CheckBox's Box, the controller's inputKey
+// of the box) holds only the START of written — less than all of it — while
+// still holding held, what the box held at the first byte (expectBox, or
+// nothing): the reader has not taken the rest yet. A box that lost what it
+// held is not behind, it changed. A bash-mode box shows the text without the
+// `!` that switched into it, so both spellings are tried.
+func boxBehind(box, written, held string) bool {
+	if !keyStartsWith(box, inputKey(held)) {
+		return false
+	}
+	for _, w := range []string{written, strings.TrimPrefix(written, "!")} {
+		if keyStartsWith(inputKey(w), box) && inputKey(w) != box {
+			return true
+		}
+	}
+	return false
+}
+
+// keyStartsWith reports whether the inputKey k begins with the inputKey p. A
+// key over inputKeyMax is its bounded prefix, NUL, and its rune count; such a
+// p is a prefix of k only when k is over the bound too, their bounded parts
+// agree and p counts fewer runes.
+func keyStartsWith(k, p string) bool {
+	kb, kn, kOver := strings.Cut(k, "\x00")
+	pb, pn, pOver := strings.Cut(p, "\x00")
+	switch {
+	case !pOver:
+		return strings.HasPrefix(kb, pb)
+	case !kOver:
+		return false
+	}
+	ki, _ := strconv.Atoi(kn)
+	pi, _ := strconv.Atoi(pn)
+	return kb == pb && pi < ki
+}
+
 // withBoxEmpty states on a text_mismatch whether the final verify read the
 // box EMPTY after this send typed, so a caller can branch on it without
 // parsing the detail. Any other error is returned unchanged.
@@ -367,11 +409,16 @@ func (d *sendDelivery) query() ReadinessQuery {
 			types = true
 		}
 	}
+	baseline := d.knowableContent()
+	if baseline != "" {
+		baseline = d.expectBox + baseline
+	}
 	return ReadinessQuery{
-		Class:    d.class,
-		Types:    types,
-		Paste:    d.mode == sendPaste || (d.mode == sendAuto && strings.Contains(d.text, "\n")),
-		Baseline: d.knowableContent(),
+		Class:     d.class,
+		Types:     types,
+		Paste:     d.mode == sendPaste || (d.mode == sendAuto && strings.Contains(d.text, "\n")),
+		Baseline:  baseline,
+		ExpectBox: d.expectBox,
 	}
 }
 
@@ -660,27 +707,35 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		return err
 	}
 
-	boxWasEmpty, pasteAbove := !r.BoxHasText, r.MaxPaste
+	// boxKnown: the box held nothing, or (expectBox) exactly what the gate
+	// required, when the first byte went in; prefix is that content.
+	knownOf := func(rr InputReadiness) bool { return !rr.BoxHasText || (d.expectBox != "" && q.Types) }
+	prefix := d.expectBox
+	boxKnown, pasteAbove := knownOf(r), r.MaxPaste
 	pre := r.Pre // the pre-typing acceptance baseline, from the read that authorised the first byte
 	typedText, pasted, stopped := false, false, false
 
-	// resumeTyping waits out a not-ready answer between two writes. The
-	// typing token stays HELD: releasing it would let another delivery type
-	// into a box that holds half of this one. It does not go back through the
-	// gate either, whose first-byte query would refuse this send's own
+	// resumeTyping waits, between two writes, for the box to hold exactly
+	// what was written. A typed send runs it before every chunk after the
+	// first; the keys loop runs it after a not-ready answer. The typing token
+	// stays HELD: releasing it would let another delivery type into a box
+	// that holds half of this one. It does not go back through the gate
+	// either, whose first-byte query would refuse this send's own
 	// half-written text as a box that is not empty.
 	//
 	// Every step reads the box with one CheckBox — a synchronous termios
 	// sample and a fresh screen, the authority for the next byte [D] —
 	// expecting exactly what was written. It returns "" the moment the box
-	// holds it, and the caller writes the next chunk at once. Otherwise it
+	// holds it, and the caller writes the next chunk at once. A box that holds
+	// only the start of what was written (empty included) is a reader that
+	// has not caught up yet, and is waited for to the deadline. Otherwise it
 	// returns why typing stopped for good: a termios change since the first
 	// byte (the reader may have reset, and typing on could join copies), a box
 	// holding something else unchanged for the settle interval, the send's
 	// own deadline, or content that is not knowable, so there is nothing to
 	// wait for. A non-nil error answers the send: a dialog, a dead pane, or
 	// Quiesce. Nothing is retyped and nothing is cleared, ever.
-	resumeTyping := func(written string, knowable bool) (string, error) {
+	resumeTyping := func(written string, knowable bool, step, floor time.Duration) (string, error) {
 		if !knowable {
 			return protocol.TypingStoppedNotReady, nil
 		}
@@ -691,6 +746,13 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		invisible := inputKey(strings.TrimPrefix(written, "!")) == ""
 		t0 := time.Now()
 		defer func() { waitedType += time.Since(t0) }()
+		// The send's deadline, lifted to this wait's own floor: a reader that
+		// draws each chunk slowly still gets the measured render lag for
+		// every chunk, however much of the deadline the earlier ones spent.
+		dl := deadline
+		if floor > 0 && t0.Add(floor).After(dl) {
+			dl = t0.Add(floor)
+		}
 		var (
 			last       BoxCheck
 			have       bool // last is the previous read, and it was ready
@@ -712,6 +774,10 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 				have = false // not the box: the stability clock restarts
 			case chk.Verdict == BoxVerified, invisible && chk.Verdict == BoxEmpty:
 				return "", nil
+			case boxBehind(chk.Box, written, prefix):
+				// The reader has not taken the rest yet: wait, to the
+				// deadline. Nothing else is written meanwhile.
+				have = false
 			default:
 				// The box may still be drawing after the blink, so a
 				// mismatch is concluded only once it has held unchanged for
@@ -723,16 +789,28 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 					return protocol.TypingStoppedBoxChanged, nil
 				}
 			}
-			if !now.Before(deadline) {
+			if !now.Before(dl) {
 				return protocol.TypingStoppedDeadline, nil
 			}
-			if !pause(ctx, gateStep) {
+			if !pause(ctx, step) {
 				return protocol.TypingStoppedCancelled, cancelledTyped("rest of the text")
 			}
 		}
 	}
+	// waitedFor files resumeTyping's answer: why typing stopped, and the
+	// error that answers the send. answered: the send has been answered.
+	// stop: typing stopped for good.
+	waitedFor := func(why string, rerr error) (stop, answered bool) {
+		if why != "" {
+			rep.stopped = why
+		}
+		if rerr != nil {
+			finish(rerr)
+			return true, true
+		}
+		return why != "", false
+	}
 	// keepTyping runs between() and, on a not-ready answer, resumeTyping.
-	// answered: the send has been answered. stop: typing stopped for good.
 	// written is called only on a not-ready answer, so the prefix is built
 	// only when there is something to wait for.
 	keepTyping := func(written func() string, knowable bool) (stop, answered bool) {
@@ -744,26 +822,38 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 		if !notReady {
 			return false, false
 		}
-		why, rerr := resumeTyping(written(), knowable)
-		if why != "" {
-			rep.stopped = why
+		return waitedFor(resumeTyping(written(), knowable, gateStep, 0))
+	}
+	// typedNext authorises a typed send's next chunk. The evidence is the box
+	// holding exactly what was written so far, never a readiness answer alone
+	// and never a pause: a reader that takes its input late still shows the
+	// earlier box, in raw mode, with nothing changing, so readiness says
+	// ready while nothing is being read. A box whose content is not knowable
+	// (it was not empty at the first byte) can only be asked for readiness,
+	// at the ungated pace.
+	typedNext := func(written string) (stop, answered bool) {
+		if !wrote {
+			return false, false
 		}
-		if rerr != nil {
-			finish(rerr)
+		if !boxKnown {
+			if !pause(ctx, typedChunkGap) {
+				finish(cancelledTyped("rest of the typed text"))
+				return true, true
+			}
+			return keepTyping(func() string { return written }, false)
+		}
+		if ctx.Err() != nil {
+			finish(cancelledTyped("rest of the typed text"))
 			return true, true
 		}
-		return why != "", false
+		return waitedFor(resumeTyping(written, true, typedVerifyStep, typedChunkMin))
 	}
 
 	switch d.mode {
 	case sendTyped:
 		var typedSoFar strings.Builder
-		for i, w := range chunks {
-			if i > 0 && !pause(ctx, typedChunkGap) {
-				finish(cancelledTyped("rest of the typed text"))
-				return
-			}
-			stop, answered := keepTyping(typedSoFar.String, boxWasEmpty)
+		for _, w := range chunks {
+			stop, answered := typedNext(prefix + typedSoFar.String())
 			if answered {
 				return
 			}
@@ -829,9 +919,9 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 					return
 				}
 			}
-			boxWasEmpty, pasteAbove, pre = !rr.BoxHasText, rr.MaxPaste, rr.Pre
+			boxKnown, pasteAbove, pre = knownOf(rr), rr.MaxPaste, rr.Pre
 		}
-		stop, answered := keepTyping(func() string { return d.text + string(keysWritten) }, boxWasEmpty && !pasted && !editedBox)
+		stop, answered := keepTyping(func() string { return prefix + d.text + string(keysWritten) }, boxKnown && !pasted && !editedBox)
 		if answered {
 			return
 		}
@@ -861,11 +951,11 @@ func (d *sendDelivery) deliverGated(ctx context.Context, done func(sendReport, e
 	// Step 6: the box check — a bounded settle wait (settleBox), to the
 	// SAME deadline, run at least once.
 	expect := BoxExpect{Class: d.class, TypedText: typedText, Pasted: pasted, PasteAbove: pasteAbove, TypedAt: typedAt, Pre: pre}
-	if boxWasEmpty && allPrintable && (d.text != "" || len(exactKeys) > 0) {
+	if boxKnown && allPrintable && (d.text != "" || len(exactKeys) > 0) {
 		// The box was empty when the first byte went in and nothing edited
 		// it, so its content is knowable. Pastes included: Claude shows them
 		// expanded in history, so the SENT key is what confirms them (phase 3).
-		expect.Exact = d.text + string(exactKeys)
+		expect.Exact = prefix + d.text + string(exactKeys)
 	}
 	settle, ok := d.settleBox(ctx, expect, deadline, wrote, rep, &waitedPre, fail, func() {
 		finish(cancelledTyped("enter"))

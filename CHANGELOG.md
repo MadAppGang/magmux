@@ -11,6 +11,47 @@ commit subjects and remain on the
 
 ## [Unreleased]
 
+## [0.20.4] - 2026-11-28
+
+### Fixed
+
+- **A gated typed send writes each chunk only once the input box shows what
+  was written before it.** The check before every chunk after the first was
+  a readiness check, and readiness never compares the box with the text: a
+  Claude Code that reads its input late still shows the earlier box, in raw
+  mode, with nothing changing, so readiness said ready and magmux kept
+  writing while nothing was being read. Claude Code then took more than 800
+  characters in one read and recorded the prompt as pasted content instead
+  of typed text. Now each chunk after the first waits until the box holds
+  exactly the text written so far, reading the box every 10 ms, to the send's
+  readiness deadline but never less than 1.2 s per chunk
+  (`SendTypedChunkMin`), so a reader slow on every chunk is not cut off
+  partway through a long prompt. The 8 ms timed gap between chunks is gone
+  from gated sends whose box content is known. A box that holds only the start
+  of what was written, an empty box included, is waited for rather than given
+  up after 1 s. The
+  stop reasons are unchanged, and nothing is ever retyped or cleared. One
+  visible consequence: a typed send whose box never shows its first chunk
+  stops after one write (`typingStopped`), where it used to write the whole
+  text into a box nobody was reading. Ungated typed sends, pastes and key
+  sends write the same bytes as before. `protocol.SendBudget` counts one box
+  read per typed write (`SendTypedVerifyStep`).
+
+### Added
+
+- **`expectBox` on `send`: gated typing into a box that already holds
+  something.** A gated send refused any box with text in it
+  (`busy`/`box_not_empty`), so nothing could type after a pasted image.
+  `"expectBox":"[Image #1]"` names what the box must hold: the send types
+  only into a box holding exactly that (anything else, an empty box
+  included, is waited for and then refused `busy`/`box_not_empty`, with
+  nothing written), and every check after it expects `expectBox` plus the
+  text written so far, the final verify included. It is refused
+  `bad_request` on a send that is not gated. The Go client has
+  `SendOptions.ExpectBox`.
+- **`capabilities: typed-verify expect-box` in `magmux --help`**, so a
+  driver can refuse an older magmux that lacks either.
+
 ## [0.20.3] - 2026-11-23
 
 ### Fixed

@@ -230,6 +230,8 @@ func (m *Magmux) sendOp() hub.Op {
 			"readyTimeoutMs": intProp("Gated pane: how long to wait for the input box to be ready, shared by every wait " +
 				"before the Enter. 0 = 10000; above 60000 is clamped."),
 			"noGate": boolProp("Skip the gate, the box verify and acceptance: the ungated behaviour, even into a dialog."),
+			"expectBox": strProp("Gated pane: what the input box already holds, e.g. \"[Image #1]\". The send types only into a box " +
+				"holding exactly this (else busy/box_not_empty, nothing written), and each later check expects it plus what was written."),
 		}))
 	op.Budget = m.sendBudgetOf
 	return op

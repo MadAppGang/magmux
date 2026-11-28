@@ -11,6 +11,8 @@ package mux
 import (
 	"strings"
 	"testing"
+
+	"github.com/MadAppGang/magmux/protocol"
 )
 
 // retypeClearCols and retypeClearKeys are the clear a retype would need: one
@@ -46,9 +48,9 @@ func TestNoEmptiedBoxSendWritesAClearOrASecondCopy(t *testing.T) {
 	}{
 		{"narrow pane", retypeClearCols - 4, sendRequest{text: "hello", enter: true}},
 		{"wide pane", 160, sendRequest{text: strings.Repeat("abcdefghij", 14), enter: true}},
-		{"typed multi-line", 0, sendRequest{mode: sendTyped, text: "first line\nsecond line", enter: true}},
+		{"typed multi-line", 0, sendRequest{mode: sendTyped, text: "first line\nsecond line", enter: true, readyTimeoutMs: 1000}},
 		{"bash mode", 0, sendRequest{text: "!ls -la", enter: true}},
-		{"typed too long to clear", 0, sendRequest{mode: sendTyped, text: strings.Repeat("abcdefgh ", 150), enter: true}},
+		{"typed too long to clear", 0, sendRequest{mode: sendTyped, text: strings.Repeat("abcdefgh ", 150), enter: true, readyTimeoutMs: 1000}},
 		{"auto one cell over the old cap", 0, sendRequest{text: strings.Repeat("a", 511), enter: true}},
 	} {
 		for _, cause := range []struct {
@@ -69,7 +71,18 @@ func TestNoEmptiedBoxSendWritesAClearOrASecondCopy(t *testing.T) {
 				}
 				o := runSend(t, m, c.req)
 				got := log.settle()
-				wantNotRetyped(t, o, cause.word)
+				if c.req.mode == sendTyped {
+					// A typed send writes its next chunk only once the box
+					// shows the first, so a box that stays empty stops the
+					// typing after one write: the never-drawn window is not
+					// what ends it, the deadline is.
+					wantNotRetyped(t, o)
+					if ty, _ := protocol.TypingOf(o.err); ty.Writes != 1 || ty.Stopped == "" {
+						t.Errorf("TypingOf = %+v, want typing stopped after the first write", ty)
+					}
+				} else {
+					wantNotRetyped(t, o, cause.word)
+				}
 				if strings.ContainsRune(got, 0x15) {
 					t.Errorf("bytes %q: want no ctrl-u clear", got)
 				}
@@ -78,12 +91,7 @@ func TestNoEmptiedBoxSendWritesAClearOrASecondCopy(t *testing.T) {
 				}
 				want := c.req.text
 				if c.req.mode == sendTyped {
-					// typed mode writes each newline as ctrl-j
-					var b strings.Builder
-					for _, w := range typedWrites(c.req.text) {
-						b.Write(w)
-					}
-					want = b.String()
+					want = string(typedWrites(c.req.text)[0])
 				}
 				if got != want {
 					t.Errorf("bytes: %d written (%q), want the text once (%d)", len(got), trimForLog(got), len(want))

@@ -486,12 +486,12 @@ func TestPreEnterDialogDismissedThenVerified(t *testing.T) {
 
 func TestDialogBetweenChunksStopsTyping(t *testing.T) {
 	text := strings.Repeat("x", 100) // four typed chunks
-	g := &fakeGate{readyFn: func(_ ReadinessQuery, n int) InputReadiness {
-		// 0 gate, 1 post-token, 2 before chunk 2, 3 before chunk 3
-		if n >= 3 {
-			return dialogUp("question", true)
+	// The box check before chunk 3 (the 64-rune prefix) shows a dialog.
+	g := &fakeGate{checkFn: func(want BoxExpect, _ int) BoxCheck {
+		if want.Exact != text && len(want.Exact) >= 64 {
+			return checkNotReady(dialogUp("question", true))
 		}
-		return readyNow()
+		return verifiedBox(verifiedExact)
 	}}
 	m, _, log := gatedMux(t, g)
 	o := runSend(t, m, sendRequest{mode: sendTyped, text: text, enter: true})
@@ -499,8 +499,8 @@ func TestDialogBetweenChunksStopsTyping(t *testing.T) {
 	if got := log.settle(); got != text[:64] {
 		t.Errorf("bytes %q (%d), want the first two chunks only", got, len(got))
 	}
-	if _, c, _ := g.counts(); c != 0 {
-		t.Errorf("the box was checked after typing was stopped by a dialog")
+	if e := g.lastExpect(); e.Exact != text[:64] {
+		t.Errorf("the box was checked (for %d runes) after typing was stopped by a dialog", len(e.Exact))
 	}
 }
 

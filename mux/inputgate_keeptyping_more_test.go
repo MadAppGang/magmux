@@ -17,6 +17,13 @@ import (
 
 // blinkAt answers not ready (no_input_box) at readiness call n == at, and
 // ready otherwise: one box-less frame between two writes.
+// fromWrite3 reports whether a box check of a typed send of text is made
+// before its third write or later (the 64-rune prefix onward), and is not
+// the final verify of the whole text.
+func fromWrite3(text string, want BoxExpect) bool {
+	return want.Exact != text && len(want.Exact) >= 64
+}
+
 func blinkAt(at int) func(ReadinessQuery, int) InputReadiness {
 	return func(_ ReadinessQuery, n int) InputReadiness {
 		if n == at {
@@ -55,10 +62,9 @@ func TestResumeStopsOnATerminalReset(t *testing.T) {
 	text := strings.Repeat("x", 100)
 	var log *byteLog
 	g := &fakeGate{
-		readyFn: blinkAt(3),
 		checkFn: func(want BoxExpect, _ int) BoxCheck {
 			c := childBox(&log, want)
-			if want.Exact != text {
+			if fromWrite3(text, want) {
 				c.TermiosChanged = true // the resume's read: the terminal reset since the first byte
 			}
 			return c
@@ -83,9 +89,8 @@ func TestResumeStopsOnASettledDifferentBox(t *testing.T) {
 	text := strings.Repeat("x", 100)
 	var log *byteLog
 	g := &fakeGate{
-		readyFn: blinkAt(3),
 		checkFn: func(want BoxExpect, _ int) BoxCheck {
-			if want.Exact != text {
+			if fromWrite3(text, want) {
 				return boxMismatchCheck("yyyy", "the box holds 4 of 64 non-space runes", false)
 			}
 			return childBox(&log, want)
@@ -116,9 +121,8 @@ func TestResumeStopsAtTheDeadlineOnABoxStillChanging(t *testing.T) {
 	text := strings.Repeat("x", 100)
 	var log *byteLog
 	g := &fakeGate{
-		readyFn: blinkAt(3),
 		checkFn: func(want BoxExpect, n int) BoxCheck {
-			if want.Exact != text {
+			if fromWrite3(text, want) {
 				box := strings.Repeat("y", 1+n%7)
 				return boxMismatchCheck(box, fmt.Sprintf("the box holds %d of 64 non-space runes", len(box)), false)
 			}
@@ -142,7 +146,6 @@ func TestResumeWaitsForAPrefixDrawnLate(t *testing.T) {
 	var log *byteLog
 	var clk lagClock
 	g := &fakeGate{
-		readyFn: blinkAt(3),
 		checkFn: func(want BoxExpect, _ int) BoxCheck {
 			if want.Exact != text && clk.since() < 500*time.Millisecond {
 				return boxMismatchCheck(want.Exact[:32], "the box holds 32 of 64 non-space runes", false)
@@ -167,7 +170,7 @@ func TestResumeWaitsForAPrefixDrawnLate(t *testing.T) {
 func TestResumeAsksForExactlyTheWrittenPrefix(t *testing.T) {
 	text := strings.Repeat("x", 100)
 	var log *byteLog
-	g := &fakeGate{readyFn: blinkAt(3), checkFn: func(want BoxExpect, _ int) BoxCheck { return childBox(&log, want) }}
+	g := &fakeGate{checkFn: func(want BoxExpect, _ int) BoxCheck { return childBox(&log, want) }}
 	m, _, l := gatedMux(t, g)
 	log = l
 	if o := runSend(t, m, sendRequest{mode: sendTyped, text: text, enter: true}); o.err != nil {
@@ -175,8 +178,20 @@ func TestResumeAsksForExactlyTheWrittenPrefix(t *testing.T) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if len(g.expects) == 0 || g.expects[0].Exact != text[:64] || g.expects[0].TypedAt.IsZero() || !g.expects[0].TypedText {
-		t.Fatalf("the resume's expect = %+v, want Exact = the 64 written runes and the first byte's time", g.expects)
+	// Before each write after the first, the box is asked for exactly what
+	// was written before it, in order; the final verify asks for the whole.
+	var asked []string
+	for _, e := range g.expects {
+		if e.TypedAt.IsZero() || !e.TypedText {
+			t.Fatalf("expect %+v lacks the first byte's time or TypedText", e)
+		}
+		if n := len(asked); n == 0 || asked[n-1] != e.Exact {
+			asked = append(asked, e.Exact)
+		}
+	}
+	want := []string{text[:32], text[:64], text[:96], text}
+	if strings.Join(asked, "|") != strings.Join(want, "|") {
+		t.Fatalf("the box was asked for %d prefixes %q, want the 32/64/96-rune prefixes then the whole text", len(asked), asked)
 	}
 }
 
@@ -233,7 +248,6 @@ func TestATokenHeldThroughTheResume(t *testing.T) {
 	g := &fakeGate{
 		// One blink before A's third write; the second send's own
 		// readiness calls all come later and are ready.
-		readyFn: blinkAt(3),
 		checkFn: func(want BoxExpect, _ int) BoxCheck {
 			if want.Exact != a { // the resume's prefix check
 				once.Do(func() { close(resuming) })
@@ -267,13 +281,12 @@ func TestAStoppedSendWithABlankTailPressesNoEnter(t *testing.T) {
 	text := strings.Repeat("x", 64) + "\n" // writes: 32, 32, newline
 	var log *byteLog
 	g := &fakeGate{
-		readyFn: blinkAt(3),
 		checkFn: func(want BoxExpect, _ int) BoxCheck {
 			c := BoxCheck{Readiness: readyNow(), Verdict: BoxMismatch, Detail: "short"}
 			if inputKey(log.String()) == inputKey(want.Exact) {
 				c = verifiedBox(verifiedExact)
 			}
-			if want.Exact != text {
+			if fromWrite3(text, want) {
 				c.TermiosChanged = true
 			}
 			return c
@@ -296,11 +309,17 @@ func TestAStoppedSendWithABlankTailPressesNoEnter(t *testing.T) {
 
 func TestADialogDuringTheResumeStopsTyping(t *testing.T) {
 	text := strings.Repeat("x", 100)
+	var log *byteLog
 	g := &fakeGate{
-		readyFn: blinkAt(3),
-		checkFn: func(BoxExpect, int) BoxCheck { return checkNotReady(dialogUp("permission", false)) },
+		checkFn: func(want BoxExpect, _ int) BoxCheck {
+			if fromWrite3(text, want) {
+				return checkNotReady(dialogUp("permission", false))
+			}
+			return childBox(&log, want)
+		},
 	}
-	m, _, log := gatedMux(t, g)
+	m, _, l := gatedMux(t, g)
+	log = l
 	o := runSend(t, m, sendRequest{mode: sendTyped, text: text, enter: true})
 	wantErr(t, o, protocol.CodeBusy, "dialog:permission", true)
 	got := log.settle()
@@ -313,18 +332,18 @@ func TestADialogDuringTheResumeStopsTyping(t *testing.T) {
 
 func TestADialogBetweenWritesStatesTheStop(t *testing.T) {
 	text := strings.Repeat("x", 100)
-	g := &fakeGate{readyFn: func(_ ReadinessQuery, n int) InputReadiness {
-		if n >= 3 {
-			return dialogUp("question", true)
+	g := &fakeGate{checkFn: func(want BoxExpect, _ int) BoxCheck {
+		if fromWrite3(text, want) {
+			return checkNotReady(dialogUp("question", true))
 		}
-		return readyNow()
+		return verifiedBox(verifiedExact)
 	}}
 	m, _, _ := gatedMux(t, g)
 	o := runSend(t, m, sendRequest{mode: sendTyped, text: text, enter: true})
 	wantErr(t, o, protocol.CodeBusy, "dialog:question", true)
 	wantTyping(t, m, o, 2, 4, protocol.TypingStoppedDialog)
-	if _, c, _ := g.counts(); c != 0 {
-		t.Errorf("a dialog between writes was followed by %d box checks, want none", c)
+	if e := g.lastExpect(); e.Exact != text[:64] {
+		t.Errorf("a dialog between writes was followed by a box check for %d runes, want none after it", len(e.Exact))
 	}
 }
 
@@ -332,8 +351,10 @@ func TestAPaneThatDiesDuringTheResume(t *testing.T) {
 	text := strings.Repeat("x", 100)
 	var p *Pane
 	g := &fakeGate{
-		readyFn: blinkAt(3),
-		checkFn: func(BoxExpect, int) BoxCheck {
+		checkFn: func(want BoxExpect, _ int) BoxCheck {
+			if !fromWrite3(text, want) {
+				return verifiedBox(verifiedExact)
+			}
 			p.mu.Lock()
 			p.dead = true
 			p.mu.Unlock()
@@ -355,8 +376,10 @@ func TestAResumeCancelledByQuiesce(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	g := &fakeGate{
-		readyFn: blinkAt(3),
-		checkFn: func(BoxExpect, int) BoxCheck {
+		checkFn: func(want BoxExpect, _ int) BoxCheck {
+			if !fromWrite3(text, want) {
+				return verifiedBox(verifiedExact)
+			}
 			cancel()
 			return checkNotReady(notReady(protocol.ReasonNoInputBox))
 		},

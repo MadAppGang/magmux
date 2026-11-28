@@ -1179,6 +1179,9 @@ type SendOptions struct {
 	DismissDialogs bool
 	ReadyTimeoutMs int
 	NoGate         bool
+	// ExpectBox (gated sends only) is what the input box already holds, e.g.
+	// "[Image #1]": the send types only into a box holding exactly it.
+	ExpectBox string
 }
 
 // submits reports whether the request ends in an Enter: enter (default
@@ -1244,6 +1247,9 @@ func (s *Session) SendWith(ctx context.Context, pane int, o SendOptions) (map[st
 	}
 	if o.NoGate {
 		msg["noGate"] = true
+	}
+	if o.ExpectBox != "" {
+		msg["expectBox"] = o.ExpectBox
 	}
 	if s.IsLegacy(ctx) {
 		// No reply to wait for; the broadcasts are the only feedback there is.
